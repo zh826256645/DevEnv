@@ -34,6 +34,25 @@ struct RuntimeInstallation: Codable, Identifiable, Sendable {
     let state: RuntimeState
     let error: String?
     let isEffective: Bool
+    let isInPath: Bool
+}
+
+extension RuntimeInstallation {
+    private enum CodingKeys: String, CodingKey {
+        case id, executable, actualExecutable, version, state, error, isEffective, isInPath
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        executable = try values.decode(String.self, forKey: .executable)
+        actualExecutable = try values.decodeIfPresent(String.self, forKey: .actualExecutable)
+        version = try values.decodeIfPresent(String.self, forKey: .version)
+        state = try values.decode(RuntimeState.self, forKey: .state)
+        error = try values.decodeIfPresent(String.self, forKey: .error)
+        isEffective = try values.decode(Bool.self, forKey: .isEffective)
+        isInPath = try values.decodeIfPresent(Bool.self, forKey: .isInPath) ?? true
+    }
 }
 
 struct RuntimeSnapshot: Codable, Identifiable, Sendable {
@@ -47,7 +66,7 @@ struct RuntimeSnapshot: Codable, Identifiable, Sendable {
     }
 
     var hasPathVersionConflict: Bool {
-        Set(installations.compactMap(\.version)).count > 1
+        Set(installations.filter(\.isInPath).compactMap(\.version)).count > 1
     }
 }
 
@@ -112,6 +131,12 @@ struct LiveMachineAccess: MachineAccess {
         process.arguments = arguments
         process.standardOutput = pipe
         process.standardError = pipe
+        if URL(fileURLWithPath: executable).lastPathComponent == "brew" {
+            var environment = ProcessInfo.processInfo.environment
+            environment["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+            environment["HOMEBREW_NO_INSTALL_FROM_API"] = "1"
+            process.environment = environment
+        }
         let finished = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in finished.signal() }
         do {
@@ -135,16 +160,23 @@ struct EnvironmentScanner: Sendable {
         let name: String
         let executable: String
         let arguments: [String]
+        let homebrewFormula: String
+    }
+
+    private struct HomebrewRuntimeInstallation: Sendable {
+        let runtimeID: String
+        let version: String
+        let executable: String
     }
 
     private let runtimeDefinitions = [
-        RuntimeDefinition(id: "node", name: "Node.js", executable: "node", arguments: ["--version"]),
-        RuntimeDefinition(id: "python", name: "Python", executable: "python3", arguments: ["--version"]),
-        RuntimeDefinition(id: "go", name: "Go", executable: "go", arguments: ["version"]),
-        RuntimeDefinition(id: "java", name: "Java", executable: "java", arguments: ["-version"]),
-        RuntimeDefinition(id: "rust", name: "Rust", executable: "rustc", arguments: ["--version"]),
-        RuntimeDefinition(id: "ruby", name: "Ruby", executable: "ruby", arguments: ["--version"]),
-        RuntimeDefinition(id: "lua", name: "Lua", executable: "lua", arguments: ["-v"]),
+        RuntimeDefinition(id: "node", name: "Node.js", executable: "node", arguments: ["--version"], homebrewFormula: "node"),
+        RuntimeDefinition(id: "python", name: "Python", executable: "python3", arguments: ["--version"], homebrewFormula: "python"),
+        RuntimeDefinition(id: "go", name: "Go", executable: "go", arguments: ["version"], homebrewFormula: "go"),
+        RuntimeDefinition(id: "java", name: "Java", executable: "java", arguments: ["-version"], homebrewFormula: "openjdk"),
+        RuntimeDefinition(id: "rust", name: "Rust", executable: "rustc", arguments: ["--version"], homebrewFormula: "rust"),
+        RuntimeDefinition(id: "ruby", name: "Ruby", executable: "ruby", arguments: ["--version"], homebrewFormula: "ruby"),
+        RuntimeDefinition(id: "lua", name: "Lua", executable: "lua", arguments: ["-v"], homebrewFormula: "lua"),
     ]
 
     private let machine: any MachineAccess
@@ -174,8 +206,18 @@ struct EnvironmentScanner: Sendable {
             diskFreeBytes: disk.freeBytes
         )
 
-        let runtimes = runtimeDefinitions.map { scanRuntime($0, path: path, issues: &issues) }
-        let homebrew = scanHomebrew(issues: &issues)
+        let homebrew = scanHomebrew(path: path, issues: &issues)
+        let homebrewInstallations = homebrew.available ? homebrew.executable.map {
+            scanHomebrewRuntimes(executable: $0, issues: &issues)
+        } ?? [] : []
+        let runtimes = runtimeDefinitions.map { definition in
+            scanRuntime(
+                definition,
+                path: path,
+                homebrew: homebrewInstallations.filter { $0.runtimeID == definition.id },
+                issues: &issues
+            )
+        }
         let snapshot = MachineSnapshot(
             schemaVersion: 2,
             scannedAt: Date(),
@@ -194,6 +236,7 @@ struct EnvironmentScanner: Sendable {
     private func scanRuntime(
         _ definition: RuntimeDefinition,
         path: [String],
+        homebrew: [HomebrewRuntimeInstallation],
         issues: inout [String]
     ) -> RuntimeSnapshot {
         var seenTargets: Set<String> = []
@@ -218,25 +261,101 @@ struct EnvironmentScanner: Sendable {
                 version: version,
                 state: version == nil ? .failed : .discovered,
                 error: error,
-                isEffective: installations.isEmpty
+                isEffective: installations.isEmpty,
+                isInPath: true
+            ))
+        }
+
+        for installation in homebrew.sorted(by: providerInstallationOrder) {
+            let executable = standardizedPath(installation.executable)
+            let available = machine.isExecutableFile(atPath: executable)
+            let actual = available ? standardizedPath(machine.resolvingSymlinksInPath(executable)) : executable
+            guard seenTargets.insert(actual).inserted else { continue }
+            let error = available ? nil : "可执行文件不可用"
+            if let error {
+                issues.append("\(definition.name)：\(error)（\(executable)）")
+            }
+            installations.append(RuntimeInstallation(
+                id: actual,
+                executable: executable,
+                actualExecutable: available && actual != executable ? actual : nil,
+                version: installation.version,
+                state: available ? .discovered : .failed,
+                error: error,
+                isEffective: false,
+                isInPath: false
             ))
         }
 
         return RuntimeSnapshot(id: definition.id, name: definition.name, installations: installations)
     }
 
-    private func scanHomebrew(issues: inout [String]) -> HomebrewSnapshot {
-        let candidates = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+    private func scanHomebrew(path: [String], issues: inout [String]) -> HomebrewSnapshot {
+        let pathCandidates = path.map { absoluteExecutable("brew", directory: $0) }
+        let candidates = pathCandidates + ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
         guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else {
             return HomebrewSnapshot(executable: nil, version: nil, available: false, error: nil)
         }
         let result = machine.command(executable: executable, arguments: ["--version"])
-        guard let version = normalizedVersion(result.output), result.status == 0 || !version.isEmpty else {
+        guard result.status == 0, !result.timedOut, let version = normalizedVersion(result.output) else {
             let error = result.timedOut ? "命令超时" : "版本读取失败"
             issues.append("Homebrew：\(error)")
             return HomebrewSnapshot(executable: executable, version: nil, available: false, error: error)
         }
         return HomebrewSnapshot(executable: executable, version: version, available: true, error: nil)
+    }
+
+    private func scanHomebrewRuntimes(
+        executable: String,
+        issues: inout [String]
+    ) -> [HomebrewRuntimeInstallation] {
+        let versionsResult = machine.command(executable: executable, arguments: ["list", "--formula", "--versions"])
+        guard versionsResult.status == 0, !versionsResult.timedOut else {
+            issues.append("Homebrew Runtime Provider：\(versionsResult.timedOut ? "命令超时" : "读取失败")")
+            return []
+        }
+
+        let formulaVersions = versionsResult.output.split(whereSeparator: \.isNewline).compactMap { line -> (RuntimeDefinition, String, [String])? in
+            let fields = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard fields.count > 1,
+                  let formula = fields.first,
+                  let definition = runtimeDefinitions.first(where: {
+                      formula == $0.homebrewFormula || formula.hasPrefix("\($0.homebrewFormula)@")
+                  }) else { return nil }
+            return (definition, formula, Array(fields.dropFirst()))
+        }
+        guard !formulaVersions.isEmpty else { return [] }
+
+        let cellarResult = machine.command(executable: executable, arguments: ["--cellar"])
+        guard cellarResult.status == 0,
+              !cellarResult.timedOut,
+              let cellar = normalizedVersion(cellarResult.output) else {
+            issues.append("Homebrew Runtime Provider：\(cellarResult.timedOut ? "命令超时" : "读取失败")")
+            return []
+        }
+
+        return formulaVersions.flatMap { definition, formula, versions in
+            versions.map { version in
+                HomebrewRuntimeInstallation(
+                    runtimeID: definition.id,
+                    version: version,
+                    executable: URL(fileURLWithPath: cellar, isDirectory: true)
+                        .appendingPathComponent(formula, isDirectory: true)
+                        .appendingPathComponent(version, isDirectory: true)
+                        .appendingPathComponent("bin", isDirectory: true)
+                        .appendingPathComponent(definition.executable)
+                        .path
+                )
+            }
+        }
+    }
+
+    private func providerInstallationOrder(
+        _ lhs: HomebrewRuntimeInstallation,
+        _ rhs: HomebrewRuntimeInstallation
+    ) -> Bool {
+        let versionOrder = lhs.version.compare(rhs.version, options: [.numeric, .caseInsensitive])
+        return versionOrder == .orderedSame ? lhs.executable < rhs.executable : versionOrder == .orderedDescending
     }
 
     private func pathEntries() -> [String] {

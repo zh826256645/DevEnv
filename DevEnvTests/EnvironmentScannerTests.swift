@@ -89,17 +89,111 @@ final class EnvironmentScannerTests: XCTestCase {
         }
     }
 
+    func testHomebrewDiscoversAllRuntimeTypesAndMergesPathDuplicate() {
+        let executables = Set([
+            "/custom/bin/brew",
+            "/custom/bin/node",
+            "/opt/homebrew/Cellar/python@3.13/3.13.4/bin/python3",
+            "/opt/homebrew/Cellar/go/1.23.1/bin/go",
+            "/opt/homebrew/Cellar/openjdk/23.0.1/bin/java",
+            "/opt/homebrew/Cellar/rust/1.80.0/bin/rustc",
+            "/opt/homebrew/Cellar/ruby/3.3.4/bin/ruby",
+            "/opt/homebrew/Cellar/lua/5.4.6/bin/lua",
+        ])
+        let outputs = [
+            "/custom/bin/brew --version": "Homebrew 4.5.0\n",
+            "/custom/bin/brew list --formula --versions": "node 22.3.0\npython@3.13 3.13.4\ngo 1.23.1\nopenjdk 23.0.1\nrust 1.80.0\nruby 3.3.4\nlua 5.4.6\n",
+            "/custom/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+            "/custom/bin/node --version": "v22.3.0\n",
+        ]
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/custom/bin"],
+            executables: executables,
+            resolvedPaths: ["/custom/bin/node": "/opt/homebrew/Cellar/node/22.3.0/bin/node"],
+            commandOutputs: outputs
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.homebrew.executable, "/custom/bin/brew")
+        XCTAssertTrue(snapshot.homebrew.available)
+        XCTAssertEqual(snapshot.homebrew.version, "4.5.0")
+        XCTAssertEqual(snapshot.runtimes.flatMap { $0.installations }.count, 7)
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.count, 1)
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.version, "22.3.0")
+        XCTAssertTrue(snapshot.runtimes.allSatisfy { $0.installations.count == 1 })
+    }
+
+    func testHomebrewOnlyInstallationsSortByVersionAndMissingExecutableStaysVisible() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: [
+                "/opt/homebrew/bin/brew",
+                "/opt/homebrew/Cellar/node/18.20.4/bin/node",
+                "/opt/homebrew/Cellar/node@20/20.15.1/bin/node",
+            ],
+            commandOutputs: [
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "node 18.20.4\nnode@20 20.15.1\nruby 3.3.4\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+            ]
+        )).scan().snapshot
+
+        let node = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "node" })
+        XCTAssertEqual(node.installations.map(\.version), ["20.15.1", "18.20.4"])
+        XCTAssertEqual(node.installations.map(\.executable), [
+            "/opt/homebrew/Cellar/node@20/20.15.1/bin/node",
+            "/opt/homebrew/Cellar/node/18.20.4/bin/node",
+        ])
+        XCTAssertFalse(node.hasPathVersionConflict)
+        let ruby = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "ruby" })
+        XCTAssertEqual(ruby.installations.first?.version, "3.3.4")
+        XCTAssertEqual(ruby.installations.first?.state, .failed)
+        XCTAssertEqual(ruby.installations.first?.error, "可执行文件不可用")
+        XCTAssertTrue(snapshot.issues.contains("Ruby：可执行文件不可用（/opt/homebrew/Cellar/ruby/3.3.4/bin/ruby）"))
+    }
+
+    func testHomebrewProviderFailureKeepsAvailabilityAndPathResults() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin", "/opt/homebrew/bin"],
+            executables: ["/opt/homebrew/bin/brew", "/bin/node"],
+            commandOutputs: [
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/bin/node --version": "v22.0.0\n",
+            ],
+            commandTimeouts: ["/opt/homebrew/bin/brew list --formula --versions"]
+        )).scan().snapshot
+
+        XCTAssertTrue(snapshot.homebrew.available)
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.version, "22.0.0")
+        XCTAssertTrue(snapshot.issues.contains("Homebrew Runtime Provider：命令超时"))
+    }
+
     func testV2SnapshotRoundTripsAndV1IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
         let store = SnapshotStore(fileURL: fileURL)
-        let snapshot = EnvironmentScanner(machine: StubMachine(path: [])).scan().snapshot
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/node"],
+            commandOutputs: ["/bin/node": "v22.0.0\n"]
+        )).scan().snapshot
 
         try store.save(snapshot)
         XCTAssertEqual(store.load()?.schemaVersion, 2)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
+        var runtimes = try XCTUnwrap(json["runtimes"] as? [[String: Any]])
+        for runtimeIndex in runtimes.indices {
+            var installations = try XCTUnwrap(runtimes[runtimeIndex]["installations"] as? [[String: Any]])
+            for installationIndex in installations.indices {
+                installations[installationIndex].removeValue(forKey: "isInPath")
+            }
+            runtimes[runtimeIndex]["installations"] = installations
+        }
+        json["runtimes"] = runtimes
+        try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
+        XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
+
         json["schemaVersion"] = 1
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
@@ -139,6 +233,7 @@ private struct StubMachine: MachineAccess {
     func resolvingSymlinksInPath(_ path: String) -> String { resolvedPaths[path, default: path] }
 
     func command(executable: String, arguments: [String]) -> MachineCommandResult {
+        let key = ([executable] + arguments).joined(separator: " ")
         switch executable {
         case "/usr/bin/sw_vers":
             return MachineCommandResult(output: arguments == ["-productVersion"] ? "15.0\n" : "24A1\n", status: 0, timedOut: false)
@@ -148,9 +243,9 @@ private struct StubMachine: MachineAccess {
             return MachineCommandResult(output: "1024\n", status: 0, timedOut: false)
         default:
             return MachineCommandResult(
-                output: commandOutputs[executable, default: ""],
-                status: commandStatuses[executable, default: 0],
-                timedOut: commandTimeouts.contains(executable)
+                output: commandOutputs[key, default: commandOutputs[executable, default: ""]],
+                status: commandStatuses[key, default: commandStatuses[executable, default: 0]],
+                timedOut: commandTimeouts.contains(key) || commandTimeouts.contains(executable)
             )
         }
     }
