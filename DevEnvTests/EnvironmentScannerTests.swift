@@ -303,6 +303,89 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(snapshot.issues.contains("Python：可执行文件不可用（/Users/test/.pyenv/versions/3.11.9/bin/python3）"))
     }
 
+    func testJavaHomeDiscoversRegisteredJDKsAndMergesDuplicates() {
+        let jdk17 = "/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home"
+        let jdk21 = "/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home"
+        let miseJDK = "/Users/test/.local/share/mise/installs/java/21.0.2"
+        let brewJDK = "/opt/homebrew/Cellar/openjdk/21.0.2"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/custom/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: [
+                "/custom/bin/java", "/usr/libexec/java_home", "\(jdk17)/bin/java", "\(jdk21)/bin/java", "\(miseJDK)/bin/java",
+                "/Users/test/.local/bin/mise", "/opt/homebrew/bin/brew", "\(brewJDK)/bin/java",
+            ],
+            resolvedPaths: [
+                "/custom/bin/java": jdk21 + "/bin/java",
+                "\(miseJDK)/bin/java": jdk21 + "/bin/java",
+                "\(brewJDK)/bin/java": jdk21 + "/bin/java",
+            ],
+            commandOutputs: [
+                "/custom/bin/java -version": "openjdk version \"21.0.2\"\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "openjdk 21.0.2\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+                "/usr/libexec/java_home -V": """
+                Matching Java Virtual Machines (2):
+                    21.0.2 (arm64) \"Oracle Corporation\" - \"Java SE 21.0.2\" \(jdk21)
+                    17.0.10 (arm64) \"Eclipse Adoptium\" - \"Eclipse Temurin 17.0.10\" \(jdk17)
+                """,
+                "/Users/test/.local/bin/mise ls --installed --json": """
+                {"java":[{"version":"21.0.2","install_path":"\(miseJDK)"}]}
+                """,
+            ]
+        )).scan().snapshot
+
+        let java = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "java" })
+        XCTAssertEqual(java.installations.map(\.version), ["21.0.2", "17.0.10"])
+        XCTAssertEqual(java.installations.map(\.executable), [
+            "/custom/bin/java",
+            "\(jdk17)/bin/java",
+        ])
+        XCTAssertEqual(java.installations.map(\.isInPath), [true, false])
+        XCTAssertFalse(java.hasPathVersionConflict)
+    }
+
+    func testJavaHomeRetainsUnavailableRegisteredJDK() {
+        let jdk = "/Library/Java/JavaVirtualMachines/missing.jdk/Contents/Home"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/usr/libexec/java_home"],
+            commandOutputs: [
+                "/usr/libexec/java_home -V": "    17.0.10 (arm64) \"Vendor\" - \"JDK 17\" \(jdk)\n",
+            ]
+        )).scan().snapshot
+
+        let java = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "java" })
+        XCTAssertEqual(java.installations.first?.version, "17.0.10")
+        XCTAssertEqual(java.installations.first?.executable, "\(jdk)/bin/java")
+        XCTAssertEqual(java.installations.first?.state, .failed)
+        XCTAssertEqual(java.installations.first?.error, "可执行文件不可用")
+        XCTAssertTrue(snapshot.issues.contains("Java：可执行文件不可用（\(jdk)/bin/java）"))
+    }
+
+    func testJavaHomeProviderFailuresAreIsolatedFromPathResults() {
+        let timedOut = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/java", "/usr/libexec/java_home"],
+            commandOutputs: ["/bin/java -version": "openjdk version \"21.0.2\"\n"],
+            commandTimeouts: ["/usr/libexec/java_home -V"]
+        )).scan().snapshot
+        XCTAssertEqual(timedOut.runtimes.first { $0.id == "java" }?.installations.first?.version, "21.0.2")
+        XCTAssertTrue(timedOut.issues.contains("java_home Java Runtime Provider：命令超时"))
+
+        let unparsable = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/java", "/usr/libexec/java_home"],
+            commandOutputs: [
+                "/bin/java -version": "openjdk version \"21.0.2\"\n",
+                "/usr/libexec/java_home -V": "garbage /tmp/jdk\n",
+            ]
+        )).scan().snapshot
+        XCTAssertEqual(unparsable.runtimes.first { $0.id == "java" }?.installations.first?.version, "21.0.2")
+        XCTAssertTrue(unparsable.issues.contains("java_home Java Runtime Provider：输出解析失败"))
+    }
+
     func testNVMUsesInheritedRootAndMergesPathDuplicate() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/custom/bin"],

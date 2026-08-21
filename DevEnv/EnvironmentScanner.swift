@@ -234,11 +234,13 @@ struct EnvironmentScanner: Sendable {
         let nvmInstallations = scanNVMInstallations(issues: &issues)
         let uvInstallations = scanUVInstallations(path: path, issues: &issues)
         let pyenvInstallations = scanPyenvInstallations(path: path, issues: &issues)
+        let javaHomeInstallations = scanJavaHomeInstallations(issues: &issues)
         let runtimes = runtimeDefinitions.map { definition in
             scanRuntime(
                 definition,
                 path: path,
-                providers: (homebrewInstallations + miseInstallations + nvmInstallations + uvInstallations + pyenvInstallations)
+                providers: (homebrewInstallations + miseInstallations + nvmInstallations + uvInstallations + pyenvInstallations
+                    + javaHomeInstallations)
                     .filter { $0.runtimeID == definition.id },
                 issues: &issues
             )
@@ -402,6 +404,34 @@ struct EnvironmentScanner: Sendable {
                 executable: standardizedPath("\(root)/versions/\(version)/bin/python3")
             )
         }
+    }
+
+    private func scanJavaHomeInstallations(issues: inout [String]) -> [RuntimeProviderInstallation] {
+        let executable = "/usr/libexec/java_home"
+        guard machine.isExecutableFile(atPath: executable) else { return [] }
+        let result = machine.command(executable: executable, arguments: ["-V"])
+        guard result.status == 0, !result.timedOut else {
+            issues.append("java_home Java Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            return []
+        }
+
+        let installations = result.output.split(whereSeparator: \.isNewline).compactMap { line -> RuntimeProviderInstallation? in
+            let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard value.range(of: #"^[0-9][^ ]* \([^)]*\) \"[^\"]+\" - \"[^\"]+\" /"#, options: .regularExpression) != nil,
+                  let pathStart = value.range(of: #" /"#, options: .backwards)?.upperBound else { return nil }
+            let version = String(value[..<value.firstIndex(of: " ")!])
+            let home = "/" + value[pathStart...]
+            let java = URL(fileURLWithPath: home, isDirectory: true)
+                .appendingPathComponent("bin", isDirectory: true)
+                .appendingPathComponent("java")
+                .path
+            return RuntimeProviderInstallation(runtimeID: "java", version: version, executable: java)
+        }
+        guard !installations.isEmpty else {
+            issues.append("java_home Java Runtime Provider：输出解析失败")
+            return []
+        }
+        return installations
     }
 
     private func nvmVersion(from directory: String) -> String? {
