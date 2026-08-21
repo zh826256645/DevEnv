@@ -15,3 +15,19 @@ _Avoid_: Project Environment
 **Environment Profile**:
 一套可移植的目标配置，描述期望存在的开发工具状态。
 _Avoid_: Environment
+
+**Environment Scan**:
+对当前 Mac 的 Machine Environment 进行一次只读观察，形成可展示的状态结果。
+_Avoid_: Environment Check, Health Check
+
+**Machine Snapshot**:
+一次 Environment Scan 产生的、描述主机基础信息与开发工具状态的结果。
+_Avoid_: Environment, System Profile
+
+**Runtime Installation**:
+本机可被发现的某个语言运行时实例，包含其版本与来源位置。
+_Avoid_: Runtime, Package
+
+**Homebrew Availability**:
+Homebrew 在当前 Mac 上是否可调用，以及可识别的安装位置。
+_Avoid_: Homebrew Environment
