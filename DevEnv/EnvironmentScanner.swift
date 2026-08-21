@@ -184,6 +184,11 @@ struct EnvironmentScanner: Sendable {
         }
     }
 
+    private struct UVInstallation: Decodable {
+        let version: String
+        let path: String
+    }
+
     private let runtimeDefinitions = [
         RuntimeDefinition(id: "node", name: "Node.js", executable: "node", arguments: ["--version"], homebrewFormula: "node"),
         RuntimeDefinition(id: "python", name: "Python", executable: "python3", arguments: ["--version"], homebrewFormula: "python"),
@@ -227,11 +232,13 @@ struct EnvironmentScanner: Sendable {
         } ?? [] : []
         let miseInstallations = scanMiseRuntimes(path: path, issues: &issues)
         let nvmInstallations = scanNVMInstallations(issues: &issues)
+        let uvInstallations = scanUVInstallations(path: path, issues: &issues)
+        let pyenvInstallations = scanPyenvInstallations(path: path, issues: &issues)
         let runtimes = runtimeDefinitions.map { definition in
             scanRuntime(
                 definition,
                 path: path,
-                providers: (homebrewInstallations + miseInstallations + nvmInstallations)
+                providers: (homebrewInstallations + miseInstallations + nvmInstallations + uvInstallations + pyenvInstallations)
                     .filter { $0.runtimeID == definition.id },
                 issues: &issues
             )
@@ -352,6 +359,48 @@ struct EnvironmentScanner: Sendable {
             let directory = "\(versionRoot)/\(entry)"
             guard let version = nvmVersion(from: directory) else { return nil }
             return RuntimeProviderInstallation(runtimeID: "node", version: version, executable: "\(directory)/bin/node")
+        }
+    }
+
+    private func scanUVInstallations(path: [String], issues: inout [String]) -> [RuntimeProviderInstallation] {
+        let candidates = path.map { absoluteExecutable("uv", directory: $0) }
+            + (machine.environment["HOME"].map { ["\($0)/.local/bin/uv"] } ?? [])
+            + ["/opt/homebrew/bin/uv", "/usr/local/bin/uv"]
+        guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else { return [] }
+        let result = machine.command(executable: executable, arguments: ["python", "list", "--only-installed", "--output-format", "json"])
+        guard result.status == 0, !result.timedOut else {
+            issues.append("uv Python Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            return []
+        }
+        guard let data = result.output.data(using: .utf8),
+              let installed = try? JSONDecoder().decode([UVInstallation].self, from: data) else {
+            issues.append("uv Python Runtime Provider：输出解析失败")
+            return []
+        }
+        return installed.map {
+            RuntimeProviderInstallation(runtimeID: "python", version: $0.version, executable: standardizedPath($0.path))
+        }
+    }
+
+    private func scanPyenvInstallations(path: [String], issues: inout [String]) -> [RuntimeProviderInstallation] {
+        let root = machine.environment["PYENV_ROOT"] ?? machine.environment["HOME"].map { "\($0)/.pyenv" }
+        guard let root, root.hasPrefix("/") else { return [] }
+        let candidates = path.map { absoluteExecutable("pyenv", directory: $0) }
+            + ["\(root)/bin/pyenv", "/opt/homebrew/bin/pyenv", "/usr/local/bin/pyenv"]
+        guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else { return [] }
+        let result = machine.command(executable: executable, arguments: ["versions", "--bare"])
+        guard result.status == 0, !result.timedOut else {
+            issues.append("pyenv Python Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            return []
+        }
+        return result.output.split(whereSeparator: \.isNewline).compactMap { line in
+            let version = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !version.isEmpty, version != "system" else { return nil }
+            return RuntimeProviderInstallation(
+                runtimeID: "python",
+                version: version,
+                executable: standardizedPath("\(root)/versions/\(version)/bin/python3")
+            )
         }
     }
 

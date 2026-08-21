@@ -235,6 +235,74 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(snapshot.issues.contains("mise Runtime Provider：命令超时"))
     }
 
+    func testUVAndPyenvDiscoverPythonInstallationsAndMergeDuplicate() {
+        let uvPython = "/Users/test/.local/share/uv/python/cpython-3.13.2/bin/python3"
+        let pyenvPython = "/custom/pyenv/versions/3.11.9/bin/python3"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/custom/bin"],
+            environment: ["HOME": "/Users/test", "PYENV_ROOT": "/custom/pyenv"],
+            executables: [
+                "/custom/bin/python3", "/custom/bin/uv", "/custom/bin/pyenv",
+                uvPython, pyenvPython, "/custom/pyenv/versions/3.13.2/bin/python3",
+            ],
+            resolvedPaths: [
+                "/custom/bin/python3": uvPython,
+                "/custom/pyenv/versions/3.13.2/bin/python3": uvPython,
+            ],
+            commandOutputs: [
+                "/custom/bin/python3 --version": "Python 3.13.2\n",
+                "/custom/bin/uv python list --only-installed --output-format json": """
+                [{"version":"3.12.1","path":"/Users/test/.local/share/uv/python/cpython-3.12.1/bin/python3"},{"version":"3.13.2","path":"\(uvPython)"}]
+                """,
+                "/custom/bin/pyenv versions --bare": "3.11.9\n3.13.2\n",
+            ]
+        )).scan().snapshot
+
+        let python = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "python" })
+        XCTAssertEqual(python.installations.map(\.version), ["3.13.2", "3.12.1", "3.11.9"])
+        XCTAssertEqual(python.installations.map(\.executable), [
+            "/custom/bin/python3",
+            "/Users/test/.local/share/uv/python/cpython-3.12.1/bin/python3",
+            pyenvPython,
+        ])
+        XCTAssertEqual(python.installations.map(\.isInPath), [true, false, false])
+        XCTAssertFalse(python.hasPathVersionConflict)
+    }
+
+    func testPythonProviderFailuresAreIsolatedFromPathResults() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin", "/custom/bin"],
+            environment: ["HOME": "/Users/test", "PYENV_ROOT": "/custom/pyenv"],
+            executables: ["/bin/python3", "/custom/bin/uv", "/custom/bin/pyenv"],
+            commandOutputs: ["/bin/python3 --version": "Python 3.12.0\n"],
+            commandStatuses: ["/custom/bin/pyenv versions --bare": 1],
+            commandTimeouts: ["/custom/bin/uv python list --only-installed --output-format json"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "python" }?.installations.first?.version, "3.12.0")
+        XCTAssertTrue(snapshot.issues.contains("uv Python Runtime Provider：命令超时"))
+        XCTAssertTrue(snapshot.issues.contains("pyenv Python Runtime Provider：读取失败"))
+    }
+
+    func testPythonProvidersRetainUnavailableInstallationsAndSortStable() {
+        let uvPython = "/Users/test/.local/share/uv/python/cpython-3.13.2/bin/python3"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/Users/test/.local/bin/uv", "/Users/test/.pyenv/bin/pyenv"],
+            commandOutputs: [
+                "/Users/test/.local/bin/uv python list --only-installed --output-format json": "[{\"version\":\"3.13.2\",\"path\":\"\(uvPython)\"}]",
+                "/Users/test/.pyenv/bin/pyenv versions --bare": "3.10.1\n3.11.9\n",
+            ]
+        )).scan().snapshot
+
+        let python = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "python" })
+        XCTAssertEqual(python.installations.map(\.version), ["3.13.2", "3.11.9", "3.10.1"])
+        XCTAssertTrue(python.installations.allSatisfy { $0.state == .failed && $0.error == "可执行文件不可用" })
+        XCTAssertTrue(snapshot.issues.contains("Python：可执行文件不可用（\(uvPython)）"))
+        XCTAssertTrue(snapshot.issues.contains("Python：可执行文件不可用（/Users/test/.pyenv/versions/3.11.9/bin/python3）"))
+    }
+
     func testNVMUsesInheritedRootAndMergesPathDuplicate() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/custom/bin"],
