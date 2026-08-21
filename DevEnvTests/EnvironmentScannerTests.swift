@@ -386,6 +386,77 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(unparsable.issues.contains("java_home Java Runtime Provider：输出解析失败"))
     }
 
+    func testRustupDiscoversToolchainsAndMergesPathDuplicate() {
+        let rustupRoot = "/custom/rustup"
+        let stableRustc = "\(rustupRoot)/toolchains/stable-aarch64-apple-darwin/bin/rustc"
+        let oldRustc = "\(rustupRoot)/toolchains/1.82.0-aarch64-apple-darwin/bin/rustc"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/custom/bin"],
+            environment: ["HOME": "/Users/test", "RUSTUP_HOME": rustupRoot],
+            executables: [
+                "/custom/bin/rustc", "/custom/bin/rustup", stableRustc, oldRustc,
+            ],
+            resolvedPaths: ["/custom/bin/rustc": stableRustc],
+            commandOutputs: [
+                "/custom/bin/rustc --version": "rustc 1.85.0 (abc)\n",
+                "/custom/bin/rustup toolchain list": "stable-aarch64-apple-darwin (default)\n1.82.0-aarch64-apple-darwin\n",
+            ]
+        )).scan().snapshot
+
+        let rust = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "rust" })
+        XCTAssertEqual(rust.installations.map(\.version), ["1.85.0", "1.82.0-aarch64-apple-darwin"])
+        XCTAssertEqual(rust.installations.map(\.executable), ["/custom/bin/rustc", oldRustc])
+        XCTAssertEqual(rust.installations.map(\.isInPath), [true, false])
+        XCTAssertTrue(rust.installations.first?.isEffective == true)
+        XCTAssertFalse(rust.hasPathVersionConflict)
+    }
+
+    func testRustupRetainsUnavailableToolchain() {
+        let root = "/Users/test/.rustup"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/Users/test/.cargo/bin/rustup"],
+            commandOutputs: [
+                "/Users/test/.cargo/bin/rustup toolchain list": "1.82.0-aarch64-apple-darwin\n",
+            ]
+        )).scan().snapshot
+
+        let rust = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "rust" })
+        XCTAssertEqual(rust.installations.first?.version, "1.82.0-aarch64-apple-darwin")
+        XCTAssertEqual(rust.installations.first?.executable, "\(root)/toolchains/1.82.0-aarch64-apple-darwin/bin/rustc")
+        XCTAssertEqual(rust.installations.first?.state, .failed)
+        XCTAssertTrue(snapshot.issues.contains("Rust：可执行文件不可用（\(root)/toolchains/1.82.0-aarch64-apple-darwin/bin/rustc）"))
+    }
+
+    func testRustupFailureKeepsPathResults() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/bin/rustc", "/bin/rustup"],
+            commandOutputs: ["/bin/rustc --version": "rustc 1.85.0 (abc)\n"],
+            commandTimeouts: ["/bin/rustup toolchain list"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "rust" }?.installations.first?.version, "1.85.0")
+        XCTAssertTrue(snapshot.issues.contains("rustup Rust Runtime Provider：命令超时"))
+    }
+
+    func testRustupUnparseableOutputIsIsolated() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/bin/rustc", "/bin/rustup"],
+            commandOutputs: [
+                "/bin/rustc --version": "rustc 1.85.0 (abc)\n",
+                "/bin/rustup toolchain list": "",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "rust" }?.installations.first?.version, "1.85.0")
+        XCTAssertTrue(snapshot.issues.contains("rustup Rust Runtime Provider：输出解析失败"))
+    }
+
     func testNVMUsesInheritedRootAndMergesPathDuplicate() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/custom/bin"],

@@ -235,12 +235,13 @@ struct EnvironmentScanner: Sendable {
         let uvInstallations = scanUVInstallations(path: path, issues: &issues)
         let pyenvInstallations = scanPyenvInstallations(path: path, issues: &issues)
         let javaHomeInstallations = scanJavaHomeInstallations(issues: &issues)
+        let rustupInstallations = scanRustupInstallations(path: path, issues: &issues)
         let runtimes = runtimeDefinitions.map { definition in
             scanRuntime(
                 definition,
                 path: path,
                 providers: (homebrewInstallations + miseInstallations + nvmInstallations + uvInstallations + pyenvInstallations
-                    + javaHomeInstallations)
+                    + javaHomeInstallations + rustupInstallations)
                     .filter { $0.runtimeID == definition.id },
                 issues: &issues
             )
@@ -429,6 +430,42 @@ struct EnvironmentScanner: Sendable {
         }
         guard !installations.isEmpty else {
             issues.append("java_home Java Runtime Provider：输出解析失败")
+            return []
+        }
+        return installations
+    }
+
+    private func scanRustupInstallations(path: [String], issues: inout [String]) -> [RuntimeProviderInstallation] {
+        let candidates = path.map { absoluteExecutable("rustup", directory: $0) }
+            + (machine.environment["CARGO_HOME"].map { ["\($0)/bin/rustup"] } ?? [])
+            + (machine.environment["HOME"].map { ["\($0)/.cargo/bin/rustup"] } ?? [])
+            + ["/opt/homebrew/bin/rustup", "/usr/local/bin/rustup"]
+        guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else { return [] }
+
+        let root = machine.environment["RUSTUP_HOME"] ?? machine.environment["HOME"].map { "\($0)/.rustup" }
+        guard let root, root.hasPrefix("/") else { return [] }
+        let result = machine.command(executable: executable, arguments: ["toolchain", "list"])
+        guard result.status == 0, !result.timedOut else {
+            issues.append("rustup Rust Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            return []
+        }
+
+        let lines = result.output.split(whereSeparator: \.isNewline)
+        if lines.count == 1, lines[0].trimmingCharacters(in: .whitespacesAndNewlines) == "no installed toolchains" {
+            return []
+        }
+        let installations = lines.compactMap { line -> RuntimeProviderInstallation? in
+            guard let name = line.split(whereSeparator: \.isWhitespace).first,
+                  !name.contains("/"), !name.contains("..") else { return nil }
+            let toolchain = String(name)
+            return RuntimeProviderInstallation(
+                runtimeID: "rust",
+                version: toolchain,
+                executable: standardizedPath("\(root)/toolchains/\(toolchain)/bin/rustc")
+            )
+        }
+        guard !installations.isEmpty else {
+            issues.append("rustup Rust Runtime Provider：输出解析失败")
             return []
         }
         return installations
