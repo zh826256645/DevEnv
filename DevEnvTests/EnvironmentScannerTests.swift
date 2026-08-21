@@ -538,6 +538,80 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertFalse(snapshot.issues.contains { $0.contains("v20-cache") || $0.contains("v1.tmp") })
     }
 
+    func testRbenvDiscoversVersionsFromDefaultRoot() {
+        let root = "/Users/test/.rbenv"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: [
+                "/opt/homebrew/bin/rbenv",
+                "\(root)/versions/3.3.4/bin/ruby",
+                "\(root)/versions/3.2.2/bin/ruby",
+            ],
+            commandOutputs: [
+                "/opt/homebrew/bin/rbenv versions --bare": "3.3.4\n3.2.2\nsystem\n",
+            ]
+        )).scan().snapshot
+
+        let ruby = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "ruby" })
+        XCTAssertEqual(ruby.installations.map(\.version), ["3.3.4", "3.2.2"])
+        XCTAssertEqual(ruby.installations.map(\.executable), [
+            "\(root)/versions/3.3.4/bin/ruby",
+            "\(root)/versions/3.2.2/bin/ruby",
+        ])
+        XCTAssertTrue(ruby.installations.allSatisfy { $0.state == .discovered && !$0.isInPath })
+    }
+
+    func testRbenvUsesInheritedRootAndMergesPathHomebrewAndMise() {
+        let root = "/custom/rbenv"
+        let rubyPath = "/custom/bin/ruby"
+        let rbenvRuby = "\(root)/versions/3.3.4/bin/ruby"
+        let brewRuby = "/opt/homebrew/Cellar/ruby/3.3.4/bin/ruby"
+        let miseRuby = "/custom/mise/installs/ruby/3.3.4/bin/ruby"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/custom/bin"],
+            environment: ["HOME": "/Users/test", "RBENV_ROOT": root],
+            executables: [
+                rubyPath, "/custom/bin/rbenv", "/custom/bin/mise", "/opt/homebrew/bin/brew",
+                rbenvRuby, brewRuby, miseRuby,
+                "\(root)/versions/3.2.2/bin/ruby",
+            ],
+            resolvedPaths: [
+                rubyPath: rbenvRuby,
+                brewRuby: rbenvRuby,
+                miseRuby: rbenvRuby,
+            ],
+            commandOutputs: [
+                "\(rubyPath) --version": "ruby 3.3.4 (revision)\n",
+                "/custom/bin/rbenv versions --bare": "3.3.4\n3.2.2\n",
+                "/custom/bin/mise ls --installed --json": "{\"ruby\":[{\"version\":\"3.3.4\",\"install_path\":\"/custom/mise/installs/ruby/3.3.4\"}]}\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "ruby 3.3.4\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+            ]
+        )).scan().snapshot
+
+        let ruby = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "ruby" })
+        XCTAssertEqual(ruby.installations.map(\.version), ["3.3.4", "3.2.2"])
+        XCTAssertEqual(ruby.installations.map(\.executable), [rubyPath, "\(root)/versions/3.2.2/bin/ruby"])
+        XCTAssertEqual(ruby.installations.map(\.isInPath), [true, false])
+        XCTAssertFalse(ruby.hasPathVersionConflict)
+    }
+
+    func testRbenvFailureKeepsRubyPathResultIsolated() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/bin/ruby", "/opt/homebrew/bin/rbenv"],
+            commandOutputs: ["/bin/ruby --version": "ruby 3.3.4 (revision)\n"],
+            commandTimeouts: ["/opt/homebrew/bin/rbenv versions --bare"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "ruby" }?.installations.first?.version, "3.3.4")
+        XCTAssertTrue(snapshot.issues.contains("rbenv Ruby Runtime Provider：命令超时"))
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Ruby：") })
+    }
+
     func testV2SnapshotRoundTripsAndV1IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

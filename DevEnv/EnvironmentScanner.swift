@@ -236,12 +236,13 @@ struct EnvironmentScanner: Sendable {
         let pyenvInstallations = scanPyenvInstallations(path: path, issues: &issues)
         let javaHomeInstallations = scanJavaHomeInstallations(issues: &issues)
         let rustupInstallations = scanRustupInstallations(path: path, issues: &issues)
+        let rbenvInstallations = scanRbenvInstallations(path: path, issues: &issues)
         let runtimes = runtimeDefinitions.map { definition in
             scanRuntime(
                 definition,
                 path: path,
                 providers: (homebrewInstallations + miseInstallations + nvmInstallations + uvInstallations + pyenvInstallations
-                    + javaHomeInstallations + rustupInstallations)
+                    + javaHomeInstallations + rustupInstallations + rbenvInstallations)
                     .filter { $0.runtimeID == definition.id },
                 issues: &issues
             )
@@ -466,6 +467,35 @@ struct EnvironmentScanner: Sendable {
         }
         guard !installations.isEmpty else {
             issues.append("rustup Rust Runtime Provider：输出解析失败")
+            return []
+        }
+        return installations
+    }
+
+    private func scanRbenvInstallations(path: [String], issues: inout [String]) -> [RuntimeProviderInstallation] {
+        let root = machine.environment["RBENV_ROOT"] ?? machine.environment["HOME"].map { "\($0)/.rbenv" }
+        guard let root, root.hasPrefix("/") else { return [] }
+        let candidates = path.map { absoluteExecutable("rbenv", directory: $0) }
+            + ["\(root)/bin/rbenv", "/opt/homebrew/bin/rbenv", "/usr/local/bin/rbenv"]
+        guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else { return [] }
+
+        let result = machine.command(executable: executable, arguments: ["versions", "--bare"])
+        guard result.status == 0, !result.timedOut else {
+            issues.append("rbenv Ruby Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            return []
+        }
+        let lines = result.output.split(whereSeparator: \.isNewline)
+        let installations = lines.compactMap { line -> RuntimeProviderInstallation? in
+            let version = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !version.isEmpty, version != "system" else { return nil }
+            return RuntimeProviderInstallation(
+                runtimeID: "ruby",
+                version: version,
+                executable: standardizedPath("\(root)/versions/\(version)/bin/ruby")
+            )
+        }
+        guard !lines.isEmpty else {
+            issues.append("rbenv Ruby Runtime Provider：输出解析失败")
             return []
         }
         return installations
