@@ -167,6 +167,72 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(snapshot.issues.contains("Homebrew Runtime Provider：命令超时"))
     }
 
+    func testNVMUsesInheritedRootAndMergesPathDuplicate() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/custom/bin"],
+            environment: ["HOME": "/Users/test", "NVM_DIR": "/opt/nvm"],
+            executables: [
+                "/custom/bin/node",
+                "/opt/nvm/versions/node/v22.3.0/bin/node",
+                "/opt/nvm/versions/node/v20.15.1/bin/node",
+                "/Users/test/.nvm/versions/node/v18.20.4/bin/node",
+            ],
+            resolvedPaths: [
+                "/custom/bin/node": "/opt/nvm/versions/node/v22.3.0/bin/node",
+            ],
+            commandOutputs: ["/custom/bin/node --version": "v22.3.0\n"],
+            directoryContents: [
+                "/opt/nvm/versions/node": ["v22.3.0", "v20.15.1", "aliases"],
+                "/Users/test/.nvm/versions/node": ["v18.20.4"],
+            ]
+        )).scan().snapshot
+
+        let node = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "node" })
+        XCTAssertEqual(node.installations.map(\.version), ["22.3.0", "20.15.1"])
+        XCTAssertEqual(node.installations.map(\.executable), [
+            "/custom/bin/node",
+            "/opt/nvm/versions/node/v20.15.1/bin/node",
+        ])
+        XCTAssertEqual(node.installations.map(\.isInPath), [true, false])
+        XCTAssertEqual(node.installations.first?.actualExecutable, "/opt/nvm/versions/node/v22.3.0/bin/node")
+    }
+
+    func testNVMRetainsUnavailableInstallationWithoutRunningNode() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            directoryContents: ["/Users/test/.nvm/versions/node": ["v18.20.4"]]
+        )).scan().snapshot
+
+        let node = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "node" })
+        XCTAssertEqual(node.installations.first?.version, "18.20.4")
+        XCTAssertEqual(node.installations.first?.state, .failed)
+        XCTAssertEqual(node.installations.first?.error, "可执行文件不可用")
+        XCTAssertTrue(snapshot.issues.contains("Node.js：可执行文件不可用（/Users/test/.nvm/versions/node/v18.20.4/bin/node）"))
+    }
+
+    func testNVMReadFailureKeepsPathResults() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["NVM_DIR": "/locked/nvm"],
+            executables: ["/bin/node"],
+            commandOutputs: ["/bin/node --version": "v22.0.0\n"],
+            directoryFailures: ["/locked/nvm/versions/node"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.version, "22.0.0")
+        XCTAssertTrue(snapshot.issues.contains("nvm Runtime Provider：读取失败（/locked/nvm/versions/node）"))
+    }
+
+    func testMissingNVMDirectoryIsNotAProviderFailure() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"]
+        )).scan().snapshot
+
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("nvm Runtime Provider：") })
+    }
+
     func testV2SnapshotRoundTripsAndV1IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -209,26 +275,39 @@ private struct StubMachine: MachineAccess {
     let commandOutputs: [String: String]
     let commandStatuses: [String: Int32]
     let commandTimeouts: Set<String>
+    let directoryContents: [String: [String]]
+    let directoryFailures: Set<String>
 
     init(
         path: [String],
+        environment: [String: String] = [:],
         executables: Set<String> = [],
         resolvedPaths: [String: String] = [:],
         commandOutputs: [String: String] = [:],
         commandStatuses: [String: Int32] = [:],
-        commandTimeouts: Set<String> = []
+        commandTimeouts: Set<String> = [],
+        directoryContents: [String: [String]] = [:],
+        directoryFailures: Set<String> = []
     ) {
-        environment = ["PATH": path.joined(separator: ":")]
+        self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
         self.executables = executables
         self.resolvedPaths = resolvedPaths
         self.commandOutputs = commandOutputs
         self.commandStatuses = commandStatuses
         self.commandTimeouts = commandTimeouts
+        self.directoryContents = directoryContents
+        self.directoryFailures = directoryFailures
     }
 
     func diskSpace() -> DiskSpace { DiskSpace(totalBytes: 1, freeBytes: 1) }
 
     func isExecutableFile(atPath path: String) -> Bool { executables.contains(path) }
+
+    func directoryEntries(atPath path: String) throws -> [String] {
+        if directoryFailures.contains(path) { throw CocoaError(.fileReadNoPermission) }
+        guard let entries = directoryContents[path] else { throw CocoaError(.fileReadNoSuchFile) }
+        return entries
+    }
 
     func resolvingSymlinksInPath(_ path: String) -> String { resolvedPaths[path, default: path] }
 

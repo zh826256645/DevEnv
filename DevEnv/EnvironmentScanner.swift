@@ -99,6 +99,7 @@ protocol MachineAccess: Sendable {
     var currentDirectoryPath: String { get }
     func diskSpace() -> DiskSpace
     func isExecutableFile(atPath path: String) -> Bool
+    func directoryEntries(atPath path: String) throws -> [String]
     func resolvingSymlinksInPath(_ path: String) -> String
     func command(executable: String, arguments: [String]) -> MachineCommandResult
 }
@@ -118,6 +119,10 @@ struct LiveMachineAccess: MachineAccess {
 
     func isExecutableFile(atPath path: String) -> Bool {
         FileManager.default.isExecutableFile(atPath: path)
+    }
+
+    func directoryEntries(atPath path: String) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: path)
     }
 
     func resolvingSymlinksInPath(_ path: String) -> String {
@@ -163,7 +168,7 @@ struct EnvironmentScanner: Sendable {
         let homebrewFormula: String
     }
 
-    private struct HomebrewRuntimeInstallation: Sendable {
+    private struct RuntimeProviderInstallation: Sendable {
         let runtimeID: String
         let version: String
         let executable: String
@@ -210,11 +215,12 @@ struct EnvironmentScanner: Sendable {
         let homebrewInstallations = homebrew.available ? homebrew.executable.map {
             scanHomebrewRuntimes(executable: $0, issues: &issues)
         } ?? [] : []
+        let nvmInstallations = scanNVMRuntimes(issues: &issues)
         let runtimes = runtimeDefinitions.map { definition in
             scanRuntime(
                 definition,
                 path: path,
-                homebrew: homebrewInstallations.filter { $0.runtimeID == definition.id },
+                providers: (homebrewInstallations + nvmInstallations).filter { $0.runtimeID == definition.id },
                 issues: &issues
             )
         }
@@ -236,7 +242,7 @@ struct EnvironmentScanner: Sendable {
     private func scanRuntime(
         _ definition: RuntimeDefinition,
         path: [String],
-        homebrew: [HomebrewRuntimeInstallation],
+        providers: [RuntimeProviderInstallation],
         issues: inout [String]
     ) -> RuntimeSnapshot {
         var seenTargets: Set<String> = []
@@ -266,7 +272,7 @@ struct EnvironmentScanner: Sendable {
             ))
         }
 
-        for installation in homebrew.sorted(by: providerInstallationOrder) {
+        for installation in providers.sorted(by: providerInstallationOrder) {
             let executable = standardizedPath(installation.executable)
             let available = machine.isExecutableFile(atPath: executable)
             let actual = available ? standardizedPath(machine.resolvingSymlinksInPath(executable)) : executable
@@ -290,6 +296,33 @@ struct EnvironmentScanner: Sendable {
         return RuntimeSnapshot(id: definition.id, name: definition.name, installations: installations)
     }
 
+    private func scanNVMRuntimes(issues: inout [String]) -> [RuntimeProviderInstallation] {
+        guard let root = machine.environment["NVM_DIR"] ?? machine.environment["HOME"].map({ "\($0)/.nvm" }),
+              root.hasPrefix("/") else { return [] }
+        let versionRoot = standardizedPath("\(root)/versions/node")
+        let entries: [String]
+        do {
+            entries = try machine.directoryEntries(atPath: versionRoot)
+        } catch {
+            let fileError = error as NSError
+            if fileError.domain != NSCocoaErrorDomain || fileError.code != CocoaError.fileReadNoSuchFile.rawValue {
+                issues.append("nvm Runtime Provider：读取失败（\(versionRoot)）")
+            }
+            return []
+        }
+        return entries.compactMap { entry in
+            let directory = "\(versionRoot)/\(entry)"
+            guard let version = nvmVersion(from: directory) else { return nil }
+            return RuntimeProviderInstallation(runtimeID: "node", version: version, executable: "\(directory)/bin/node")
+        }
+    }
+
+    private func nvmVersion(from directory: String) -> String? {
+        let name = URL(fileURLWithPath: directory).lastPathComponent
+        guard name.first == "v", name.dropFirst().first?.isNumber == true else { return nil }
+        return String(name.dropFirst())
+    }
+
     private func scanHomebrew(path: [String], issues: inout [String]) -> HomebrewSnapshot {
         let pathCandidates = path.map { absoluteExecutable("brew", directory: $0) }
         let candidates = pathCandidates + ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
@@ -308,7 +341,7 @@ struct EnvironmentScanner: Sendable {
     private func scanHomebrewRuntimes(
         executable: String,
         issues: inout [String]
-    ) -> [HomebrewRuntimeInstallation] {
+    ) -> [RuntimeProviderInstallation] {
         let versionsResult = machine.command(executable: executable, arguments: ["list", "--formula", "--versions"])
         guard versionsResult.status == 0, !versionsResult.timedOut else {
             issues.append("Homebrew Runtime Provider：\(versionsResult.timedOut ? "命令超时" : "读取失败")")
@@ -336,7 +369,7 @@ struct EnvironmentScanner: Sendable {
 
         return formulaVersions.flatMap { definition, formula, versions in
             versions.map { version in
-                HomebrewRuntimeInstallation(
+                RuntimeProviderInstallation(
                     runtimeID: definition.id,
                     version: version,
                     executable: URL(fileURLWithPath: cellar, isDirectory: true)
@@ -351,8 +384,8 @@ struct EnvironmentScanner: Sendable {
     }
 
     private func providerInstallationOrder(
-        _ lhs: HomebrewRuntimeInstallation,
-        _ rhs: HomebrewRuntimeInstallation
+        _ lhs: RuntimeProviderInstallation,
+        _ rhs: RuntimeProviderInstallation
     ) -> Bool {
         let versionOrder = lhs.version.compare(rhs.version, options: [.numeric, .caseInsensitive])
         return versionOrder == .orderedSame ? lhs.executable < rhs.executable : versionOrder == .orderedDescending
