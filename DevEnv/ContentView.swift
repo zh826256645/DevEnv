@@ -111,16 +111,14 @@ struct ContentView: View {
 
     private func runtimesSection(_ runtimes: [RuntimeSnapshot]) -> some View {
         GroupBox("Runtimes") {
-            VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(runtimes) { runtime in
-                    HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: runtime.state == .discovered ? "checkmark.circle.fill" : "circle.dashed")
-                            .foregroundStyle(runtime.state == .discovered ? .green : .secondary)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(runtime.name).fontWeight(.medium)
-                            Text(runtime.detail)
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
+                    HStack {
+                        Text(runtime.name).fontWeight(.semibold)
+                        if runtime.hasPathVersionConflict {
+                            Text("PATH 版本冲突")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
                         }
                         Spacer()
                         Text(runtime.state.label)
@@ -128,9 +126,50 @@ struct ContentView: View {
                             .foregroundStyle(runtime.state == .failed ? .orange : .secondary)
                     }
                     .padding(.vertical, 9)
+
+                    if runtime.installations.isEmpty {
+                        Text("未在当前 PATH 中发现")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 28)
+                            .padding(.bottom, 9)
+                    } else {
+                        ForEach(runtime.installations) { installation in
+                            runtimeInstallationRow(installation)
+                                .padding(.leading, 12)
+                                .padding(.bottom, 9)
+                        }
+                    }
                     if runtime.id != runtimes.last?.id { Divider() }
                 }
             }
+        }
+    }
+
+    private func runtimeInstallationRow(_ installation: RuntimeInstallation) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: installation.state == .discovered ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .foregroundStyle(installation.state == .discovered ? .green : .orange)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(installation.version ?? installation.error ?? "版本读取失败")
+                    if installation.isEffective {
+                        Text("Effective")
+                            .font(.caption)
+                            .foregroundStyle(.blue)
+                    }
+                }
+                Text(installation.executable)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                if let actual = installation.actualExecutable {
+                    Text("实际路径：\(actual)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .textSelection(.enabled)
+            Spacer()
         }
     }
 
@@ -190,14 +229,6 @@ struct ContentView: View {
     private func diskText(total: UInt64?, free: UInt64?) -> String {
         guard let total, let free else { return "读取失败" }
         return "总计 \(byteCount(total))，可用 \(byteCount(free))"
-    }
-}
-
-private extension RuntimeSnapshot {
-    var detail: String {
-        if let version, let executable { return "\(version) · \(executable)" }
-        if let error { return error }
-        return "未在当前 PATH 中发现"
     }
 }
 

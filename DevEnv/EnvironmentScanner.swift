@@ -26,13 +26,29 @@ enum RuntimeState: String, Codable, Sendable {
     case failed
 }
 
-struct RuntimeSnapshot: Codable, Identifiable, Sendable {
+struct RuntimeInstallation: Codable, Identifiable, Sendable {
     let id: String
-    let name: String
-    let executable: String?
+    let executable: String
+    let actualExecutable: String?
     let version: String?
     let state: RuntimeState
     let error: String?
+    let isEffective: Bool
+}
+
+struct RuntimeSnapshot: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let installations: [RuntimeInstallation]
+
+    var state: RuntimeState {
+        if installations.isEmpty { return .unavailable }
+        return installations.contains { $0.state == .discovered } ? .discovered : .failed
+    }
+
+    var hasPathVersionConflict: Bool {
+        Set(installations.compactMap(\.version)).count > 1
+    }
 }
 
 struct HomebrewSnapshot: Codable, Sendable {
@@ -47,13 +63,73 @@ struct ScanResult: Sendable {
     let canPersist: Bool
 }
 
-struct EnvironmentScanner: Sendable {
-    private struct CommandResult {
-        let output: String
-        let status: Int32
-        let timedOut: Bool
+struct MachineCommandResult: Sendable {
+    let output: String
+    let status: Int32
+    let timedOut: Bool
+}
+
+struct DiskSpace: Sendable {
+    let totalBytes: UInt64?
+    let freeBytes: UInt64?
+}
+
+protocol MachineAccess: Sendable {
+    var environment: [String: String] { get }
+    var hostName: String { get }
+    var currentDirectoryPath: String { get }
+    func diskSpace() -> DiskSpace
+    func isExecutableFile(atPath path: String) -> Bool
+    func resolvingSymlinksInPath(_ path: String) -> String
+    func command(executable: String, arguments: [String]) -> MachineCommandResult
+}
+
+struct LiveMachineAccess: MachineAccess {
+    var environment: [String: String] { ProcessInfo.processInfo.environment }
+    var hostName: String { ProcessInfo.processInfo.hostName }
+    var currentDirectoryPath: String { FileManager.default.currentDirectoryPath }
+
+    func diskSpace() -> DiskSpace {
+        let attributes = (try? FileManager.default.attributesOfFileSystem(forPath: "/")) ?? [:]
+        return DiskSpace(
+            totalBytes: attributes[.systemSize] as? UInt64,
+            freeBytes: attributes[.systemFreeSize] as? UInt64
+        )
     }
 
+    func isExecutableFile(atPath path: String) -> Bool {
+        FileManager.default.isExecutableFile(atPath: path)
+    }
+
+    func resolvingSymlinksInPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
+
+    func command(executable: String, arguments: [String]) -> MachineCommandResult {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = pipe
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
+        do {
+            try process.run()
+        } catch {
+            return MachineCommandResult(output: "", status: -1, timedOut: false)
+        }
+        let timedOut = finished.wait(timeout: .now() + 2) == .timedOut
+        if timedOut {
+            process.terminate()
+            process.waitUntilExit()
+        }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return MachineCommandResult(output: output, status: process.terminationStatus, timedOut: timedOut)
+    }
+}
+
+struct EnvironmentScanner: Sendable {
     private struct RuntimeDefinition: Sendable {
         let id: String
         let name: String
@@ -71,34 +147,37 @@ struct EnvironmentScanner: Sendable {
         RuntimeDefinition(id: "lua", name: "Lua", executable: "lua", arguments: ["-v"]),
     ]
 
+    private let machine: any MachineAccess
+
+    init(machine: any MachineAccess = LiveMachineAccess()) {
+        self.machine = machine
+    }
+
     func scan() -> ScanResult {
-        let environment = ProcessInfo.processInfo.environment
-        let path = environment["PATH", default: ""].split(separator: ":").map(String.init)
+        let path = pathEntries()
         var issues: [String] = []
 
-        let version = command(path: ["/usr/bin/sw_vers"], arguments: ["-productVersion"])
-        let build = command(path: ["/usr/bin/sw_vers"], arguments: ["-buildVersion"])
-        let architecture = command(path: ["/usr/bin/uname"], arguments: ["-m"])
-        let memory = command(path: ["/usr/sbin/sysctl"], arguments: ["-n", "hw.memsize"])
-        let fileSystem = (try? FileManager.default.attributesOfFileSystem(forPath: "/")) ?? [:]
+        let version = machine.command(executable: "/usr/bin/sw_vers", arguments: ["-productVersion"])
+        let build = machine.command(executable: "/usr/bin/sw_vers", arguments: ["-buildVersion"])
+        let architecture = machine.command(executable: "/usr/bin/uname", arguments: ["-m"])
+        let memory = machine.command(executable: "/usr/sbin/sysctl", arguments: ["-n", "hw.memsize"])
+        let disk = machine.diskSpace()
 
         let memoryValue = value(from: memory, issue: "内存信息", issues: &issues).flatMap(UInt64.init)
         let system = SystemSnapshot(
             macOSVersion: value(from: version, issue: "macOS 版本", issues: &issues),
             build: value(from: build, issue: "macOS Build", issues: &issues),
             architecture: value(from: architecture, issue: "芯片架构", issues: &issues),
-            hostName: ProcessInfo.processInfo.hostName,
+            hostName: machine.hostName,
             memoryBytes: memoryValue,
-            diskTotalBytes: fileSystem[.systemSize] as? UInt64,
-            diskFreeBytes: fileSystem[.systemFreeSize] as? UInt64
+            diskTotalBytes: disk.totalBytes,
+            diskFreeBytes: disk.freeBytes
         )
 
-        let runtimes = runtimeDefinitions.map { definition in
-            scanRuntime(definition, path: path, issues: &issues)
-        }
+        let runtimes = runtimeDefinitions.map { scanRuntime($0, path: path, issues: &issues) }
         let homebrew = scanHomebrew(issues: &issues)
         let snapshot = MachineSnapshot(
-            schemaVersion: 1,
+            schemaVersion: 2,
             scannedAt: Date(),
             system: system,
             path: path,
@@ -106,29 +185,52 @@ struct EnvironmentScanner: Sendable {
             homebrew: homebrew,
             issues: issues
         )
-        let canPersist = system.macOSVersion != nil && system.architecture != nil
-        return ScanResult(snapshot: snapshot, canPersist: canPersist)
+        return ScanResult(
+            snapshot: snapshot,
+            canPersist: system.macOSVersion != nil && system.architecture != nil
+        )
     }
 
-    private func scanRuntime(_ definition: RuntimeDefinition, path: [String], issues: inout [String]) -> RuntimeSnapshot {
-        guard let executable = resolve(definition.executable, in: path) else {
-            return RuntimeSnapshot(id: definition.id, name: definition.name, executable: nil, version: nil, state: .unavailable, error: nil)
+    private func scanRuntime(
+        _ definition: RuntimeDefinition,
+        path: [String],
+        issues: inout [String]
+    ) -> RuntimeSnapshot {
+        var seenTargets: Set<String> = []
+        var installations: [RuntimeInstallation] = []
+
+        for directory in path {
+            let executable = absoluteExecutable(definition.executable, directory: directory)
+            guard machine.isExecutableFile(atPath: executable) else { continue }
+            let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+            guard seenTargets.insert(actual).inserted else { continue }
+
+            let result = machine.command(executable: executable, arguments: definition.arguments)
+            let version = result.status == 0 ? normalizedVersion(result.output) : nil
+            let error = version == nil ? "版本读取失败" : nil
+            if let error {
+                issues.append("\(definition.name)：\(error)（\(executable)）")
+            }
+            installations.append(RuntimeInstallation(
+                id: actual,
+                executable: executable,
+                actualExecutable: actual == executable ? nil : actual,
+                version: version,
+                state: version == nil ? .failed : .discovered,
+                error: error,
+                isEffective: installations.isEmpty
+            ))
         }
-        let result = command(path: [executable], arguments: definition.arguments)
-        guard let output = normalizedVersion(result.output), result.status == 0 || !output.isEmpty else {
-            let error = result.timedOut ? "命令超时" : "版本读取失败"
-            issues.append("\(definition.name)：\(error)")
-            return RuntimeSnapshot(id: definition.id, name: definition.name, executable: executable, version: nil, state: .failed, error: error)
-        }
-        return RuntimeSnapshot(id: definition.id, name: definition.name, executable: executable, version: output, state: .discovered, error: nil)
+
+        return RuntimeSnapshot(id: definition.id, name: definition.name, installations: installations)
     }
 
     private func scanHomebrew(issues: inout [String]) -> HomebrewSnapshot {
         let candidates = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-        guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+        guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else {
             return HomebrewSnapshot(executable: nil, version: nil, available: false, error: nil)
         }
-        let result = command(path: [executable], arguments: ["--version"])
+        let result = machine.command(executable: executable, arguments: ["--version"])
         guard let version = normalizedVersion(result.output), result.status == 0 || !version.isEmpty else {
             let error = result.timedOut ? "命令超时" : "版本读取失败"
             issues.append("Homebrew：\(error)")
@@ -137,12 +239,22 @@ struct EnvironmentScanner: Sendable {
         return HomebrewSnapshot(executable: executable, version: version, available: true, error: nil)
     }
 
-    private func resolve(_ name: String, in path: [String]) -> String? {
-        path.map { URL(fileURLWithPath: $0).appendingPathComponent(name).path }
-            .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    private func pathEntries() -> [String] {
+        guard let value = machine.environment["PATH"] else { return [] }
+        return value.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
     }
 
-    private func value(from result: CommandResult, issue: String, issues: inout [String]) -> String? {
+    private func absoluteExecutable(_ name: String, directory: String) -> String {
+        let base = URL(fileURLWithPath: machine.currentDirectoryPath, isDirectory: true)
+        let directoryURL = URL(fileURLWithPath: directory, relativeTo: base).standardizedFileURL
+        return standardizedPath(directoryURL.appendingPathComponent(name).path)
+    }
+
+    private func standardizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private func value(from result: MachineCommandResult, issue: String, issues: inout [String]) -> String? {
         guard result.status == 0, let value = normalizedVersion(result.output) else {
             issues.append("\(issue)：读取失败")
             return nil
@@ -151,48 +263,31 @@ struct EnvironmentScanner: Sendable {
     }
 
     private func normalizedVersion(_ output: String) -> String? {
-        guard let line = output.split(whereSeparator: \.isNewline).map(String.init).first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+        guard let line = output.split(whereSeparator: \.isNewline).map(String.init)
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             return nil
         }
         let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.hasPrefix("Python ") { return String(value.dropFirst(7)) }
         if value.hasPrefix("Homebrew ") { return String(value.dropFirst(9)) }
-        if value.hasPrefix("go version ") { return value.split(separator: " ").dropFirst(2).first.map { String($0).dropFirst(2).description } }
+        if value.hasPrefix("go version ") {
+            return value.split(separator: " ").dropFirst(2).first.map { String($0).dropFirst(2).description }
+        }
         if value.hasPrefix("rustc ") { return value.split(separator: " ").dropFirst().first.map(String.init) }
-        if value.hasPrefix("ruby ") { return String(value.dropFirst(5)) }
-        if value.hasPrefix("Lua ") { return String(value.dropFirst(4)) }
-        if let firstQuote = value.firstIndex(of: "\""), let endQuote = value[value.index(after: firstQuote)...].firstIndex(of: "\"") {
+        if value.hasPrefix("ruby ") { return value.split(separator: " ").dropFirst().first.map(String.init) }
+        if value.hasPrefix("Lua ") { return value.split(separator: " ").dropFirst().first.map(String.init) }
+        if let firstQuote = value.firstIndex(of: "\""),
+           let endQuote = value[value.index(after: firstQuote)...].firstIndex(of: "\"") {
             return String(value[value.index(after: firstQuote)..<endQuote])
         }
         if value.first == "v", value.dropFirst().first?.isNumber == true { return String(value.dropFirst()) }
         return value
     }
-
-    private func command(path: [String], arguments: [String]) -> CommandResult {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: path[0])
-        process.arguments = arguments
-        process.standardOutput = pipe
-        process.standardError = pipe
-        let finished = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in finished.signal() }
-        do {
-            try process.run()
-        } catch {
-            return CommandResult(output: "", status: -1, timedOut: false)
-        }
-        let timedOut = finished.wait(timeout: .now() + 2) == .timedOut
-        if timedOut {
-            process.terminate()
-            process.waitUntilExit()
-        }
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return CommandResult(output: output, status: process.terminationStatus, timedOut: timedOut)
-    }
 }
 
 struct SnapshotStore: Sendable {
+    private struct Header: Decodable { let schemaVersion: Int }
+
     private let fileURL: URL
 
     init(fileManager: FileManager = .default) {
@@ -201,12 +296,16 @@ struct SnapshotStore: Sendable {
         fileURL = directory.appendingPathComponent("machine-snapshot.json")
     }
 
+    init(fileURL: URL) {
+        self.fileURL = fileURL
+    }
+
     func load() -> MachineSnapshot? {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let snapshot = try? decoder.decode(MachineSnapshot.self, from: data), snapshot.schemaVersion == 1 else { return nil }
-        return snapshot
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 2 else { return nil }
+        return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 
     func save(_ snapshot: MachineSnapshot) throws {

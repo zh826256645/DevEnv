@@ -11,6 +11,7 @@
 		100000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000012 /* ContentView.swift */; };
 		100000000000000000000003 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000013 /* Assets.xcassets */; };
 		100000000000000000000004 /* EnvironmentScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000014 /* EnvironmentScanner.swift */; };
+		100000000000000000000005 /* EnvironmentScannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000015 /* EnvironmentScannerTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -19,10 +20,19 @@
 		100000000000000000000012 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		100000000000000000000013 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		100000000000000000000014 /* EnvironmentScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnvironmentScanner.swift; sourceTree = "<group>"; };
+		100000000000000000000015 /* EnvironmentScannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnvironmentScannerTests.swift; sourceTree = "<group>"; };
+		100000000000000000000016 /* DevEnvTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DevEnvTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		100000000000000000000020 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000024 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -36,6 +46,7 @@
 			isa = PBXGroup;
 			children = (
 				100000000000000000000031 /* DevEnv */,
+				100000000000000000000033 /* DevEnvTests */,
 				100000000000000000000032 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -55,8 +66,17 @@
 			isa = PBXGroup;
 			children = (
 				100000000000000000000010 /* DevEnv.app */,
+				100000000000000000000016 /* DevEnvTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		100000000000000000000033 /* DevEnvTests */ = {
+			isa = PBXGroup;
+			children = (
+				100000000000000000000015 /* EnvironmentScannerTests.swift */,
+			);
+			path = DevEnvTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -79,6 +99,23 @@
 			productReference = 100000000000000000000010 /* DevEnv.app */;
 			productType = "com.apple.product-type.application";
 		};
+		100000000000000000000041 /* DevEnvTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000072 /* Build configuration list for PBXNativeTarget "DevEnvTests" */;
+			buildPhases = (
+				100000000000000000000023 /* Sources */,
+				100000000000000000000024 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				100000000000000000000092 /* PBXTargetDependency */,
+			);
+			name = DevEnvTests;
+			productName = DevEnvTests;
+			productReference = 100000000000000000000016 /* DevEnvTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -91,6 +128,10 @@
 				TargetAttributes = {
 					100000000000000000000040 = {
 						CreatedOnToolsVersion = 26.6;
+					};
+					100000000000000000000041 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 100000000000000000000040;
 					};
 				};
 			};
@@ -108,6 +149,7 @@
 			projectRoot = "";
 			targets = (
 				100000000000000000000040 /* DevEnv */,
+				100000000000000000000041 /* DevEnvTests */,
 			);
 		};
 /* End PBXProject section */
@@ -134,7 +176,33 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		100000000000000000000023 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000005 /* EnvironmentScannerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXContainerItemProxy section */
+		100000000000000000000091 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 100000000000000000000050 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 100000000000000000000040;
+			remoteInfo = DevEnv;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		100000000000000000000092 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 100000000000000000000040 /* DevEnv */;
+			targetProxy = 100000000000000000000091 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		100000000000000000000060 /* Debug */ = {
@@ -215,6 +283,38 @@
 			};
 			name = Release;
 		};
+		100000000000000000000064 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.zh826256645.DevEnvTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DevEnv.app/Contents/MacOS/DevEnv";
+			};
+			name = Debug;
+		};
+		100000000000000000000065 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.zh826256645.DevEnvTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DevEnv.app/Contents/MacOS/DevEnv";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -232,6 +332,15 @@
 			buildConfigurations = (
 				100000000000000000000062 /* Debug */,
 				100000000000000000000063 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		100000000000000000000072 /* Build configuration list for PBXNativeTarget "DevEnvTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000064 /* Debug */,
+				100000000000000000000065 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
