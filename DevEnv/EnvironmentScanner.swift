@@ -174,6 +174,16 @@ struct EnvironmentScanner: Sendable {
         let executable: String
     }
 
+    private struct MiseInstallation: Decodable {
+        let version: String
+        let installPath: String
+
+        private enum CodingKeys: String, CodingKey {
+            case version
+            case installPath = "install_path"
+        }
+    }
+
     private let runtimeDefinitions = [
         RuntimeDefinition(id: "node", name: "Node.js", executable: "node", arguments: ["--version"], homebrewFormula: "node"),
         RuntimeDefinition(id: "python", name: "Python", executable: "python3", arguments: ["--version"], homebrewFormula: "python"),
@@ -215,12 +225,14 @@ struct EnvironmentScanner: Sendable {
         let homebrewInstallations = homebrew.available ? homebrew.executable.map {
             scanHomebrewRuntimes(executable: $0, issues: &issues)
         } ?? [] : []
+        let miseInstallations = scanMiseRuntimes(path: path, issues: &issues)
         let nvmInstallations = scanNVMRuntimes(issues: &issues)
         let runtimes = runtimeDefinitions.map { definition in
             scanRuntime(
                 definition,
                 path: path,
-                providers: (homebrewInstallations + nvmInstallations).filter { $0.runtimeID == definition.id },
+                providers: (homebrewInstallations + miseInstallations + nvmInstallations)
+                    .filter { $0.runtimeID == definition.id },
                 issues: &issues
             )
         }
@@ -294,6 +306,32 @@ struct EnvironmentScanner: Sendable {
         }
 
         return RuntimeSnapshot(id: definition.id, name: definition.name, installations: installations)
+    }
+
+    private func scanMiseRuntimes(path: [String], issues: inout [String]) -> [RuntimeProviderInstallation] {
+        let candidates = path.map { absoluteExecutable("mise", directory: $0) }
+            + (machine.environment["HOME"].map { ["\($0)/.local/bin/mise"] } ?? [])
+            + ["/opt/homebrew/bin/mise", "/usr/local/bin/mise"]
+        guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else { return [] }
+        let result = machine.command(executable: executable, arguments: ["ls", "--installed", "--json"])
+        guard result.status == 0, !result.timedOut else {
+            issues.append("mise Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            return []
+        }
+        guard let data = result.output.data(using: .utf8),
+              let installed = try? JSONDecoder().decode([String: [MiseInstallation]].self, from: data) else {
+            issues.append("mise Runtime Provider：输出解析失败")
+            return []
+        }
+        return runtimeDefinitions.flatMap { definition in
+            installed[definition.id, default: []].map { installation in
+                RuntimeProviderInstallation(
+                    runtimeID: definition.id,
+                    version: installation.version,
+                    executable: standardizedPath("\(installation.installPath)/bin/\(definition.executable)")
+                )
+            }
+        }
     }
 
     private func scanNVMRuntimes(issues: inout [String]) -> [RuntimeProviderInstallation] {

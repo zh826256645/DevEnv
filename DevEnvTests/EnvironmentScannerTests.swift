@@ -167,6 +167,74 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(snapshot.issues.contains("Homebrew Runtime Provider：命令超时"))
     }
 
+    func testMiseDiscoversAllRuntimeTypesFromStandardLocationAndDeduplicatesSources() {
+        let miseRoot = "/custom/mise/installs"
+        let miseExecutables = [
+            "\(miseRoot)/node/22.3.0/bin/node",
+            "\(miseRoot)/python/3.13.4/bin/python3",
+            "\(miseRoot)/go/1.23.1/bin/go",
+            "\(miseRoot)/java/23.0.1/bin/java",
+            "\(miseRoot)/rust/1.80.0/bin/rustc",
+            "\(miseRoot)/ruby/3.3.4/bin/ruby",
+            "\(miseRoot)/lua/5.4.6/bin/lua",
+        ]
+        let homebrewNode = "/opt/homebrew/Cellar/node/22.3.0/bin/node"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/custom/bin"],
+            environment: ["HOME": "/Users/test", "MISE_DATA_DIR": "/custom/mise"],
+            executables: Set(miseExecutables + [
+                "/Users/test/.local/bin/mise",
+                "/opt/homebrew/bin/brew",
+                "/custom/bin/node",
+                homebrewNode,
+            ]),
+            resolvedPaths: [
+                "/custom/bin/node": "/real/node",
+                homebrewNode: "/real/node",
+                "\(miseRoot)/node/22.3.0/bin/node": "/real/node",
+            ],
+            commandOutputs: [
+                "/custom/bin/node --version": "v22.3.0\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "node 22.3.0\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+                "/Users/test/.local/bin/mise ls --installed --json": """
+                {
+                  "node": [{"version":"22.3.0","install_path":"/custom/mise/installs/node/22.3.0"}],
+                  "python": [{"version":"3.13.4","install_path":"/custom/mise/installs/python/3.13.4"}],
+                  "go": [{"version":"1.23.1","install_path":"/custom/mise/installs/go/1.23.1"}],
+                  "java": [{"version":"23.0.1","install_path":"/custom/mise/installs/java/23.0.1"}],
+                  "rust": [{"version":"1.80.0","install_path":"/custom/mise/installs/rust/1.80.0"}],
+                  "ruby": [{"version":"3.3.4","install_path":"/custom/mise/installs/ruby/3.3.4"}],
+                  "lua": [{"version":"5.4.6","install_path":"/custom/mise/installs/lua/5.4.6"}]
+                }
+                """,
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.runtimes.flatMap(\.installations).count, 7)
+        XCTAssertTrue(snapshot.runtimes.allSatisfy { $0.installations.count == 1 })
+        XCTAssertTrue(snapshot.runtimes.allSatisfy { $0.installations.first?.state == .discovered })
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.executable, "/custom/bin/node")
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "python" }?.installations.first?.executable,
+                       "/custom/mise/installs/python/3.13.4/bin/python3")
+        XCTAssertTrue(snapshot.runtimes.filter { $0.id != "node" }.allSatisfy {
+            $0.installations.first?.isInPath == false
+        })
+    }
+
+    func testMiseFailureKeepsPathResults() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin", "/custom/bin"],
+            executables: ["/custom/bin/mise", "/bin/node"],
+            commandOutputs: ["/bin/node --version": "v22.0.0\n"],
+            commandTimeouts: ["/custom/bin/mise ls --installed --json"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.version, "22.0.0")
+        XCTAssertTrue(snapshot.issues.contains("mise Runtime Provider：命令超时"))
+    }
+
     func testNVMUsesInheritedRootAndMergesPathDuplicate() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/custom/bin"],
