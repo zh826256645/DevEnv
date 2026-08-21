@@ -612,6 +612,83 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Ruby：") })
     }
 
+    func testCrossProviderScanIsStableDeduplicatedAndPersistable() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SnapshotStore(fileURL: directory.appendingPathComponent("machine-snapshot.json"))
+        let miseNode = "/custom/mise/installs/node/22.0.0/bin/node"
+        let nvmNode = "/Users/test/.nvm/versions/node/v20.0.0/bin/node"
+        let misePython313 = "/custom/mise/installs/python/3.13.1/bin/python3"
+        let misePython311 = "/custom/mise/installs/python/3.11.9/bin/python3"
+        let pyenvPython311 = "/custom/pyenv/versions/3.11.9/bin/python3"
+        let unavailablePython = "/custom/pyenv/versions/3.9.20/bin/python3"
+        let brewPython312 = "/opt/homebrew/Cellar/python/3.12.2/bin/python3"
+        let brewPython313 = "/opt/homebrew/Cellar/python/3.13.1/bin/python3"
+        let result = EnvironmentScanner(machine: StubMachine(
+            path: ["/effective", "/older"],
+            environment: ["HOME": "/Users/test", "PYENV_ROOT": "/custom/pyenv"],
+            executables: [
+                "/effective/python3", "/older/python3", "/opt/homebrew/bin/brew", "/Users/test/.local/bin/mise",
+                "/custom/pyenv/bin/pyenv", "/Users/test/.cargo/bin/rustup", misePython313, misePython311,
+                pyenvPython311, brewPython312, brewPython313, miseNode, nvmNode,
+            ],
+            resolvedPaths: [
+                "/effective/python3": "/real/python-3.12",
+                brewPython312: "/real/python-3.12",
+                misePython313: "/real/python-3.13",
+                brewPython313: "/real/python-3.13",
+            ],
+            commandOutputs: [
+                "/effective/python3 --version": "Python 3.12.2\n",
+                "/older/python3 --version": "Python 3.10.14\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "python 3.12.2 3.13.1\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+                "/Users/test/.local/bin/mise ls --installed --json": """
+                {"node":[{"version":"22.0.0","install_path":"/custom/mise/installs/node/22.0.0"}],"python":[
+                  {"version":"3.13.1","install_path":"/custom/mise/installs/python/3.13.1"},
+                  {"version":"3.11.9","install_path":"/custom/mise/installs/python/3.11.9"}
+                ]}
+                """,
+                "/custom/pyenv/bin/pyenv versions --bare": "3.11.9\n3.9.20\n",
+            ],
+            commandTimeouts: ["/Users/test/.cargo/bin/rustup toolchain list"],
+            directoryContents: ["/Users/test/.nvm/versions/node": ["v20.0.0"]]
+        )).scan()
+        let node = try XCTUnwrap(result.snapshot.runtimes.first { $0.id == "node" })
+        let python = try XCTUnwrap(result.snapshot.runtimes.first { $0.id == "python" })
+
+        XCTAssertTrue(result.canPersist)
+        XCTAssertEqual(node.installations.map(\.version), ["22.0.0", "20.0.0"])
+        XCTAssertFalse(node.hasPathVersionConflict)
+        XCTAssertEqual(python.installations.map(\.executable), [
+            "/effective/python3", "/older/python3", misePython313, misePython311, pyenvPython311, unavailablePython,
+        ])
+        XCTAssertEqual(python.installations.map(\.version), ["3.12.2", "3.10.14", "3.13.1", "3.11.9", "3.11.9", "3.9.20"])
+        XCTAssertEqual(python.installations.map(\.isInPath), [true, true, false, false, false, false])
+        XCTAssertTrue(python.installations.first?.isEffective == true)
+        XCTAssertTrue(python.hasPathVersionConflict)
+        XCTAssertEqual(python.installations.filter { $0.version == "3.13.1" }.count, 1)
+        XCTAssertEqual(python.installations.last?.state, .failed)
+        XCTAssertEqual(python.installations.last?.error, "可执行文件不可用")
+        XCTAssertEqual(result.snapshot.issues.filter { $0 == "rustup Rust Runtime Provider：命令超时" }.count, 1)
+        XCTAssertFalse(result.snapshot.issues.contains { $0.contains("PATH 版本冲突") })
+
+        try store.save(result.snapshot)
+        let restored = try XCTUnwrap(store.load())
+        var restoredJSON = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(restored)) as? [String: Any]
+        )
+        var scannedJSON = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(result.snapshot)) as? [String: Any]
+        )
+        restoredJSON.removeValue(forKey: "scannedAt")
+        scannedJSON.removeValue(forKey: "scannedAt")
+        XCTAssertEqual(restoredJSON as NSDictionary, scannedJSON as NSDictionary)
+        XCTAssertEqual(restored.scannedAt.timeIntervalSince1970, result.snapshot.scannedAt.timeIntervalSince1970, accuracy: 1)
+        XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
+    }
+
     func testV2SnapshotRoundTripsAndV1IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
