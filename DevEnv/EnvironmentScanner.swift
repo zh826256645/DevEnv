@@ -226,7 +226,7 @@ struct EnvironmentScanner: Sendable {
             scanHomebrewRuntimes(executable: $0, issues: &issues)
         } ?? [] : []
         let miseInstallations = scanMiseRuntimes(path: path, issues: &issues)
-        let nvmInstallations = scanNVMRuntimes(issues: &issues)
+        let nvmInstallations = scanNVMInstallations(issues: &issues)
         let runtimes = runtimeDefinitions.map { definition in
             scanRuntime(
                 definition,
@@ -334,7 +334,7 @@ struct EnvironmentScanner: Sendable {
         }
     }
 
-    private func scanNVMRuntimes(issues: inout [String]) -> [RuntimeProviderInstallation] {
+    private func scanNVMInstallations(issues: inout [String]) -> [RuntimeProviderInstallation] {
         guard let root = machine.environment["NVM_DIR"] ?? machine.environment["HOME"].map({ "\($0)/.nvm" }),
               root.hasPrefix("/") else { return [] }
         let versionRoot = standardizedPath("\(root)/versions/node")
@@ -357,7 +357,10 @@ struct EnvironmentScanner: Sendable {
 
     private func nvmVersion(from directory: String) -> String? {
         let name = URL(fileURLWithPath: directory).lastPathComponent
-        guard name.first == "v", name.dropFirst().first?.isNumber == true else { return nil }
+        guard name.range(
+            of: #"^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"#,
+            options: .regularExpression
+        ) != nil else { return nil }
         return String(name.dropFirst())
     }
 

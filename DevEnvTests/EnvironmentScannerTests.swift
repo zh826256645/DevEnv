@@ -301,6 +301,21 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("nvm Runtime Provider：") })
     }
 
+    func testNVMDirectoryIgnoresMalformedVersionEntries() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/Users/test/.nvm/versions/node/v20.15.1/bin/node"],
+            directoryContents: [
+                "/Users/test/.nvm/versions/node": ["v20.15.1", "v20-cache", "v1.tmp", "aliases"],
+            ]
+        )).scan().snapshot
+
+        let node = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "node" })
+        XCTAssertEqual(node.installations.map(\.version), ["20.15.1"])
+        XCTAssertFalse(snapshot.issues.contains { $0.contains("v20-cache") || $0.contains("v1.tmp") })
+    }
+
     func testV2SnapshotRoundTripsAndV1IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
