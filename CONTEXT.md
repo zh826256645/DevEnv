@@ -28,6 +28,14 @@ _Avoid_: Environment, System Profile
 本机可被发现的某个语言运行时实例，包含其版本与来源位置。
 _Avoid_: Runtime, Package
 
+**Effective Runtime Installation**:
+当前 `PATH` 对某类语言运行时优先解析到的 Runtime Installation。
+_Avoid_: Current Runtime, Active Runtime
+
+**Runtime Conflict**:
+同类语言运行时存在多个不同的 Runtime Installation，且它们可能因 `PATH` 顺序产生不同解析结果的状态。
+_Avoid_: Version Conflict, PATH Error
+
 **Homebrew Availability**:
 Homebrew 在当前 Mac 上是否可调用，以及可识别的安装位置。
 _Avoid_: Homebrew Environment
