@@ -20,6 +20,10 @@ _Avoid_: Environment
 对当前 Mac 的 Machine Environment 进行一次只读观察，形成可展示的状态结果。
 _Avoid_: Environment Check, Health Check
 
+**Scan Notice**:
+Environment Scan 发现的读取失败、不可用安装或状态冲突，表示值得用户查看，但不等同于系统故障或健康诊断。
+_Avoid_: Issue, Error, Health Problem
+
 **Machine Snapshot**:
 一次 Environment Scan 产生的、描述主机基础信息与开发工具状态的结果。
 _Avoid_: Environment, System Profile

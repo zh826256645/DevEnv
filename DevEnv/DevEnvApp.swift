@@ -6,5 +6,6 @@ struct DevEnvApp: App {
         WindowGroup {
             ContentView()
         }
+        .defaultSize(width: 860, height: 720)
     }
 }
