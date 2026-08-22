@@ -12,15 +12,16 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 
 ## 当前进度
 
-截至 2026-08-22：
+截至 2026-08-23：
 
 - 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见语言 Runtime 的只读扫描和最新快照持久化。
 - 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源 Runtime Installation 发现。
+- 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
 - 已完成加载页、顶部状态总览、Runtime 自适应卡片、按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
-- v0.1 已通过 [PR #11](https://github.com/zh826256645/DevEnv/pull/11) 合并到 `master`。
+- v0.1 已冻结为已交付的只读 Environment Scanner；当前下一阶段是 v0.2 — Services & Ports。
 
-服务、端口、容器、项目要求对比、环境修复和 AI 诊断仍属于后续规划，当前版本不提供这些能力。
+Git、Docker、服务管理、端口管理、环境修改和诊断仍属于后续规划；v0.2 的 Services & Ports 也保持只读。
 
 你可以通过 DevEnv 快速了解：
 
@@ -560,7 +561,7 @@ Apple Silicon first
 
 ### v0.1（已完成）
 
-已交付：
+只包含以下已交付的只读 Environment Scanner 能力：
 
 * [x] macOS 系统与系统卷只读扫描
 * [x] 最新 Machine Snapshot 持久化
@@ -598,6 +599,8 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 * 监听进程与 PID
 * 仅本机或可能对局域网开放的监听范围
 * 端口扫描失败产生的 Scan Notice
+
+不包含 Start、Stop、Restart、Kill 或其他 Machine Environment 修改能力。
 
 解决：
 

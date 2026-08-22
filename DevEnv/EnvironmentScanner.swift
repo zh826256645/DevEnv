@@ -1,6 +1,9 @@
 import Foundation
 
 struct MachineSnapshot: Codable, Sendable {
+    static let localServiceTimeoutNotice = "本地服务：命令超时"
+    static let localServiceFailureNotice = "本地服务：读取失败"
+
     let schemaVersion: Int
     let scannedAt: Date
     let system: SystemSnapshot
@@ -9,6 +12,10 @@ struct MachineSnapshot: Codable, Sendable {
     let runtimes: [RuntimeSnapshot]
     let homebrew: HomebrewSnapshot
     let issues: [String]
+
+    var localServiceScanNotice: String? {
+        issues.first { $0 == Self.localServiceTimeoutNotice || $0 == Self.localServiceFailureNotice }
+    }
 }
 
 enum ListenerAddressFamily: String, Codable, Sendable {
@@ -20,6 +27,10 @@ struct ListenerBinding: Codable, Hashable, Sendable {
     let address: String
     let port: UInt16
     let family: ListenerAddressFamily
+
+    var isLoopback: Bool {
+        family == .ipv4 ? address.split(separator: ".").first == "127" : address == "::1"
+    }
 }
 
 struct LocalServiceSnapshot: Codable, Identifiable, Sendable {
@@ -295,12 +306,12 @@ struct EnvironmentScanner: Sendable {
             arguments: ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcftn"]
         )
         if result.timedOut {
-            issues.append("本地服务：命令超时")
+            issues.append(MachineSnapshot.localServiceTimeoutNotice)
             return []
         }
         let hasNoMatches = result.status == 1 && result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard result.status == 0 || hasNoMatches else {
-            issues.append("本地服务：读取失败")
+            issues.append(MachineSnapshot.localServiceFailureNotice)
             return []
         }
 

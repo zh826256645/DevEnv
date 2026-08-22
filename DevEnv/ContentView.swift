@@ -92,6 +92,14 @@ func groupLocalServicesForDisplay(
     return groups
 }
 
+func localServiceNotifications(_ services: [LocalServiceSnapshot]) -> [String] {
+    groupLocalServicesForDisplay(services).compactMap { group in
+        let exposedCount = group.bindings.count { !$0.isLoopback }
+        guard exposedCount > 0 else { return nil }
+        return "\(localServiceDescriptor(for: group.processName).displayName)：\(exposedCount) 个监听项可能可被局域网访问"
+    }
+}
+
 @MainActor
 final class EnvironmentViewModel: ObservableObject {
     @Published private(set) var snapshot: MachineSnapshot?
@@ -176,7 +184,7 @@ struct ContentView: View {
                     .frame(width: 20, height: 20)
                 }
                 .accessibilityLabel(hasUnreadNotices
-                    ? "通知，当前有未读扫描提示"
+                    ? "通知，当前有未读通知"
                     : "通知")
                 .help("通知")
                 .popover(isPresented: $isShowingNotifications) {
@@ -209,7 +217,7 @@ struct ContentView: View {
                 }
                 topOverviewSection(snapshot)
                 runtimesSection(snapshot.runtimes)
-                localServicesSection(snapshot.localServices)
+                localServicesSection(snapshot)
                 environmentSection(snapshot)
             }
             .frame(maxWidth: 900)
@@ -338,13 +346,13 @@ struct ContentView: View {
     private func summarySection(_ snapshot: MachineSnapshot) -> some View {
         let discoveredCount = snapshot.runtimes.filter { $0.state == .discovered }.count
         let installationCount = snapshot.runtimes.reduce(0) { $0 + $1.installations.count }
-        let noticeCount = scanNotices(in: snapshot).count
+        let localServiceCount = groupLocalServicesForDisplay(snapshot.localServices).count
 
         return topOverviewCard("扫描汇总", systemImage: "chart.bar.fill") {
             VStack(spacing: 12) {
                 summaryMetric(discoveredCount, label: "已发现 Runtime 类别", systemImage: "magnifyingglass")
                 summaryMetric(installationCount, label: "Runtime Installation", systemImage: "arrow.down.to.line.compact")
-                summaryMetric(noticeCount, label: "扫描提示", systemImage: "lightbulb.max")
+                summaryMetric(localServiceCount, label: "本地服务", systemImage: "network")
             }
         }
     }
@@ -430,8 +438,8 @@ struct ContentView: View {
         }
     }
 
-    private func localServicesSection(_ services: [LocalServiceSnapshot]) -> some View {
-        let groups = groupLocalServicesForDisplay(services)
+    private func localServicesSection(_ snapshot: MachineSnapshot) -> some View {
+        let groups = groupLocalServicesForDisplay(snapshot.localServices)
         let portCount = groups.reduce(0) { $0 + Set($1.bindings.map(\.port)).count }
 
         return VStack(alignment: .leading, spacing: 14) {
@@ -451,8 +459,17 @@ struct ContentView: View {
             }
 
             if groups.isEmpty {
-                ContentUnavailableView("未发现可见的 TCP 监听服务", systemImage: "network.slash")
+                if let notice = snapshot.localServiceScanNotice {
+                    ContentUnavailableView {
+                        Label("监听读取失败", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text("\(notice)。请通过右上角通知查看详情或重新扫描。")
+                    }
                     .frame(maxWidth: .infinity, minHeight: 110)
+                } else {
+                    ContentUnavailableView("当前没有可见的 TCP 监听服务", systemImage: "network.slash")
+                        .frame(maxWidth: .infinity, minHeight: 110)
+                }
             } else {
                 VStack(spacing: 6) {
                     ForEach(groups) { group in
@@ -569,25 +586,21 @@ struct ContentView: View {
             Text(binding.family.rawValue)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(tint)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
-                .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(tint.opacity(0.20))
-                }
-
             Text(listenerBindingText(binding))
                 .font(.callout.monospaced())
                 .lineLimit(1)
                 .textSelection(.enabled)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 6))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.primary.opacity(0.08))
-                }
+            Spacer(minLength: 0)
+            if !binding.isLoopback {
+                ListenerExposureIcon()
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.primary.opacity(0.08))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1215,7 +1228,7 @@ struct ContentView: View {
     }
 
     private var currentNotices: [String] {
-        model.snapshot.map(scanNotices(in:)) ?? []
+        model.snapshot.map(notifications(in:)) ?? []
     }
 
     private var hasUnreadNotices: Bool {
@@ -1239,12 +1252,12 @@ struct ContentView: View {
             Divider()
 
             if notices.isEmpty {
-                ContentUnavailableView("暂无扫描提示", systemImage: "checkmark.circle")
+                ContentUnavailableView("暂无通知", systemImage: "checkmark.circle")
                     .frame(maxWidth: .infinity, minHeight: 100)
             } else {
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(notices, id: \.self) { notice in
-                        Label(notice, systemImage: "exclamationmark.circle.fill")
+                    ForEach(notices.indices, id: \.self) { index in
+                        Label(notices[index], systemImage: "exclamationmark.circle.fill")
                             .foregroundStyle(.orange)
                     }
                 }
@@ -1259,10 +1272,11 @@ struct ContentView: View {
         readNoticeSnapshotDate = model.snapshot?.scannedAt
     }
 
-    private func scanNotices(in snapshot: MachineSnapshot) -> [String] {
+    private func notifications(in snapshot: MachineSnapshot) -> [String] {
         snapshot.runtimes
             .filter(\.hasPathVersionConflict)
             .map { "\($0.name)：PATH 版本冲突" }
+            + localServiceNotifications(snapshot.localServices)
             + snapshot.issues
     }
 
@@ -1314,5 +1328,29 @@ private struct RuntimeHelpIcon: View {
             }
             .accessibilityLabel("说明")
             .accessibilityHint(explanation)
+    }
+}
+
+private struct ListenerExposureIcon: View {
+    @State private var isShowingExplanation = false
+
+    var body: some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.caption.weight(.bold))
+            .foregroundStyle(.orange)
+            .padding(7)
+            .background(Color.orange.opacity(0.17), in: Circle())
+            .contentShape(Circle())
+            .onHover { isShowingExplanation = $0 }
+            .popover(isPresented: $isShowingExplanation, arrowEdge: .bottom) {
+                Text("可能可被局域网访问。仅依据监听地址范围判断，未验证防火墙或其他设备的实际可达性。")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+                    .frame(width: 280, alignment: .leading)
+            }
+            .accessibilityLabel("可能可被局域网访问")
+            .accessibilityHint("仅依据监听地址范围判断，未验证实际可达性")
     }
 }

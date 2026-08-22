@@ -657,6 +657,32 @@ final class EnvironmentScannerTests: XCTestCase {
         ])
     }
 
+    func testClassifiesListenerExposureFromBindingAddress() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": """
+                p10
+                cServer
+                f10
+                tIPv4
+                n127.0.0.2:3000
+                f11
+                tIPv6
+                n[::1]:3001
+                f12
+                tIPv4
+                n*:3002
+                f13
+                tIPv4
+                n192.168.1.10:3003
+                """,
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices[0].bindings.map(\.isLoopback), [true, true, false, false])
+    }
+
     func testListenerCommandFailureIsReportedAsScanNotice() {
         let command = "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn"
         let snapshot = EnvironmentScanner(machine: StubMachine(
@@ -666,6 +692,27 @@ final class EnvironmentScannerTests: XCTestCase {
 
         XCTAssertTrue(snapshot.localServices.isEmpty)
         XCTAssertTrue(snapshot.issues.contains("本地服务：读取失败"))
+    }
+
+    func testListenerTimeoutKeepsPartialSnapshotAndProducesOneNotice() {
+        let command = "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn"
+        let result = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/node", "/opt/homebrew/bin/brew"],
+            commandOutputs: [
+                "/bin/node --version": "v22.0.0\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+            ],
+            commandTimeouts: [command]
+        )).scan()
+
+        XCTAssertTrue(result.snapshot.localServices.isEmpty)
+        XCTAssertEqual(result.snapshot.localServiceScanNotice, "本地服务：命令超时")
+        XCTAssertEqual(result.snapshot.issues.filter { $0.hasPrefix("本地服务：") }, ["本地服务：命令超时"])
+        XCTAssertEqual(result.snapshot.path, ["/bin"])
+        XCTAssertEqual(result.snapshot.runtimes.first { $0.id == "node" }?.installations.first?.version, "22.0.0")
+        XCTAssertTrue(result.snapshot.homebrew.available)
+        XCTAssertTrue(result.canPersist)
     }
 
     func testGroupsListenerRowsOnlyWhenProcessNameAndBindingsMatch() {
@@ -686,6 +733,23 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(groups[0].pids, [10, 42])
         XCTAssertEqual(groups[1].pids, [30])
         XCTAssertEqual(groups[2].processName, "node")
+    }
+
+    func testBuildsOneExposureNotificationPerDisplayedLocalServiceGroup() {
+        let localBinding = ListenerBinding(address: "127.0.0.1", port: 8000, family: .ipv4)
+        let exposedBinding = ListenerBinding(address: "*", port: 8001, family: .ipv4)
+
+        XCTAssertEqual(localServiceNotifications([
+            LocalServiceSnapshot(processName: "Server", pid: 10, bindings: [localBinding, exposedBinding]),
+            LocalServiceSnapshot(processName: "Server", pid: 20, bindings: [localBinding, exposedBinding]),
+            LocalServiceSnapshot(processName: "Server", pid: 40, bindings: [
+                ListenerBinding(address: "*", port: 8002, family: .ipv4),
+            ]),
+            LocalServiceSnapshot(processName: "Local", pid: 30, bindings: [localBinding]),
+        ]), [
+            "Server：1 个监听项可能可被局域网访问",
+            "Server：1 个监听项可能可被局域网访问",
+        ])
     }
 
     func testDescribesCommonLocalServiceProcesses() {
