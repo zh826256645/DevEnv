@@ -1,6 +1,6 @@
 # macOS 系统环境扫描
 
-状态：V1 与 Runtime 多版本发现已实现。
+状态：V1、Runtime 多版本发现与总览界面已实现；当前版本见 [PR #11](https://github.com/zh826256645/DevEnv/pull/11)，等待合并到 `master`。
 
 ## 目标
 

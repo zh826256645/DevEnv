@@ -10,6 +10,18 @@ DevEnv 是一个面向 macOS 开发者的本地开发环境管理工具。
 
 DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在这些成熟工具之上提供统一的扫描、管理、诊断和可视化能力。
 
+## 当前进度
+
+截至 2026-08-22：
+
+- 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见语言 Runtime 的只读扫描和最新快照持久化。
+- 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源 Runtime Installation 发现。
+- 已完成加载页、顶部状态总览、Runtime 自适应卡片、按需展开详情、通知与状态说明等原生 SwiftUI 界面。
+- 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
+- `develop` 上的当前版本已提交 [PR #11](https://github.com/zh826256645/DevEnv/pull/11)，正在等待合并到 `master`。
+
+服务、端口、容器、项目要求对比、环境修复和 AI 诊断仍属于后续规划，当前版本不提供这些能力。
+
 你可以通过 DevEnv 快速了解：
 
 * 当前 Mac 安装了哪些开发环境
