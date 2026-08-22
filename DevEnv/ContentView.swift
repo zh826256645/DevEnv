@@ -9,6 +9,60 @@ struct LocalServiceDisplayGroup: Identifiable {
     let bindings: [ListenerBinding]
 }
 
+struct LocalServiceDescriptor {
+    let displayName: String
+    let explanation: String
+    let symbolName: String
+    let tint: Color
+}
+
+func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
+    let name = processName.lowercased()
+    func descriptor(
+        _ displayName: String,
+        _ explanation: String,
+        _ symbolName: String,
+        _ tint: Color
+    ) -> LocalServiceDescriptor {
+        LocalServiceDescriptor(
+            displayName: displayName,
+            explanation: explanation,
+            symbolName: symbolName,
+            tint: tint
+        )
+    }
+
+    if name.hasPrefix("python") {
+        return descriptor("Python", "Python 解释器启动的本地服务", "chevron.left.forwardslash.chevron.right", .blue)
+    }
+    if name.hasPrefix("redis") {
+        return descriptor("Redis", "内存键值数据库与缓存服务", "square.stack.3d.up.fill", .red)
+    }
+
+    switch name {
+    case "node", "nodejs":
+        return descriptor("Node.js", "JavaScript 运行时启动的本地服务", "hexagon.fill", .green)
+    case "postgres", "postmaster":
+        return descriptor("PostgreSQL", "PostgreSQL 关系型数据库", "cylinder.fill", .blue)
+    case "mongod", "mongos":
+        return descriptor("MongoDB", "MongoDB 文档数据库", "leaf.fill", .green)
+    case "mysqld", "mysql", "mariadbd":
+        return descriptor(name == "mariadbd" ? "MariaDB" : "MySQL", "MySQL 兼容关系型数据库", "cylinder.fill", .orange)
+    case "adb":
+        return descriptor("Android Debug Bridge", "Android 设备调试桥接服务", "apps.iphone", .green)
+    case "rapportd":
+        return descriptor("Apple 设备互联", "附近 Apple 设备发现与接续服务", "link.circle.fill", .blue)
+    case "controlcenter":
+        return descriptor("控制中心", "macOS 控制中心与隔空播放相关服务", "switch.2", .blue)
+    case "wechat":
+        return descriptor("微信", "微信客户端内部本地通信服务", "message.fill", .green)
+    case "sparkle":
+        return descriptor("Sparkle", "Sparkle 应用的本地通信服务", "sparkles", .purple)
+    default:
+        return descriptor(processName, "未识别的本地 TCP 监听进程", "server.rack", .secondary)
+    }
+}
+
 func groupLocalServicesForDisplay(
     _ services: [LocalServiceSnapshot]
 ) -> [LocalServiceDisplayGroup] {
@@ -378,10 +432,13 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
                 Image(systemName: "network")
-                    .font(.system(size: 18, weight: .semibold))
-                    .frame(width: 28, height: 28)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.accentColor.opacity(0.85), in: Circle())
+                    .shadow(color: Color.accentColor.opacity(0.25), radius: 8, y: 3)
                 Text("本地服务")
-                    .font(.title3.bold())
+                    .font(.title2.bold())
                 Spacer()
                 Text("\(groups.count) 组服务 · \(portCount) 个端口")
                     .font(.callout)
@@ -392,77 +449,135 @@ struct ContentView: View {
                 ContentUnavailableView("未发现可见的 TCP 监听服务", systemImage: "network.slash")
                     .frame(maxWidth: .infinity, minHeight: 110)
             } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                VStack(spacing: 6) {
+                    ForEach(groups) { group in
                         localServiceRow(group)
-                        if index < groups.count - 1 { Divider() }
                     }
-                }
-                .padding(.horizontal, 16)
-                .background {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(Color.primary.opacity(0.09))
-                        }
                 }
             }
         }
-        .padding(16)
+        .padding(18)
         .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.primary.opacity(0.025))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.primary.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
                 }
         }
     }
 
     private func localServiceRow(_ group: LocalServiceDisplayGroup) -> some View {
+        let descriptor = localServiceDescriptor(for: group.processName)
+        let applicationIcon = runningApplicationIcon(for: group.pids)
         let pidText = group.pids.count == 1
             ? "PID \(group.pids[0].formatted())"
             : "\(group.pids.count) 个进程 · PID \(group.pids.map { $0.formatted() }.joined(separator: "、"))"
+        let processText = descriptor.displayName == group.processName
+            ? pidText
+            : "\(group.processName) · \(pidText)"
 
-        return HStack(alignment: .top, spacing: 14) {
-            Image(systemName: "server.rack")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 36, height: 36)
-                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(group.processName)
-                    .font(.headline)
-                Text(pidText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-
-            Spacer(minLength: 16)
-
-            VStack(alignment: .trailing, spacing: 7) {
-                ForEach(group.bindings, id: \.self) { binding in
-                    HStack(spacing: 8) {
-                        Text(binding.family.rawValue)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(listenerBindingText(binding))
-                            .font(.callout.monospaced())
-                            .textSelection(.enabled)
-                    }
+        return HStack(alignment: .center, spacing: 16) {
+            Group {
+                if let applicationIcon {
+                    Image(nsImage: applicationIcon)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Image(systemName: descriptor.symbolName)
+                        .font(.system(size: 23, weight: .semibold))
+                        .foregroundStyle(descriptor.tint)
+                        .padding(13)
+                        .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
                 }
             }
+            .frame(width: 54, height: 54)
+            .shadow(color: .black.opacity(0.14), radius: 7, y: 4)
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 9, height: 9)
+                        .shadow(color: .green.opacity(0.65), radius: 4)
+                        .accessibilityHidden(true)
+                    Text(descriptor.displayName)
+                        .font(.title3.bold())
+                }
+                Text(descriptor.explanation)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(processText)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 150, maximum: 205), spacing: 8)],
+                alignment: .trailing,
+                spacing: 7
+            ) {
+                ForEach(group.bindings, id: \.self) { binding in
+                    listenerBindingBadge(binding)
+                }
+            }
+            .frame(minWidth: 170, maxWidth: 420, alignment: .trailing)
         }
+        .padding(.horizontal, 16)
         .padding(.vertical, 14)
+        .background {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.58))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
+                }
+        }
+    }
+
+    private func runningApplicationIcon(for pids: [Int32]) -> NSImage? {
+        for pid in pids {
+            if let icon = NSRunningApplication(processIdentifier: pid)?.icon { return icon }
+        }
+        return nil
     }
 
     private func listenerBindingText(_ binding: ListenerBinding) -> String {
         let address = binding.family == .ipv6 ? "[\(binding.address)]" : binding.address
         return "\(address):\(binding.port)"
+    }
+
+    private func listenerBindingBadge(_ binding: ListenerBinding) -> some View {
+        let tint = binding.family == .ipv4 ? Color.blue : Color.purple
+
+        return HStack(spacing: 6) {
+            Text(binding.family.rawValue)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(tint)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(tint.opacity(0.20))
+                }
+
+            Text(listenerBindingText(binding))
+                .font(.callout.monospaced())
+                .lineLimit(1)
+                .textSelection(.enabled)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(0.08))
+                }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func runtimeCard(_ runtime: RuntimeSnapshot) -> some View {

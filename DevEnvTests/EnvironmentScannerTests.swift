@@ -688,6 +688,26 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(groups[2].processName, "node")
     }
 
+    func testDescribesCommonLocalServiceProcesses() {
+        let expectedNames = [
+            "python3.13": "Python",
+            "node": "Node.js",
+            "postgres": "PostgreSQL",
+            "mongod": "MongoDB",
+            "mysqld": "MySQL",
+            "redis-server": "Redis",
+            "adb": "Android Debug Bridge",
+            "rapportd": "Apple 设备互联",
+            "ControlCenter": "控制中心",
+            "WeChat": "微信",
+            "Sparkle": "Sparkle",
+        ]
+
+        for (processName, expectedName) in expectedNames {
+            XCTAssertEqual(localServiceDescriptor(for: processName).displayName, expectedName)
+        }
+    }
+
     func testCrossProviderScanIsStableDeduplicatedAndPersistable() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
