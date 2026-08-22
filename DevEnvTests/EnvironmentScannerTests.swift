@@ -17,7 +17,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 2)
+        XCTAssertEqual(snapshot.schemaVersion, 3)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -612,6 +612,62 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Ruby：") })
     }
 
+    func testAggregatesAndSortsVisibleTCPListeners() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": """
+                p20
+                cZed
+                f10
+                tIPv6
+                n[::1]:8080
+                p10
+                cAlpha
+                f11
+                tIPv6
+                n[::1]:3000
+                f12
+                tIPv4
+                n127.0.0.1:3000
+                f13
+                tIPv4
+                n127.0.0.1:3000
+                f14
+                tIPv4
+                n*:4000
+                p30
+                cBeta
+                f15
+                tIPv4
+                n*:3000
+                """,
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.map(\.processName), ["Alpha", "Beta", "Zed"])
+        XCTAssertEqual(snapshot.localServices.map(\.pid), [10, 30, 20])
+        XCTAssertEqual(snapshot.localServices[0].bindings, [
+            ListenerBinding(address: "127.0.0.1", port: 3000, family: .ipv4),
+            ListenerBinding(address: "::1", port: 3000, family: .ipv6),
+            ListenerBinding(address: "*", port: 4000, family: .ipv4),
+        ])
+        XCTAssertEqual(snapshot.localServices[1].bindings, [
+            ListenerBinding(address: "*", port: 3000, family: .ipv4),
+        ])
+    }
+
+    func testListenerCommandFailureIsReportedAsScanNotice() {
+        let command = "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandStatuses: [command: -1]
+        )).scan().snapshot
+
+        XCTAssertTrue(snapshot.localServices.isEmpty)
+        XCTAssertTrue(snapshot.issues.contains("本地服务：读取失败"))
+    }
+
     func testCrossProviderScanIsStableDeduplicatedAndPersistable() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -689,7 +745,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV2SnapshotRoundTripsAndV1IsRejected() throws {
+    func testV3SnapshotRoundTripsAndV2IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -697,11 +753,15 @@ final class EnvironmentScannerTests: XCTestCase {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
             executables: ["/bin/node"],
-            commandOutputs: ["/bin/node": "v22.0.0\n"]
+            commandOutputs: [
+                "/bin/node": "v22.0.0\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
+            ]
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 2)
+        XCTAssertEqual(store.load()?.schemaVersion, 3)
+        XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
         var runtimes = try XCTUnwrap(json["runtimes"] as? [[String: Any]])
@@ -716,7 +776,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 1
+        json["schemaVersion"] = 2
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }

@@ -118,6 +118,7 @@ struct ContentView: View {
                 }
                 topOverviewSection(snapshot)
                 runtimesSection(snapshot.runtimes)
+                localServicesSection(snapshot.localServices)
                 environmentSection(snapshot)
             }
             .frame(maxWidth: 900)
@@ -336,6 +337,95 @@ struct ContentView: View {
                 runtimeCard(runtime)
             }
         }
+    }
+
+    private func localServicesSection(_ services: [LocalServiceSnapshot]) -> some View {
+        let portCount = services.reduce(0) { $0 + Set($1.bindings.map(\.port)).count }
+
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "network")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                Text("本地服务")
+                    .font(.title3.bold())
+                Spacer()
+                Text("\(services.count) 个服务 · \(portCount) 个端口")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            if services.isEmpty {
+                ContentUnavailableView("未发现可见的 TCP 监听服务", systemImage: "network.slash")
+                    .frame(maxWidth: .infinity, minHeight: 110)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(services.enumerated()), id: \.element.id) { index, service in
+                        localServiceRow(service)
+                        if index < services.count - 1 { Divider() }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .background {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Color.primary.opacity(0.09))
+                        }
+                }
+            }
+        }
+        .padding(16)
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.primary.opacity(0.018))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08))
+                }
+        }
+    }
+
+    private func localServiceRow(_ service: LocalServiceSnapshot) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "server.rack")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 36, height: 36)
+                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(service.processName)
+                    .font(.headline)
+                Text("PID \(service.pid)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            Spacer(minLength: 16)
+
+            VStack(alignment: .trailing, spacing: 7) {
+                ForEach(service.bindings, id: \.self) { binding in
+                    HStack(spacing: 8) {
+                        Text(binding.family.rawValue)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(listenerBindingText(binding))
+                            .font(.callout.monospaced())
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 14)
+    }
+
+    private func listenerBindingText(_ binding: ListenerBinding) -> String {
+        let address = binding.family == .ipv6 ? "[\(binding.address)]" : binding.address
+        return "\(address):\(binding.port)"
     }
 
     private func runtimeCard(_ runtime: RuntimeSnapshot) -> some View {

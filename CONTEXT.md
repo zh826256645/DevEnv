@@ -36,6 +36,14 @@ _Avoid_: Runtime, Package
 从已知工具或平台索引中发现未进入当前 `PATH` 的 Runtime Installation 的来源。
 _Avoid_: Scanner, Version Manager
 
+**Local Service**:
+当前 App 运行用户可见、按 PID 聚合且至少具有一个 TCP Listener Binding 的本机进程。
+_Avoid_: Daemon, Background Service
+
+**Listener Binding**:
+Local Service 监听 TCP 连接的地址、端口和地址族组合。
+_Avoid_: Port, Endpoint
+
 **Effective Runtime Installation**:
 当前 `PATH` 对某类语言运行时优先解析到的 Runtime Installation。
 _Avoid_: Current Runtime, Active Runtime
