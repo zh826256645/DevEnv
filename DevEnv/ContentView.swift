@@ -14,6 +14,7 @@ struct LocalServiceDescriptor {
     let explanation: String
     let symbolName: String
     let tint: Color
+    let assetName: String?
 }
 
 func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
@@ -22,32 +23,36 @@ func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
         _ displayName: String,
         _ explanation: String,
         _ symbolName: String,
-        _ tint: Color
+        _ tint: Color,
+        _ assetName: String? = nil
     ) -> LocalServiceDescriptor {
         LocalServiceDescriptor(
             displayName: displayName,
             explanation: explanation,
             symbolName: symbolName,
-            tint: tint
+            tint: tint,
+            assetName: assetName
         )
     }
 
     if name.hasPrefix("python") {
-        return descriptor("Python", "Python 解释器启动的本地服务", "chevron.left.forwardslash.chevron.right", .blue)
+        return descriptor("Python", "Python 解释器启动的本地服务", "chevron.left.forwardslash.chevron.right", .blue, "RuntimePythonLogo")
     }
     if name.hasPrefix("redis") {
-        return descriptor("Redis", "内存键值数据库与缓存服务", "square.stack.3d.up.fill", .red)
+        return descriptor("Redis", "内存键值数据库与缓存服务", "square.stack.3d.up.fill", .red, "ServiceRedisLogo")
     }
 
     switch name {
     case "node", "nodejs":
-        return descriptor("Node.js", "JavaScript 运行时启动的本地服务", "hexagon.fill", .green)
+        return descriptor("Node.js", "JavaScript 运行时启动的本地服务", "hexagon.fill", .green, "RuntimeNodeLogo")
     case "postgres", "postmaster":
-        return descriptor("PostgreSQL", "PostgreSQL 关系型数据库", "cylinder.fill", .blue)
+        return descriptor("PostgreSQL", "PostgreSQL 关系型数据库", "cylinder.fill", .blue, "ServicePostgreSQLLogo")
     case "mongod", "mongos":
-        return descriptor("MongoDB", "MongoDB 文档数据库", "leaf.fill", .green)
-    case "mysqld", "mysql", "mariadbd":
-        return descriptor(name == "mariadbd" ? "MariaDB" : "MySQL", "MySQL 兼容关系型数据库", "cylinder.fill", .orange)
+        return descriptor("MongoDB", "MongoDB 文档数据库", "leaf.fill", .green, "ServiceMongoDBLogo")
+    case "mysqld", "mysql":
+        return descriptor("MySQL", "MySQL 关系型数据库", "cylinder.fill", Color(red: 0.27, green: 0.47, blue: 0.63), "ServiceMySQLLogo")
+    case "mariadbd":
+        return descriptor("MariaDB", "MariaDB 关系型数据库", "cylinder.fill", Color(red: 0, green: 0.36, blue: 0.43), "ServiceMariaDBLogo")
     case "adb":
         return descriptor("Android Debug Bridge", "Android 设备调试桥接服务", "apps.iphone", .green)
     case "rapportd":
@@ -483,6 +488,13 @@ struct ContentView: View {
                     Image(nsImage: applicationIcon)
                         .resizable()
                         .scaledToFit()
+                } else if let assetName = descriptor.assetName {
+                    Image(assetName)
+                        .resizable()
+                        .scaledToFit()
+                        .foregroundStyle(descriptor.tint)
+                        .padding(13)
+                        .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
                 } else {
                     Image(systemName: descriptor.symbolName)
                         .font(.system(size: 23, weight: .semibold))

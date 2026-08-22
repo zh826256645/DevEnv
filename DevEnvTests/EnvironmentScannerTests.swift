@@ -689,22 +689,25 @@ final class EnvironmentScannerTests: XCTestCase {
     }
 
     func testDescribesCommonLocalServiceProcesses() {
-        let expectedNames = [
-            "python3.13": "Python",
-            "node": "Node.js",
-            "postgres": "PostgreSQL",
-            "mongod": "MongoDB",
-            "mysqld": "MySQL",
-            "redis-server": "Redis",
-            "adb": "Android Debug Bridge",
-            "rapportd": "Apple 设备互联",
-            "ControlCenter": "控制中心",
-            "WeChat": "微信",
-            "Sparkle": "Sparkle",
+        let expectedDescriptors: [(String, String, String?)] = [
+            ("python3.13", "Python", "RuntimePythonLogo"),
+            ("node", "Node.js", "RuntimeNodeLogo"),
+            ("postgres", "PostgreSQL", "ServicePostgreSQLLogo"),
+            ("mongod", "MongoDB", "ServiceMongoDBLogo"),
+            ("mysqld", "MySQL", "ServiceMySQLLogo"),
+            ("mariadbd", "MariaDB", "ServiceMariaDBLogo"),
+            ("redis-server", "Redis", "ServiceRedisLogo"),
+            ("adb", "Android Debug Bridge", nil),
+            ("rapportd", "Apple 设备互联", nil),
+            ("ControlCenter", "控制中心", nil),
+            ("WeChat", "微信", nil),
+            ("Sparkle", "Sparkle", nil),
         ]
 
-        for (processName, expectedName) in expectedNames {
-            XCTAssertEqual(localServiceDescriptor(for: processName).displayName, expectedName)
+        for (processName, expectedName, expectedAssetName) in expectedDescriptors {
+            let descriptor = localServiceDescriptor(for: processName)
+            XCTAssertEqual(descriptor.displayName, expectedName)
+            XCTAssertEqual(descriptor.assetName, expectedAssetName)
         }
     }
 
