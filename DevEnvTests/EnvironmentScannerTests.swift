@@ -668,6 +668,26 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(snapshot.issues.contains("本地服务：读取失败"))
     }
 
+    func testGroupsListenerRowsOnlyWhenProcessNameAndBindingsMatch() {
+        let sharedBinding = ListenerBinding(address: "127.0.0.1", port: 8000, family: .ipv4)
+        let groups = groupLocalServicesForDisplay([
+            LocalServiceSnapshot(processName: "python3.13", pid: 42, bindings: [sharedBinding]),
+            LocalServiceSnapshot(processName: "python3.13", pid: 10, bindings: [sharedBinding]),
+            LocalServiceSnapshot(
+                processName: "python3.13",
+                pid: 30,
+                bindings: [ListenerBinding(address: "127.0.0.1", port: 8001, family: .ipv4)]
+            ),
+            LocalServiceSnapshot(processName: "node", pid: 20, bindings: [sharedBinding]),
+        ])
+
+        XCTAssertEqual(groups.count, 3)
+        XCTAssertEqual(groups[0].processName, "python3.13")
+        XCTAssertEqual(groups[0].pids, [10, 42])
+        XCTAssertEqual(groups[1].pids, [30])
+        XCTAssertEqual(groups[2].processName, "node")
+    }
+
     func testCrossProviderScanIsStableDeduplicatedAndPersistable() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

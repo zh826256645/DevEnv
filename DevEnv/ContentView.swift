@@ -1,6 +1,38 @@
 import AppKit
 import SwiftUI
 
+struct LocalServiceDisplayGroup: Identifiable {
+    var id: Int32 { pids[0] }
+
+    let processName: String
+    var pids: [Int32]
+    let bindings: [ListenerBinding]
+}
+
+func groupLocalServicesForDisplay(
+    _ services: [LocalServiceSnapshot]
+) -> [LocalServiceDisplayGroup] {
+    var groups: [LocalServiceDisplayGroup] = []
+
+    // ponytail: listener counts are small; use keyed indices if this becomes measurable.
+    for service in services {
+        if let index = groups.firstIndex(where: {
+            $0.processName == service.processName && $0.bindings == service.bindings
+        }) {
+            groups[index].pids.append(service.pid)
+            groups[index].pids.sort()
+        } else {
+            groups.append(LocalServiceDisplayGroup(
+                processName: service.processName,
+                pids: [service.pid],
+                bindings: service.bindings
+            ))
+        }
+    }
+
+    return groups
+}
+
 @MainActor
 final class EnvironmentViewModel: ObservableObject {
     @Published private(set) var snapshot: MachineSnapshot?
@@ -340,7 +372,8 @@ struct ContentView: View {
     }
 
     private func localServicesSection(_ services: [LocalServiceSnapshot]) -> some View {
-        let portCount = services.reduce(0) { $0 + Set($1.bindings.map(\.port)).count }
+        let groups = groupLocalServicesForDisplay(services)
+        let portCount = groups.reduce(0) { $0 + Set($1.bindings.map(\.port)).count }
 
         return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
@@ -350,19 +383,19 @@ struct ContentView: View {
                 Text("本地服务")
                     .font(.title3.bold())
                 Spacer()
-                Text("\(services.count) 个服务 · \(portCount) 个端口")
+                Text("\(groups.count) 组服务 · \(portCount) 个端口")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
-            if services.isEmpty {
+            if groups.isEmpty {
                 ContentUnavailableView("未发现可见的 TCP 监听服务", systemImage: "network.slash")
                     .frame(maxWidth: .infinity, minHeight: 110)
             } else {
                 VStack(spacing: 0) {
-                    ForEach(Array(services.enumerated()), id: \.element.id) { index, service in
-                        localServiceRow(service)
-                        if index < services.count - 1 { Divider() }
+                    ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                        localServiceRow(group)
+                        if index < groups.count - 1 { Divider() }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -387,8 +420,12 @@ struct ContentView: View {
         }
     }
 
-    private func localServiceRow(_ service: LocalServiceSnapshot) -> some View {
-        HStack(alignment: .top, spacing: 14) {
+    private func localServiceRow(_ group: LocalServiceDisplayGroup) -> some View {
+        let pidText = group.pids.count == 1
+            ? "PID \(group.pids[0].formatted())"
+            : "\(group.pids.count) 个进程 · PID \(group.pids.map { $0.formatted() }.joined(separator: "、"))"
+
+        return HStack(alignment: .top, spacing: 14) {
             Image(systemName: "server.rack")
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Color.accentColor)
@@ -397,9 +434,9 @@ struct ContentView: View {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(service.processName)
+                Text(group.processName)
                     .font(.headline)
-                Text("PID \(service.pid)")
+                Text(pidText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -408,7 +445,7 @@ struct ContentView: View {
             Spacer(minLength: 16)
 
             VStack(alignment: .trailing, spacing: 7) {
-                ForEach(service.bindings, id: \.self) { binding in
+                ForEach(group.bindings, id: \.self) { binding in
                     HStack(spacing: 8) {
                         Text(binding.family.rawValue)
                             .font(.caption)
