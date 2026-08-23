@@ -634,59 +634,168 @@ struct ContentView: View {
             ? runtime.installations
             : Array(runtime.installations.prefix(3))
 
-        return VStack(alignment: .leading, spacing: 0) {
-            if runtime.installations.isEmpty {
-                runtimeSummary(runtime)
-                    .padding(.vertical, 4)
-            } else {
-                VStack(alignment: .leading, spacing: 0) {
+        return Group {
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 16) {
                     Button {
                         toggleRuntime(runtime.id)
                     } label: {
-                        runtimeSummary(runtime)
+                        runtimeExpandedSummary(runtime)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityValue(isExpanded ? "已展开" : "已折叠")
+                    .accessibilityValue("已展开")
 
-                    if isExpanded {
-                        Divider()
-                            .padding(.vertical, 10)
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(visibleInstallations) { installation in
-                                runtimeInstallationRow(installation)
-                            }
-                            if runtime.installations.count > 3 {
-                                Button {
-                                    toggleInstallationLimit(runtime.id)
-                                } label: {
-                                    Label(
-                                        showsAllInstallations
-                                            ? "收起至 3 个安装路径"
-                                            : "展开其余 \(runtime.installations.count - 3) 个安装路径",
-                                        systemImage: showsAllInstallations ? "chevron.up" : "chevron.down"
-                                    )
-                                }
-                                .buttonStyle(.borderless)
-                            }
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(visibleInstallations) { installation in
+                            runtimeInstallationRow(installation, hasConflict: runtime.hasPathVersionConflict)
                         }
-                        .padding(.bottom, 8)
-                        .transition(.opacity)
+                        if runtime.installations.count > 3 {
+                            Button {
+                                toggleInstallationLimit(runtime.id)
+                            } label: {
+                                Label(
+                                    showsAllInstallations
+                                        ? "收起至 3 个安装路径"
+                                        : "展开其余 \(runtime.installations.count - 3) 个安装路径",
+                                    systemImage: showsAllInstallations ? "chevron.up" : "chevron.down"
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(Color.primary.opacity(0.09))
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            } else {
+                Group {
+                    if runtime.installations.isEmpty {
+                        runtimeSummary(runtime)
+                    } else {
+                        Button {
+                            toggleRuntime(runtime.id)
+                        } label: {
+                            runtimeSummary(runtime)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityValue("已折叠")
                     }
                 }
-                .padding(.vertical, 4)
             }
         }
-        .padding(14)
+        .padding(isExpanded ? 16 : 14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(status.color.opacity(isExpanded ? 0.10 : 0.035))
+            RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                .fill(status.color.opacity(isExpanded ? 0.08 : 0.035))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(status.color.opacity(isExpanded ? 0.50 : 0.25))
+                    RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                        .stroke(status.color.opacity(isExpanded ? 0.55 : 0.25))
                 }
         }
-        .shadow(color: .black.opacity(0.025), radius: 8, y: 3)
+        .shadow(color: status.color.opacity(isExpanded ? 0.10 : 0.025), radius: isExpanded ? 14 : 8, y: 3)
+    }
+
+    private func runtimeExpandedSummary(_ runtime: RuntimeSnapshot) -> some View {
+        let brand = runtimeBrand(runtime)
+        let status = runtimeCardStatus(runtime)
+        let pathVersionCount = Set(runtime.installations.filter(\.isInPath).compactMap(\.version)).count
+
+        return HStack(alignment: .center, spacing: 18) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(brand.color.opacity(0.10))
+                Image(brand.assetName)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(brand.color)
+                    .padding(11)
+            }
+            .frame(width: 64, height: 64)
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(brand.color.opacity(0.16))
+            }
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(runtime.name)
+                    .font(.title3.bold())
+                Text(effectiveVersion(for: runtime))
+                    .font(.title2.bold())
+                    .monospacedDigit()
+                Label("\(runtime.installations.count) 个安装", systemImage: "square.stack.3d.up.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Label(status.title, systemImage: status.pillSymbol)
+                    if let explanation = status.explanation {
+                        helpIcon(explanation)
+                    }
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(status.color)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(status.color.opacity(0.10), in: Capsule())
+            }
+            .frame(width: 150, alignment: .leading)
+
+            HStack(spacing: 10) {
+                runtimeMetric(
+                    title: "当前生效",
+                    value: effectiveVersion(for: runtime),
+                    systemImage: "checkmark.circle",
+                    tint: runtime.state == .failed ? .orange : .green
+                )
+                runtimeMetric(
+                    title: "PATH 版本",
+                    value: "\(pathVersionCount)",
+                    systemImage: "exclamationmark.circle",
+                    tint: runtime.hasPathVersionConflict ? .orange : .secondary
+                )
+                runtimeMetric(
+                    title: "已发现",
+                    value: "\(runtime.installations.count)",
+                    systemImage: "square.stack.3d.up.fill",
+                    tint: .blue
+                )
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func runtimeMetric(
+        title: String,
+        value: String,
+        systemImage: String,
+        tint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tint)
+            Text(value)
+                .font(.title3.bold())
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+        .background(tint.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(tint.opacity(0.25))
+        }
     }
 
     private func runtimeSummary(_ runtime: RuntimeSnapshot) -> some View {
@@ -827,28 +936,64 @@ struct ContentView: View {
         }
     }
 
-    private func runtimeInstallationRow(_ installation: RuntimeInstallation) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: installation.state == .discovered ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                .foregroundStyle(installation.state == .discovered ? .green : .orange)
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 8) {
-                    Text(installation.version ?? installation.error ?? "版本读取失败")
-                    if installation.state == .failed {
-                        helpIcon("该安装已被发现，但版本读取失败或可执行文件不可用；它不会阻止其他 Runtime Installation 继续扫描。")
-                    }
-                    if installation.isEffective {
-                        Text("当前生效")
-                            .font(.caption)
-                            .foregroundStyle(.blue)
-                    }
-                }
+    private func runtimeInstallationRow(
+        _ installation: RuntimeInstallation,
+        hasConflict: Bool
+    ) -> some View {
+        let isConflictingPath = hasConflict && installation.isInPath && !installation.isEffective
+        let tint: Color = installation.isEffective
+            ? .green
+            : (installation.state == .failed || isConflictingPath ? .orange : .secondary)
+        let symbol = installation.isEffective
+            ? "checkmark.circle.fill"
+            : (installation.state == .failed || isConflictingPath ? "exclamationmark.circle" : "circle.fill")
+        let source = installation.isEffective
+            ? "当前生效"
+            : (installation.isInPath ? "PATH" : "已发现")
+
+        return HStack(alignment: .center, spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 24)
+
+            Text(installation.version ?? "读取失败")
+                .font(.title3.weight(.semibold))
+                .monospacedDigit()
+                .frame(width: 90, alignment: .leading)
+
+            Text(source)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(installation.isEffective ? .green : .secondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
+
+            VStack(alignment: .leading, spacing: 5) {
                 copyablePath(installation.executable)
                 if let actual = installation.actualExecutable {
                     copyablePath(actual, prefix: "实际路径")
                 }
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if installation.state == .failed {
+                helpIcon("该安装已被发现，但版本读取失败或可执行文件不可用；它不会阻止其他 Runtime Installation 继续扫描。")
+            } else if isConflictingPath {
+                Text("可能冲突")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(tint.opacity(installation.isEffective ? 0.07 : 0.025), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(tint.opacity(installation.isEffective || isConflictingPath ? 0.45 : 0.16))
         }
     }
 
