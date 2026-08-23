@@ -32,6 +32,26 @@ _Avoid_: Environment, System Profile
 本机可被发现的某个语言运行时实例，包含其版本与来源位置。
 _Avoid_: Runtime, Package
 
+**Database Installation**:
+本机可被发现的某个数据库服务端软件安装实例，包含数据库类型、版本与服务端可执行文件路径。
+_Avoid_: Database, 数据库, DB
+
+**Listening Database Installation**:
+服务端可执行文件实际路径与至少一个 Local Service 匹配的 Database Installation；该状态只说明存在 TCP Listener Binding，不覆盖仅使用 Unix Socket 的运行形态，也不表示数据库健康或可用。
+_Avoid_: Running Database, Healthy Database, Available Database, Active Database
+
+**Database Listening State**:
+Environment Scan 对某个 Database Installation 是否能精确匹配 TCP 监听进程的观察结果，取值为“正在监听”“未监听”或“监听状态未知”。
+_Avoid_: Database Run State, Health Status
+
+**Database Discovery State**:
+Environment Scan 对 Database Installation 发现完整性的观察结果，取值为“已发现”“未发现”或“发现状态未知”；该状态不证明软件在本机上绝对存在或不存在。
+_Avoid_: Installation State, Installed Status
+
+**Database Provider**:
+从已知工具、平台索引或 Local Service 的真实可执行文件路径中，发现未进入当前 `PATH` 的 Database Installation 的来源。
+_Avoid_: Database Scanner, Database Manager
+
 **Runtime Provider**:
 从已知工具或平台索引中发现未进入当前 `PATH` 的 Runtime Installation 的来源。
 _Avoid_: Scanner, Version Manager
@@ -71,6 +91,14 @@ _Avoid_: Git Account, Git User
 **User Excludes File**:
 当前 App 运行用户用于跨仓库忽略路径的 Git 规则文件，其位置可来自 User Git Configuration 或 Git 的用户默认位置。
 _Avoid_: Global .gitignore, Default Ignore File
+
+**Git Signing Configuration**:
+User Git Configuration 中用于选择签名格式、签名标识及提交和标签签名开关的本地事实，不表示签名密钥已经验证或可用。
+_Avoid_: Verified Signing Identity, Signing Health
+
+**Credential Helper Chain**:
+User Git Configuration 中按配置顺序生效的凭据助手标识序列；不包含 helper 参数或自定义命令正文。
+_Avoid_: Git Credentials, Credential Health
 
 **GitHub Authentication Configuration**:
 当前 App 运行用户存在可供 GitHub CLI 使用的本地或进程级认证来源，不表示凭据已经联网验证或当前处于登录状态。

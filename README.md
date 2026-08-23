@@ -17,11 +17,12 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 - 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见语言 Runtime 的只读扫描和最新快照持久化。
 - 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源 Runtime Installation 发现。
 - 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
+- 已完成当前 `PATH` 首个生效 Git CLI、Git LFS、用户级配置与脱敏后的 GitHub Authentication Configuration 只读扫描。
 - 已完成加载页、顶部状态总览、Runtime 自适应卡片、按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
-- v0.1 已冻结为已交付的只读 Environment Scanner；当前下一阶段是 v0.2 — Services & Ports。
+- v0.1 与 v0.2 的只读扫描范围已交付；Git Tooling State 已交付 Git CLI、Git LFS、脱敏后的 User Git Configuration 与 GitHub Authentication Configuration。
 
-Git、Docker、服务管理、端口管理、环境修改和诊断仍属于后续规划；v0.2 的 Services & Ports 也保持只读。
+Docker、服务管理、端口管理、环境修改和诊断仍属于后续规划；现有 Environment Scan 保持只读。
 
 你可以通过 DevEnv 快速了解：
 
@@ -605,6 +606,24 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 解决：
 
 > 当前有哪些本地服务正在运行，监听了哪些端口？
+
+---
+
+### Git Tooling State
+
+**Git Tooling State（已完成）**
+
+按当前 `PATH` 顺序展示首个生效 Git CLI、Git LFS 与 GitHub CLI 的本地 `git_protocol`；展开 Git 卡片可查看用户级 Default Git Identity、默认分支、User Excludes File、签名配置、脱敏后的 Credential Helper Chain，以及 GitHub 本地/进程级认证来源是否已配置。Environment Scan 不联网验证认证，不读取或持久化账号名、token、配置文件内容、密钥、helper 参数或自定义命令正文。结果随最新 Machine Snapshot 持久化。
+
+解决：
+
+> 当前 App 运行用户实际会调用哪个 Git？
+
+> 没有具体仓库上下文时，Git 默认使用什么身份、分支与跨仓库忽略文件？
+
+> 用户级签名开关与 Credential Helper Chain 当前如何配置？
+
+> GitHub CLI 是否存在本地或进程级认证来源，当前使用哪种 Git 协议？
 
 ---
 

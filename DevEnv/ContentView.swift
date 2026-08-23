@@ -1,6 +1,25 @@
 import AppKit
 import SwiftUI
 
+private struct EnvironmentCardUpperContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private extension View {
+    func synchronizedEnvironmentCardUpperContent(minHeight: CGFloat) -> some View {
+        background {
+            GeometryReader { geometry in
+                Color.clear.preference(key: EnvironmentCardUpperContentHeightKey.self, value: geometry.size.height)
+            }
+        }
+        .frame(minHeight: minHeight, alignment: .top)
+    }
+}
+
 struct LocalServiceDisplayGroup: Identifiable {
     var id: Int32 { pids[0] }
 
@@ -151,9 +170,11 @@ struct ContentView: View {
     @State private var hoveredPath: String?
     @State private var expandedRuntimeID: String?
     @State private var fullyShownRuntimeID: String?
+    @State private var isGitConfigurationExpanded = false
     @State private var isPathExpanded = false
     @State private var isShowingNotifications = false
     @State private var readNoticeSnapshotDate: Date?
+    @State private var environmentCardUpperContentHeight: CGFloat = 0
     @FocusState private var focusedCopyPath: String?
 
     var body: some View {
@@ -851,10 +872,22 @@ struct ContentView: View {
             HStack(alignment: .top, spacing: 14) {
                 homebrewCard(snapshot.homebrew)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                gitCard(
+                    snapshot.gitCLI,
+                    lfs: snapshot.gitLFS,
+                    configuration: snapshot.userGitConfiguration,
+                    signing: snapshot.gitSigningConfiguration,
+                    credentialHelpers: snapshot.gitCredentialHelpers,
+                    github: snapshot.githubAuthenticationConfiguration
+                )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 pathCard(snapshot.path, warningCount: pathWarningCount)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
             .fixedSize(horizontal: false, vertical: true)
+            .onPreferenceChange(EnvironmentCardUpperContentHeightKey.self) {
+                environmentCardUpperContentHeight = $0
+            }
 
             if isPathExpanded {
                 pathDetails(snapshot.path)
@@ -872,50 +905,298 @@ struct ContentView: View {
         }
     }
 
-    private func homebrewCard(_ homebrew: HomebrewSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.green.opacity(0.09))
-                    Image(systemName: "shippingbox")
-                        .font(.system(size: 23, weight: .medium))
+    private func gitCard(
+        _ git: GitCLISnapshot,
+        lfs: GitLFSSnapshot?,
+        configuration: UserGitConfigurationSnapshot?,
+        signing: GitSigningConfigurationSnapshot?,
+        credentialHelpers: [String]?,
+        github: GitHubAuthenticationConfigurationSnapshot
+    ) -> some View {
+        let appearance: (color: Color, status: String, badge: String, pill: String) = switch git.state {
+        case .available: (.green, "可用", "checkmark", "checkmark.circle.fill")
+        case .failed: (.orange, "读取失败", "exclamationmark", "exclamationmark.circle.fill")
+        case .unavailable: (.secondary, "未发现", "questionmark", "circle.fill")
+        }
+
+        return VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.orange.opacity(0.09))
+                        Image("GitLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .foregroundStyle(.orange)
+                            .padding(11)
+                    }
+                    .frame(width: 54, height: 54)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.primary.opacity(0.07))
+                    }
+                    .accessibilityHidden(true)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Git")
+                            .font(.headline)
+                        Text(git.version ?? appearance.status)
+                            .font(.title2.bold())
+                            .monospacedDigit()
+                        Text("当前生效 CLI")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: appearance.badge)
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(appearance.color)
+                        .frame(width: 38, height: 38)
+                        .background(appearance.color.opacity(0.10), in: Circle())
+                        .accessibilityHidden(true)
                 }
-                .frame(width: 54, height: 54)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.primary.opacity(0.07))
-                }
-                .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Homebrew")
-                        .font(.headline)
-                    Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
-                        .font(.title2.bold())
-                        .monospacedDigit()
-                    Text("包管理器")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                Image(systemName: homebrew.available ? "checkmark" : "questionmark")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
-                    .frame(width: 38, height: 38)
-                    .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
-            }
-
-            if homebrew.available {
-                Text("已安装")
+                Label(appearance.status, systemImage: appearance.pill)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.green)
+                    .foregroundStyle(appearance.color)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
-                    .background(Color.green.opacity(0.10), in: Capsule())
+                    .background(appearance.color.opacity(0.10), in: Capsule())
+
+                if let lfs {
+                    HStack {
+                        Text("Git LFS")
+                        Spacer()
+                        Text(lfs.version ?? (lfs.state == .failed ? "读取失败" : "未发现"))
+                            .foregroundStyle(lfs.state == .failed ? .orange : .secondary)
+                    }
+                    .font(.caption)
+                }
+
+                HStack {
+                    Text("GitHub Authentication Configuration")
+                    Spacer()
+                    Text(github.isConfigured ? "已配置" : "未配置")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
             }
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+
+            Divider()
+
+            if git.state != .available {
+                if let executable = git.executable {
+                    copyablePath(executable)
+                } else {
+                    Text("当前 PATH 未发现 Git")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Button {
+                toggleGitConfiguration()
+            } label: {
+                Label(
+                    isGitConfigurationExpanded ? "收起 Git 配置" : "查看 Git 配置",
+                    systemImage: isGitConfigurationExpanded ? "chevron.up" : "chevron.down"
+                )
+            }
+            .buttonStyle(.borderless)
+            .accessibilityValue(isGitConfigurationExpanded ? "已展开" : "已折叠")
+
+            if isGitConfigurationExpanded {
+                Divider()
+                gitConfigurationDetails(
+                    configuration,
+                    signing: signing,
+                    credentialHelpers: credentialHelpers,
+                    executable: git.state == .available ? git.executable : nil,
+                    github: github
+                )
+                    .transition(.opacity)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(0.09))
+                }
+        }
+    }
+
+    private func gitConfigurationDetails(
+        _ configuration: UserGitConfigurationSnapshot?,
+        signing: GitSigningConfigurationSnapshot?,
+        credentialHelpers: [String]?,
+        executable: String?,
+        github: GitHubAuthenticationConfigurationSnapshot
+    ) -> some View {
+        let githubCLIStatus = switch github.cliState {
+        case .available: "已发现"
+        case .unavailable: "未发现"
+        case .failed: "读取失败"
+        }
+
+        return VStack(alignment: .leading, spacing: 14) {
+            if let executable {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Git CLI 路径")
+                        .font(.callout.weight(.semibold))
+                    copyablePath(executable)
+                }
+
+                if let configuration {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Default Git Identity")
+                            .font(.callout.weight(.semibold))
+                        if configuration.defaultIdentity.name == nil || configuration.defaultIdentity.email == nil {
+                            Text("未配置默认身份")
+                                .foregroundStyle(.secondary)
+                        }
+                        if let name = configuration.defaultIdentity.name { gitConfigurationValue("名称", name) }
+                        if let email = configuration.defaultIdentity.email { gitConfigurationValue("邮箱", email) }
+                    }
+
+                    gitConfigurationValue("默认分支", configuration.defaultBranch ?? "未配置")
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("User Excludes File")
+                            .font(.callout.weight(.semibold))
+                        Text(configuration.excludesFile.source == .explicitConfiguration ? "显式配置" : "Git 默认")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        copyablePath(configuration.excludesFile.path)
+                        Text(configuration.excludesFile.exists ? "文件存在" : "文件不存在")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("User Git Configuration 读取失败，请查看 Scan Notice")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("签名配置")
+                        .font(.callout.weight(.semibold))
+                    if let signing {
+                        gitConfigurationValue("格式", signing.format ?? "未配置")
+                        gitConfigurationValue("签名标识", signing.signingKey ?? "未配置")
+                        gitConfigurationValue("提交签名", signing.commitSigning ?? "未配置")
+                        gitConfigurationValue("标签签名", signing.tagSigning ?? "未配置")
+                    } else {
+                        Text("读取失败，请查看 Scan Notice")
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Credential Helper Chain")
+                        .font(.callout.weight(.semibold))
+                    if let credentialHelpers {
+                        if credentialHelpers.isEmpty {
+                            Text("未配置")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(Array(credentialHelpers.enumerated()), id: \.offset) { index, helper in
+                                gitConfigurationValue("\(index + 1)", helper)
+                            }
+                        }
+                    } else {
+                        Text("读取失败，请查看 Scan Notice")
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("GitHub Authentication Configuration")
+                    .font(.callout.weight(.semibold))
+                gitConfigurationValue("GitHub CLI", githubCLIStatus)
+                gitConfigurationValue("git_protocol", github.gitProtocol ?? (github.cliState == .failed ? "读取失败" : "未配置"))
+                gitConfigurationValue("本地配置", github.localConfigurationExists ? "已配置" : "未配置")
+                gitConfigurationValue("进程 GH_TOKEN", github.ghTokenExists ? "已配置" : "未配置")
+                gitConfigurationValue("进程 GITHUB_TOKEN", github.githubTokenExists ? "已配置" : "未配置")
+            }
+        }
+    }
+
+    private func gitConfigurationValue(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func toggleGitConfiguration() {
+        if reduceMotion {
+            isGitConfigurationExpanded.toggle()
+        } else {
+            withAnimation(.smooth(duration: 0.25)) {
+                isGitConfigurationExpanded.toggle()
+            }
+        }
+    }
+
+    private func homebrewCard(_ homebrew: HomebrewSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.green.opacity(0.09))
+                        Image(systemName: "shippingbox")
+                            .font(.system(size: 23, weight: .medium))
+                    }
+                    .frame(width: 54, height: 54)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.primary.opacity(0.07))
+                    }
+                    .accessibilityHidden(true)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Homebrew")
+                            .font(.headline)
+                        Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
+                            .font(.title2.bold())
+                            .monospacedDigit()
+                        Text("包管理器")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: homebrew.available ? "checkmark" : "questionmark")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
+                        .frame(width: 38, height: 38)
+                        .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
+                }
+
+                if homebrew.available {
+                    Text("已安装")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.10), in: Capsule())
+                }
+            }
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
             Divider()
 
@@ -945,90 +1226,96 @@ struct ContentView: View {
 
     private func pathCard(_ path: [String], warningCount: Int) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.09))
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 23, weight: .medium))
-                        .foregroundStyle(Color.accentColor)
-                }
-                .frame(width: 54, height: 54)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.primary.opacity(0.07))
-                }
-                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.09))
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.system(size: 23, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .frame(width: 54, height: 54)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.primary.opacity(0.07))
+                    }
+                    .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 8) {
-                        Text("PATH")
-                            .font(.headline)
-                        Text("\(path.count) 项")
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 8) {
+                            Text("PATH")
+                                .font(.headline)
+                            Text("\(path.count) 项")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.055), in: Capsule())
+                        }
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            Text(path.count.formatted())
+                                .font(.title2.bold())
+                                .monospacedDigit()
+                                .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
+                            Text("个目录")
+                                .font(.callout)
+                            if warningCount > 0 {
+                                Text("·")
+                                    .foregroundStyle(.secondary)
+                                Text(warningCount.formatted())
+                                    .font(.title3.bold())
+                                    .monospacedDigit()
+                                    .foregroundStyle(.orange)
+                                Text("个冲突")
+                                    .font(.callout)
+                            }
+                        }
+                        Text("环境变量路径扫描")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(Color.primary.opacity(0.055), in: Capsule())
                     }
-                    HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        Text(path.count.formatted())
-                            .font(.title2.bold())
-                            .monospacedDigit()
-                            .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
-                        Text("个目录")
-                            .font(.callout)
-                        if warningCount > 0 {
-                            Text("·")
-                                .foregroundStyle(.secondary)
-                            Text(warningCount.formatted())
-                                .font(.title3.bold())
-                                .monospacedDigit()
-                                .foregroundStyle(.orange)
-                            Text("个冲突")
-                                .font(.callout)
-                        }
-                    }
-                    Text("环境变量路径扫描")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
+
+                HStack(spacing: 8) {
+                    Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background((path.isEmpty ? Color.secondary : Color.green).opacity(0.10), in: Capsule())
+
+                    if warningCount > 0 {
+                        Label("\(warningCount) 个冲突", systemImage: "exclamationmark.triangle.fill")
+                            .fixedSize(horizontal: true, vertical: false)
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Color.orange.opacity(0.10), in: Capsule())
+                    }
+                }
+                .font(.caption.weight(.semibold))
             }
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
             Divider()
 
-            HStack(spacing: 8) {
-                Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
-                    .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background((path.isEmpty ? Color.secondary : Color.green).opacity(0.10), in: Capsule())
-
-                if warningCount > 0 {
-                    Label("\(warningCount) 个冲突", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Color.orange.opacity(0.10), in: Capsule())
-                }
-
-                Spacer(minLength: 4)
-
-                Button {
-                    if reduceMotion {
+            Button {
+                if reduceMotion {
+                    isPathExpanded.toggle()
+                } else {
+                    withAnimation(.easeInOut(duration: 0.2)) {
                         isPathExpanded.toggle()
-                    } else {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            isPathExpanded.toggle()
-                        }
                     }
-                } label: {
-                    Label(isPathExpanded ? "收起" : "查看全部", systemImage: isPathExpanded ? "arrow.up" : "arrow.right")
-                        .labelStyle(.titleAndIcon)
                 }
-                .buttonStyle(.borderless)
+            } label: {
+                Label(isPathExpanded ? "收起" : "查看全部", systemImage: isPathExpanded ? "arrow.up" : "arrow.right")
+                    .labelStyle(.titleAndIcon)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .font(.caption.weight(.semibold))
+            .buttonStyle(.borderless)
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1203,8 +1490,11 @@ struct ContentView: View {
             Text(prefix.map { "\($0)：\(path)" } ?? path)
                 .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .help(path)
             Button {
                 copy(path)
             } label: {

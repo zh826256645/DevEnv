@@ -1,6 +1,6 @@
 # macOS 系统环境扫描
 
-状态：v0.1 范围已冻结；Runtime 多版本发现、TCP 监听服务与总览界面已实现。
+状态：v0.1 范围已冻结；Runtime 多版本发现、TCP 监听服务、Git Tooling State 与总览界面已实现。
 
 ## 目标
 
@@ -79,12 +79,16 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - V1 实现版本：`schemaVersion = 1`
 - Runtime 多版本扩展版本：`schemaVersion = 2`
 - TCP 监听服务扩展版本：`schemaVersion = 3`
+- Git CLI 扩展版本：`schemaVersion = 4`
+- User Git Configuration 扩展版本：`schemaVersion = 5`
+- Git LFS、签名与 Credential Helper Chain 扩展版本：`schemaVersion = 6`
+- GitHub Authentication Configuration 扩展版本：`schemaVersion = 7`
 - 写入方式：原子替换
 - 启动读取到损坏或不支持版本的文件时忽略该文件，不尝试迁移
 
-TCP 监听服务扩展启用后，V1 和 V2 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
+GitHub Authentication Configuration 扩展启用后，V1–V6 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
 
-只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime 或 Homebrew 单项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
+只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
 
 ## 触发与界面
 
@@ -96,7 +100,7 @@ TCP 监听服务扩展启用后，V1 和 V2 快照视为不支持版本并立即
 - 标题下方首先展示一个圆角总览面板，面板内按双列划分系统信息与扫描汇总；每列由图标标题和独立内层卡片组成，两张内层卡片始终以内容较高的一侧为准保持可见背景等高，不使用固定高度。其后依次展示 Runtime、本地服务和环境配置，不在正文中重复系统信息或单独展示 Scan Notice 模块。
 - 摘要展示已发现 Runtime 类别数、Runtime Installation 总数和本地服务组数，不给出 Scan Notice 数量、环境健康评分或“正常/异常”的整体判断。
 - 系统信息卡使用大号系统 Apple 标志，集中展示 macOS 版本、Build、架构，并以图标指标展示主机名和内存；系统卷使用线性进度条显示已用容量占总容量的比例，并同时标注已用、可用和总容量。扫描汇总的三个指标分别使用带图标底板和细描边的独立圆角行，数值右对齐突出显示。
-- Runtime 使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew 与 PATH 合并到“环境配置”圆角模块内并使用双列等高卡片：Homebrew 展示版本、安装状态和可执行路径，PATH 展示目录总数与真实的 Runtime PATH 版本冲突数。PATH 详情默认折叠，点击“查看全部”后在双卡下方占满整行展开，避免把 Homebrew 卡片同步撑出空白。
+- Runtime 使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git 与 PATH 合并到“环境配置”圆角模块内并使用三张同级等高卡片：Homebrew 展示版本、安装状态和可执行路径，Git 展示当前生效 CLI、Git LFS 与 GitHub Authentication Configuration 摘要，PATH 展示目录总数与真实的 Runtime PATH 版本冲突数。展开 Git 卡片后展示 User Git Configuration、GitHub CLI 的 `git_protocol` 与本地/进程级认证来源事实；PATH 详情默认折叠，点击“查看全部”后在三张卡片下方占满整行展开。
 
 ### 扫描状态
 
@@ -161,6 +165,53 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - Runtime Conflict 在扫描提示中集中展示，并在对应 Runtime 行旁显示“PATH 版本冲突”。
 - 扫描提示保留版本读取失败、可执行文件不可用和 Provider 失败。
 
+## Git Tooling State 扩展
+
+- 按当前 `PATH` 顺序只取第一个可执行 `git`，记录规范化的绝对调用路径，不枚举其他安装来源或软链接目标。
+- 只以已发现的绝对路径和固定参数 `--version` 直接启动进程，不调用 Shell，不拼接用户输入，并沿用单命令 2 秒超时。
+- 状态固定为“可用”“未发现”或“读取失败”。未发现保持中性且不产生 Scan Notice；命令失败、超时或版本输出不可识别时保留路径并只产生一条 Git CLI Scan Notice。
+- Git CLI 子扫描失败不丢弃系统、Homebrew Availability、PATH、Runtime Installation 或 Local Service 结果，也不改变主机基础信息可用时 Machine Snapshot 的可持久化性。
+- Git CLI 随整份 Machine Snapshot 原子持久化和恢复，应用启动扫描与手动“重新扫描”继续共用现有刷新模型。
+- Git CLI 可用后，固定以 `git config --global --get` 分别查询 `user.name`、`user.email`、`init.defaultBranch`，并以 `git config --global --path --get core.excludesFile` 查询用户显式 ignore 路径；不列举全量配置，不读取 system、repository-local 或 conditional include 的实际仓库身份。
+- User Excludes File 优先采用显式配置；未配置时采用 `$XDG_CONFIG_HOME/git/ignore`，`XDG_CONFIG_HOME` 为空则采用 `$HOME/.config/git/ignore`。Machine Snapshot 只保存标准化绝对路径、来源和文件是否存在，不读取规则内容。
+- 默认身份、默认分支或 User Excludes File 缺失均为中性状态，不产生 Scan Notice。配置命令失败或超时只产生一条 User Git Configuration Scan Notice，并保留 Git CLI、其他扫描结果和快照可持久化性；Git 未发现或版本读取失败时跳过配置子扫描。
+- “环境配置”中的 Git 卡片默认折叠；折叠态补充 Git LFS 简明状态，展开后显示 Default Git Identity、默认分支、User Excludes File、签名配置和 Credential Helper Chain，并复用路径复制、键盘、VoiceOver 与“减少动态效果”交互，不计算就绪度、健康分或配置完成度。
+- Git CLI 可用时，按当前 `PATH` 顺序只取第一个可执行 `git-lfs` 并以固定参数 `version` 读取版本；不扫描任何仓库的 LFS 跟踪规则、对象、缓存或同步状态。未发现保持中性，版本读取失败或超时只产生一条 Git LFS Scan Notice。
+- 签名子扫描只以 `git config --global --get` 查询 `gpg.format`、`user.signingKey`、`commit.gpgSign` 和 `tag.gpgSign`；不枚举、打开或验证 SSH/GPG 密钥，不访问钥匙串或 agent。缺失值显示“未配置”，命令失败只隔离签名详情并产生一条对应 Scan Notice。
+- Credential Helper Chain 只以 `git config --global --null --get-all credential.helper` 读取全部用户级值并保留顺序。Machine Snapshot 在编码前移除标准 helper 参数和路径，只保留 helper 标识；`!` 自定义命令只保存“自定义命令”，空值保存为 chain 重置事实。`store` 与其他 helper 一样只作事实展示，不评分或建议修复。
+- Git 未发现或版本读取失败时跳过 Git LFS、签名和 Credential Helper Chain 子扫描；任一配置子扫描失败仍保留 Git CLI、User Git Configuration 的其他子项、Machine Environment 数据及快照可持久化性。
+- GitHub Authentication Configuration 独立于 Git CLI 扫描。认证文件依次采用非空 `$GH_CONFIG_DIR/hosts.yml`、`$XDG_CONFIG_HOME/gh/hosts.yml`、`$HOME/.config/gh/hosts.yml`，只通过 Machine Access 检查文件存在性；进程级来源只记录非空 `GH_TOKEN` 与 `GITHUB_TOKEN` 是否存在。
+- 按当前 `PATH` 顺序只取第一个可执行 `gh`，固定执行 `gh config get git_protocol --host github.com`；未发现 CLI 或配置保持中性，命令失败或超时只产生一条 GitHub CLI Configuration Scan Notice。Environment Scan 不执行 `gh auth status`、GitHub API 请求或任何联网认证测试，遵循 [ADR-0004](../adr/0004-keep-environment-scan-local.md)。
+- Machine Snapshot 只保存 GitHub CLI 状态、`git_protocol` 和三种认证来源的布尔状态，不保存认证文件路径或内容、账号名及 token。Git 卡片只使用“已配置”“未配置”，不声称来源已登录、已认证或凭据有效。
+
+## Database Installation 扩展
+
+状态：已确认，待实现。首批固定覆盖 PostgreSQL、MySQL、MariaDB、MongoDB 和 Redis，只读展示 Database Installation 及其 TCP 监听状态，不连接或查询数据库。
+
+### 发现与匹配
+
+1. 按当前 `PATH` 遍历已知数据库服务端可执行文件，Homebrew Database Provider 补充未进入 `PATH` 的安装。
+2. Local Service Database Provider 使用 PID 读取进程真实可执行文件路径，并补充未被 `PATH` 或 Homebrew 发现的正在监听安装。
+3. 以规范化路径和软链接实际目标去重；只有 Local Service 的真实可执行文件路径与 Database Installation 实际路径精确匹配时，才标记为“正在监听”，不按进程名或端口猜测。
+4. 每项展示版本、调用路径和不同的实际路径。版本读取失败时保留 Database Installation，并产生 Scan Notice。
+5. 只由 Local Service 发现且无法精确识别数据库类型的进程不创建 Database Installation；例如无法区分 MySQL 与 MariaDB 的 `mysqld` 时，保留 Local Service 并产生 Scan Notice。
+
+Database Discovery State 为“已发现”“未发现”或“发现状态未知”。任一适用 Database Provider 失败时保留已有结果并产生 Scan Notice；没有结果时显示“发现状态未知”，不声称“未安装”。
+
+Database Listening State 为“正在监听”“未监听”或“监听状态未知”。Local Service 扫描失败或已识别数据库进程的真实路径不可读时不猜测匹配；同一 Database Installation 的多个监听进程聚合为一个“正在监听”状态，不建立数据库实例模型。
+
+该扩展只观察 TCP Listener Binding，不覆盖仅使用 Unix Socket 或容器内的数据库。如需覆盖，由后续显式 Database Provider 扩展。完整取舍见 [ADR-0005](../adr/0005-map-database-listeners-by-installation-path.md)。
+
+### 展示
+
+- 总览顺序为 Runtime、数据库、本地服务、环境配置；顶部扫描汇总暂不增加数据库指标。
+- 按 PostgreSQL、MySQL、MariaDB、MongoDB、Redis 的固定顺序展示五张卡片，摘要显示安装数和正在监听数。
+- 卡片复用 Runtime 的折叠与展开交互：同时只展开一张，默认最多展示前 3 个 Database Installation，存在更多安装时才提供“查看全部”。
+- “正在监听”使用绿色；“未发现”和“未监听”是中性灰色，不产生 Scan Notice；发现或监听状态未知以及读取失败使用橙色并产生 Scan Notice。
+- 数据库监听进程仍保留在完整的“本地服务”区域；进程真实路径只用于 Database Installation 发现与匹配，不增加到 Local Service 行。
+- 数据库结果只随应用启动扫描和手动“重新扫描”更新，不增加轮询或独立刷新入口。
+- 实现时将 Machine Snapshot 升级为 `schemaVersion = 8`；V1–V7 快照直接忽略并重新扫描，不增加快照迁移。
+
 ## TCP 监听服务扩展
 
 - Environment Scan 固定执行 `/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn`，不调用 Shell、不接收用户参数、不请求管理员权限。
@@ -181,6 +232,19 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - Lua 未安装：Lua 显示“未发现”，其他结果正常保存。
 - 单个 Runtime 命令超时：该项显示“读取失败”，其他扫描继续。
 - Homebrew 不在标准路径：显示“未发现”，不执行 Shell 配置。
+- `PATH` 中存在多个 Git：只展示顺序最靠前的可执行文件及其版本。
+- Git 未发现：Git 卡片显示中性“未发现”，不产生 Scan Notice。
+- Git 版本命令失败、输出不可识别或超时：Git 卡片保留调用路径并显示“读取失败”，只产生一条 Git CLI Scan Notice，其他扫描结果仍可保存。
+- User Git Configuration 全部缺失：展开 Git 卡片显示“未配置默认身份”、中性“未配置”默认分支和 Git 默认 User Excludes File，不产生 Scan Notice。
+- User Excludes File 不存在：保留其标准化绝对路径、来源和“文件不存在”状态，不读取内容且不产生 Scan Notice。
+- User Git Configuration 命令失败或超时：跳过配置详情并只产生一条清晰的 Scan Notice，Git CLI 与其他 Machine Environment 结果仍可保存。
+- Git LFS 成功、缺失或版本读取失败：折叠 Git 卡片分别显示版本、中性“未发现”或“读取失败”；只在失败时产生 Scan Notice。
+- 签名配置全部缺失：展开 Git 卡片的四个白名单项均显示“未配置”，不枚举或验证任何密钥。
+- 多个 Credential Helper：按 Git 配置顺序展示；helper 参数、自定义命令正文及其中的敏感文本不进入 Machine Snapshot 或编码后的 JSON。
+- 签名或 Credential Helper 配置读取失败：只隐藏对应详情并产生一条 Scan Notice，其他 Git 与 Machine Environment 事实仍可保存。
+- GitHub 本地配置、`GH_TOKEN` 或 `GITHUB_TOKEN` 存在：Git 卡片只显示对应来源“已配置”，Machine Snapshot 与 JSON 不包含账号或 token 值。
+- Git 或 GitHub CLI 缺失：GitHub Authentication Configuration 仍独立显示；`gh` 缺失与 `git_protocol` 缺失均保持中性且不产生 Scan Notice。
+- GitHub CLI 配置命令失败或超时：保留本地文件和进程级认证来源事实，只产生一条 GitHub CLI Configuration Scan Notice，其他结果仍可保存。
 - 主机基础信息无法建立：显示整体错误，磁盘中的上一份快照保持不变。
 - 快照文件损坏或版本不支持：忽略旧文件并执行启动扫描。
 - `PATH` 依次包含 Python 3.12 和 3.9：两项均展示，3.12 标记“当前生效”，Runtime 行和扫描提示显示“PATH 版本冲突”。
@@ -189,10 +253,21 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - `PATH` 首个 Runtime Installation 启动失败、第二个可用：首项仍标记 Effective 并显示“版本读取失败”。
 - Provider 超时：保留其他来源的安装，扫描提示记录对应 Provider 失败。
 - Provider 返回的可执行文件不可用：保留版本和预期绝对路径并显示错误。
-- 读取 V1 或 V2 快照：忽略旧快照并执行扫描，成功后写入 V3 快照。
+- 同一 PostgreSQL 可执行文件经 `PATH`、Homebrew 和 Local Service 重复发现：合并为一个 Database Installation 并显示“正在监听”。
+- 安装两个 PostgreSQL 版本且只有一个实际路径正在监听：只标记该 Database Installation，不连带标记另一个版本。
+- 发现 Homebrew 数据库但没有匹配 Local Service：显示“未监听”，不产生 Scan Notice。
+- Homebrew Database Provider 失败且没有其他发现结果：显示“发现状态未知”并产生 Scan Notice，不显示“未安装”。
+- Local Service 扫描失败或已识别数据库进程的真实路径不可读：相关 Database Listening State 显示“监听状态未知”。
+- 只启用 Unix Socket 或位于容器内的 PostgreSQL：不标记为 Listening Database Installation；容器端口代理仍可作为 Local Service 展示。
+- 读取 V1–V4 快照：忽略旧快照并执行扫描，成功后写入 V5 快照。
+- 读取 V1–V5 快照：忽略旧快照并执行扫描，成功后写入 V6 快照。
+- 读取 V1–V6 快照：忽略旧快照并执行扫描，成功后写入 V7 快照。
+- Database Installation 扩展实现后读取 V1–V7 快照：忽略旧快照并执行扫描，成功后写入 V8 快照。
 
 ## 相关决策
 
 - [ADR-0001：不启用 App Sandbox](../adr/0001-run-without-app-sandbox.md)
 - [ADR-0002：只读扫描并持久化最新环境快照](../adr/0002-read-only-environment-scan-snapshot.md)
 - [ADR-0003：按 PATH 与 Provider 分层发现 Runtime](../adr/0003-source-aware-runtime-discovery.md)
+- [ADR-0004：Environment Scan 保持本地观察](../adr/0004-keep-environment-scan-local.md)
+- [ADR-0005：按安装路径映射数据库 TCP 监听状态](../adr/0005-map-database-listeners-by-installation-path.md)
