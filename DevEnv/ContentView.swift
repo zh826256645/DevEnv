@@ -956,15 +956,7 @@ struct ContentView: View {
 
             Divider()
 
-            if let executable = git.executable {
-                copyablePath(executable)
-            } else {
-                Text("当前 PATH 未发现 Git")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            if git.state == .available {
+            if git.state == .available, let executable = git.executable {
                 Button {
                     toggleGitConfiguration()
                 } label: {
@@ -978,9 +970,15 @@ struct ContentView: View {
 
                 if isGitConfigurationExpanded {
                     Divider()
-                    gitConfigurationDetails(configuration)
+                    gitConfigurationDetails(configuration, executable: executable)
                         .transition(.opacity)
                 }
+            } else if let executable = git.executable {
+                copyablePath(executable)
+            } else {
+                Text("当前 PATH 未发现 Git")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(16)
@@ -995,10 +993,18 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
-    private func gitConfigurationDetails(_ configuration: UserGitConfigurationSnapshot?) -> some View {
-        if let configuration {
-            VStack(alignment: .leading, spacing: 14) {
+    private func gitConfigurationDetails(
+        _ configuration: UserGitConfigurationSnapshot?,
+        executable: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Git CLI 路径")
+                    .font(.callout.weight(.semibold))
+                copyablePath(executable)
+            }
+
+            if let configuration {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Default Git Identity")
                         .font(.callout.weight(.semibold))
@@ -1023,11 +1029,11 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            } else {
+                Text("User Git Configuration 读取失败，请查看 Scan Notice")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
             }
-        } else {
-            Text("User Git Configuration 读取失败，请查看 Scan Notice")
-                .font(.callout)
-                .foregroundStyle(.orange)
         }
     }
 
@@ -1391,8 +1397,11 @@ struct ContentView: View {
             Text(prefix.map { "\($0)：\(path)" } ?? path)
                 .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .help(path)
             Button {
                 copy(path)
             } label: {
