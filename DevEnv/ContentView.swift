@@ -1,6 +1,25 @@
 import AppKit
 import SwiftUI
 
+private struct EnvironmentCardUpperContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private extension View {
+    func synchronizedEnvironmentCardUpperContent(minHeight: CGFloat) -> some View {
+        background {
+            GeometryReader { geometry in
+                Color.clear.preference(key: EnvironmentCardUpperContentHeightKey.self, value: geometry.size.height)
+            }
+        }
+        .frame(minHeight: minHeight, alignment: .top)
+    }
+}
+
 struct LocalServiceDisplayGroup: Identifiable {
     var id: Int32 { pids[0] }
 
@@ -145,8 +164,6 @@ final class EnvironmentViewModel: ObservableObject {
 }
 
 struct ContentView: View {
-    private let environmentCardHeaderHeight: CGFloat = 72
-
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model = EnvironmentViewModel()
     @State private var copiedPath: String?
@@ -156,6 +173,7 @@ struct ContentView: View {
     @State private var isPathExpanded = false
     @State private var isShowingNotifications = false
     @State private var readNoticeSnapshotDate: Date?
+    @State private var environmentCardUpperContentHeight: CGFloat = 0
     @FocusState private var focusedCopyPath: String?
 
     var body: some View {
@@ -859,6 +877,9 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
             .fixedSize(horizontal: false, vertical: true)
+            .onPreferenceChange(EnvironmentCardUpperContentHeightKey.self) {
+                environmentCardUpperContentHeight = $0
+            }
 
             if isPathExpanded {
                 pathDetails(snapshot.path)
@@ -884,51 +905,53 @@ struct ContentView: View {
         }
 
         return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.orange.opacity(0.09))
-                    Image("GitLogo")
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundStyle(.orange)
-                        .padding(11)
-                }
-                .frame(width: 54, height: 54)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.primary.opacity(0.07))
-                }
-                .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Git")
-                        .font(.headline)
-                    Text(git.version ?? appearance.status)
-                        .font(.title2.bold())
-                        .monospacedDigit()
-                    Text("当前生效 CLI")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                Image(systemName: appearance.badge)
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(appearance.color)
-                    .frame(width: 38, height: 38)
-                    .background(appearance.color.opacity(0.10), in: Circle())
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.orange.opacity(0.09))
+                        Image("GitLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .foregroundStyle(.orange)
+                            .padding(11)
+                    }
+                    .frame(width: 54, height: 54)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.primary.opacity(0.07))
+                    }
                     .accessibilityHidden(true)
-            }
-            .frame(height: environmentCardHeaderHeight, alignment: .top)
 
-            Label(appearance.status, systemImage: appearance.pill)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(appearance.color)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(appearance.color.opacity(0.10), in: Capsule())
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Git")
+                            .font(.headline)
+                        Text(git.version ?? appearance.status)
+                            .font(.title2.bold())
+                            .monospacedDigit()
+                        Text("当前生效 CLI")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: appearance.badge)
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(appearance.color)
+                        .frame(width: 38, height: 38)
+                        .background(appearance.color.opacity(0.10), in: Circle())
+                        .accessibilityHidden(true)
+                }
+
+                Label(appearance.status, systemImage: appearance.pill)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(appearance.color)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(appearance.color.opacity(0.10), in: Capsule())
+            }
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
             Divider()
 
@@ -954,47 +977,51 @@ struct ContentView: View {
 
     private func homebrewCard(_ homebrew: HomebrewSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.green.opacity(0.09))
-                    Image(systemName: "shippingbox")
-                        .font(.system(size: 23, weight: .medium))
-                }
-                .frame(width: 54, height: 54)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.primary.opacity(0.07))
-                }
-                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.green.opacity(0.09))
+                        Image(systemName: "shippingbox")
+                            .font(.system(size: 23, weight: .medium))
+                    }
+                    .frame(width: 54, height: 54)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.primary.opacity(0.07))
+                    }
+                    .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Homebrew")
-                        .font(.headline)
-                    Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
-                        .font(.title2.bold())
-                        .monospacedDigit()
-                    Text("包管理器")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Homebrew")
+                            .font(.headline)
+                        Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
+                            .font(.title2.bold())
+                            .monospacedDigit()
+                        Text("包管理器")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: homebrew.available ? "checkmark" : "questionmark")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
+                        .frame(width: 38, height: 38)
+                        .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
                 }
 
-                Spacer(minLength: 8)
-
-                Image(systemName: homebrew.available ? "checkmark" : "questionmark")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
-                    .frame(width: 38, height: 38)
-                    .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
+                if homebrew.available {
+                    Text("已安装")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.10), in: Capsule())
+                }
             }
-            .frame(height: environmentCardHeaderHeight, alignment: .top)
-
-            Text(homebrew.available ? "已安装" : "未安装")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Capsule())
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
             Divider()
 
@@ -1024,75 +1051,77 @@ struct ContentView: View {
 
     private func pathCard(_ path: [String], warningCount: Int) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.09))
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 23, weight: .medium))
-                        .foregroundStyle(Color.accentColor)
-                }
-                .frame(width: 54, height: 54)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.primary.opacity(0.07))
-                }
-                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.09))
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.system(size: 23, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .frame(width: 54, height: 54)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.primary.opacity(0.07))
+                    }
+                    .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 8) {
-                        Text("PATH")
-                            .font(.headline)
-                        Text("\(path.count) 项")
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 8) {
+                            Text("PATH")
+                                .font(.headline)
+                            Text("\(path.count) 项")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.055), in: Capsule())
+                        }
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            Text(path.count.formatted())
+                                .font(.title2.bold())
+                                .monospacedDigit()
+                                .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
+                            Text("个目录")
+                                .font(.callout)
+                            if warningCount > 0 {
+                                Text("·")
+                                    .foregroundStyle(.secondary)
+                                Text(warningCount.formatted())
+                                    .font(.title3.bold())
+                                    .monospacedDigit()
+                                    .foregroundStyle(.orange)
+                                Text("个冲突")
+                                    .font(.callout)
+                            }
+                        }
+                        Text("环境变量路径扫描")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(Color.primary.opacity(0.055), in: Capsule())
                     }
-                    HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        Text(path.count.formatted())
-                            .font(.title2.bold())
-                            .monospacedDigit()
-                            .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
-                        Text("个目录")
-                            .font(.callout)
-                        if warningCount > 0 {
-                            Text("·")
-                                .foregroundStyle(.secondary)
-                            Text(warningCount.formatted())
-                                .font(.title3.bold())
-                                .monospacedDigit()
-                                .foregroundStyle(.orange)
-                            Text("个冲突")
-                                .font(.callout)
-                        }
-                    }
-                    Text("环境变量路径扫描")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
-            }
-            .frame(height: environmentCardHeaderHeight, alignment: .top)
 
-            HStack(spacing: 8) {
-                Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
-                    .fixedSize(horizontal: true, vertical: false)
-                    .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background((path.isEmpty ? Color.secondary : Color.green).opacity(0.10), in: Capsule())
-
-                if warningCount > 0 {
-                    Label("\(warningCount) 个冲突", systemImage: "exclamationmark.triangle.fill")
+                HStack(spacing: 8) {
+                    Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
                         .fixedSize(horizontal: true, vertical: false)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
-                        .background(Color.orange.opacity(0.10), in: Capsule())
+                        .background((path.isEmpty ? Color.secondary : Color.green).opacity(0.10), in: Capsule())
+
+                    if warningCount > 0 {
+                        Label("\(warningCount) 个冲突", systemImage: "exclamationmark.triangle.fill")
+                            .fixedSize(horizontal: true, vertical: false)
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Color.orange.opacity(0.10), in: Capsule())
+                    }
                 }
+                .font(.caption.weight(.semibold))
             }
-            .font(.caption.weight(.semibold))
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
             Divider()
 
