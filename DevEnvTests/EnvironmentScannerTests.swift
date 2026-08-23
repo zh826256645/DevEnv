@@ -462,7 +462,7 @@ final class EnvironmentScannerTests: XCTestCase {
         let executables = Set([
             "/custom/bin/brew",
             "/custom/bin/node",
-            "/opt/homebrew/Cellar/python@3.13/3.13.4/bin/python3",
+            "/opt/homebrew/Cellar/python@3.13/3.13.4/bin/python3.13",
             "/opt/homebrew/Cellar/go/1.23.1/bin/go",
             "/opt/homebrew/Cellar/openjdk/23.0.1/bin/java",
             "/opt/homebrew/Cellar/rust/1.80.0/bin/rustc",
@@ -488,6 +488,10 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.runtimes.flatMap { $0.installations }.count, 7)
         XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.count, 1)
         XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.version, "22.3.0")
+        XCTAssertEqual(
+            snapshot.runtimes.first { $0.id == "python" }?.installations.first?.executable,
+            "/opt/homebrew/Cellar/python@3.13/3.13.4/bin/python3.13"
+        )
         XCTAssertTrue(snapshot.runtimes.allSatisfy { $0.installations.count == 1 })
     }
 

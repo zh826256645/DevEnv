@@ -1003,7 +1003,10 @@ struct EnvironmentScanner: Sendable {
         }
 
         return formulaVersions.flatMap { definition, formula, versions in
-            versions.map { version in
+            let runtimeExecutable = definition.id == "python" && formula.hasPrefix("python@")
+                ? "python\(formula.dropFirst("python@".count))"
+                : definition.executable
+            return versions.map { version in
                 RuntimeProviderInstallation(
                     runtimeID: definition.id,
                     version: version,
@@ -1011,7 +1014,7 @@ struct EnvironmentScanner: Sendable {
                         .appendingPathComponent(formula, isDirectory: true)
                         .appendingPathComponent(version, isDirectory: true)
                         .appendingPathComponent("bin", isDirectory: true)
-                        .appendingPathComponent(definition.executable)
+                        .appendingPathComponent(runtimeExecutable)
                         .path
                 )
             }
