@@ -886,9 +886,11 @@ struct ContentView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.orange.opacity(0.09))
-                    Image(systemName: "terminal")
-                        .font(.system(size: 23, weight: .medium))
+                    Image("GitLogo")
+                        .resizable()
+                        .scaledToFit()
                         .foregroundStyle(.orange)
+                        .padding(11)
                 }
                 .frame(width: 54, height: 54)
                 .overlay {
@@ -1074,6 +1076,7 @@ struct ContentView: View {
 
             HStack(spacing: 8) {
                 Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
+                    .fixedSize(horizontal: true, vertical: false)
                     .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
@@ -1081,6 +1084,7 @@ struct ContentView: View {
 
                 if warningCount > 0 {
                     Label("\(warningCount) 个冲突", systemImage: "exclamationmark.triangle.fill")
+                        .fixedSize(horizontal: true, vertical: false)
                         .foregroundStyle(.orange)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
@@ -1100,6 +1104,7 @@ struct ContentView: View {
                 } label: {
                     Label(isPathExpanded ? "收起" : "查看全部", systemImage: isPathExpanded ? "arrow.up" : "arrow.right")
                         .labelStyle(.titleAndIcon)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(.borderless)
             }
