@@ -12,7 +12,10 @@ struct MachineSnapshot: Codable, Sendable {
     let runtimes: [RuntimeSnapshot]
     let homebrew: HomebrewSnapshot
     let gitCLI: GitCLISnapshot
+    let gitLFS: GitLFSSnapshot?
     let userGitConfiguration: UserGitConfigurationSnapshot?
+    let gitSigningConfiguration: GitSigningConfigurationSnapshot?
+    let gitCredentialHelpers: [String]?
     let issues: [String]
 
     var localServiceScanNotice: String? {
@@ -122,6 +125,11 @@ struct GitCLISnapshot: Codable, Sendable {
     let state: GitCLIState
 }
 
+struct GitLFSSnapshot: Codable, Sendable {
+    let version: String?
+    let state: GitCLIState
+}
+
 struct DefaultGitIdentitySnapshot: Codable, Sendable {
     let name: String?
     let email: String?
@@ -142,6 +150,13 @@ struct UserGitConfigurationSnapshot: Codable, Sendable {
     let defaultIdentity: DefaultGitIdentitySnapshot
     let defaultBranch: String?
     let excludesFile: UserExcludesFileSnapshot
+}
+
+struct GitSigningConfigurationSnapshot: Codable, Sendable {
+    let format: String?
+    let signingKey: String?
+    let commitSigning: String?
+    let tagSigning: String?
 }
 
 struct ScanResult: Sendable {
@@ -306,9 +321,17 @@ struct EnvironmentScanner: Sendable {
 
         let homebrew = scanHomebrew(path: path, issues: &issues)
         let gitCLI = scanGitCLI(path: path, notices: &issues)
-        let userGitConfiguration = gitCLI.executable.flatMap { executable in
-            gitCLI.state == .available ? scanUserGitConfiguration(executable: executable, notices: &issues) : nil
-        }
+        let gitAvailable = gitCLI.state == .available
+        let gitLFS = gitAvailable ? scanGitLFS(path: path, notices: &issues) : nil
+        let userGitConfiguration = gitAvailable ? gitCLI.executable.flatMap {
+            scanUserGitConfiguration(executable: $0, notices: &issues)
+        } : nil
+        let gitSigningConfiguration = gitAvailable ? gitCLI.executable.flatMap {
+            scanGitSigningConfiguration(executable: $0, notices: &issues)
+        } : nil
+        let gitCredentialHelpers = gitAvailable ? gitCLI.executable.flatMap {
+            scanGitCredentialHelpers(executable: $0, notices: &issues)
+        } : nil
         let homebrewInstallations = homebrew.available ? homebrew.executable.map {
             scanHomebrewRuntimes(executable: $0, issues: &issues)
         } ?? [] : []
@@ -330,7 +353,7 @@ struct EnvironmentScanner: Sendable {
             )
         }
         let snapshot = MachineSnapshot(
-            schemaVersion: 5,
+            schemaVersion: 6,
             scannedAt: Date(),
             system: system,
             localServices: localServices,
@@ -338,7 +361,10 @@ struct EnvironmentScanner: Sendable {
             runtimes: runtimes,
             homebrew: homebrew,
             gitCLI: gitCLI,
+            gitLFS: gitLFS,
             userGitConfiguration: userGitConfiguration,
+            gitSigningConfiguration: gitSigningConfiguration,
+            gitCredentialHelpers: gitCredentialHelpers,
             issues: issues
         )
         return ScanResult(
@@ -360,6 +386,20 @@ struct EnvironmentScanner: Sendable {
             return GitCLISnapshot(executable: executable, version: nil, state: .failed)
         }
         return GitCLISnapshot(executable: executable, version: version, state: .available)
+    }
+
+    private func scanGitLFS(path: [String], notices: inout [String]) -> GitLFSSnapshot {
+        guard let executable = path.lazy.map({ absoluteExecutable("git-lfs", directory: $0) })
+            .first(where: { machine.isExecutableFile(atPath: $0) }) else {
+            return GitLFSSnapshot(version: nil, state: .unavailable)
+        }
+        let result = machine.command(executable: executable, arguments: ["version"])
+        let version = result.status == 0 && !result.timedOut ? gitLFSVersion(from: result.output) : nil
+        guard let version else {
+            notices.append("Git LFS：\(result.timedOut ? "命令超时" : "版本读取失败")")
+            return GitLFSSnapshot(version: nil, state: .failed)
+        }
+        return GitLFSSnapshot(version: version, state: .available)
     }
 
     private func scanUserGitConfiguration(
@@ -417,6 +457,89 @@ struct EnvironmentScanner: Sendable {
         )
     }
 
+    private func scanGitSigningConfiguration(
+        executable: String,
+        notices: inout [String]
+    ) -> GitSigningConfigurationSnapshot? {
+        let keys = ["gpg.format", "user.signingKey", "commit.gpgSign", "tag.gpgSign"]
+        var values: [String: String] = [:]
+
+        for key in keys {
+            let result = machine.command(
+                executable: executable,
+                arguments: ["config", "--global", "--get", key]
+            )
+            let value = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if result.timedOut {
+                notices.append("Git Signing Configuration：命令超时")
+                return nil
+            }
+            if result.status == 1, value.isEmpty { continue }
+            guard result.status == 0 else {
+                notices.append("Git Signing Configuration：读取失败")
+                return nil
+            }
+            if !value.isEmpty { values[key] = value }
+        }
+
+        return GitSigningConfigurationSnapshot(
+            format: values["gpg.format"],
+            signingKey: values["user.signingKey"],
+            commitSigning: values["commit.gpgSign"],
+            tagSigning: values["tag.gpgSign"]
+        )
+    }
+
+    private func scanGitCredentialHelpers(executable: String, notices: inout [String]) -> [String]? {
+        let result = machine.command(
+            executable: executable,
+            arguments: ["config", "--global", "--null", "--get-all", "credential.helper"]
+        )
+        if result.timedOut {
+            notices.append("Git Credential Helpers：命令超时")
+            return nil
+        }
+        if result.status == 1, result.output.isEmpty { return [] }
+        guard result.status == 0 else {
+            notices.append("Git Credential Helpers：读取失败")
+            return nil
+        }
+        guard !result.output.isEmpty else { return [] }
+
+        var values = result.output.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        if result.output.last == "\0" { values.removeLast() }
+        return values.map(credentialHelperLabel)
+    }
+
+    private func credentialHelperLabel(_ value: String) -> String {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return "清空 helper chain" }
+        guard !value.hasPrefix("!") else { return "自定义命令" }
+
+        var token = ""
+        var quote: Character?
+        var escaping = false
+        for character in value {
+            if escaping {
+                token.append(character)
+                escaping = false
+            } else if character == "\\" {
+                escaping = true
+            } else if let activeQuote = quote {
+                if character == activeQuote { quote = nil } else { token.append(character) }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character.isWhitespace {
+                break
+            } else {
+                token.append(character)
+            }
+        }
+
+        let name = URL(fileURLWithPath: token).lastPathComponent
+        return name.hasPrefix("git-credential-") ? String(name.dropFirst("git-credential-".count)) : name
+    }
+
     private func absoluteUserPath(_ path: String) -> String {
         if path == "~", let home = machine.environment["HOME"] { return standardizedPath(home) }
         if path.hasPrefix("~/"), let home = machine.environment["HOME"] {
@@ -439,6 +562,17 @@ struct EnvironmentScanner: Sendable {
             of: #"^[0-9]+(?:\.[0-9A-Za-z]+)+(?:[-.A-Za-z0-9+() ]*)$"#,
             options: .regularExpression
         ) != nil else { return nil }
+        return version
+    }
+
+    private func gitLFSVersion(from output: String) -> String? {
+        guard let value = output.split(whereSeparator: \.isNewline).first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            value.hasPrefix("git-lfs/") else { return nil }
+        let version = value.dropFirst("git-lfs/".count).split(whereSeparator: \.isWhitespace).first.map(String.init)
+        guard let version,
+              version.range(of: #"^[0-9]+(?:\.[0-9A-Za-z]+)+(?:[-+][0-9A-Za-z.-]+)?$"#, options: .regularExpression) != nil
+        else { return nil }
         return version
     }
 
@@ -886,7 +1020,7 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 5 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 6 else { return nil }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

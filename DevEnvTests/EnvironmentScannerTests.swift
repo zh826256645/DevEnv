@@ -60,6 +60,96 @@ final class EnvironmentScannerTests: XCTestCase {
         }
     }
 
+    func testGitLFSReportsAvailableMissingAndFailedWithoutRepositoryScan() {
+        let available = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/git", "/bin/git-lfs"],
+            commandOutputs: [
+                "/bin/git --version": "git version 2.49.0\n",
+                "/bin/git-lfs version": "git-lfs/3.7.0 (GitHub; darwin arm64)\n",
+            ]
+        )).scan().snapshot
+        let missing = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/git"],
+            commandOutputs: ["/bin/git --version": "git version 2.49.0\n"]
+        )).scan().snapshot
+        let failed = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/git", "/bin/git-lfs"],
+            commandOutputs: ["/bin/git --version": "git version 2.49.0\n"],
+            commandTimeouts: ["/bin/git-lfs version"]
+        )).scan().snapshot
+
+        XCTAssertEqual(available.gitLFS?.state, .available)
+        XCTAssertEqual(available.gitLFS?.version, "3.7.0")
+        XCTAssertEqual(missing.gitLFS?.state, .unavailable)
+        XCTAssertFalse(missing.issues.contains { $0.hasPrefix("Git LFS：") })
+        XCTAssertEqual(failed.gitLFS?.state, .failed)
+        XCTAssertEqual(failed.issues.filter { $0.hasPrefix("Git LFS：") }, ["Git LFS：命令超时"])
+    }
+
+    func testSigningAndCredentialHelpersKeepOnlyWhitelistedRedactedFacts() throws {
+        let sensitive = "recognizable-secret-18"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/bin/git"],
+            commandOutputs: [
+                "/bin/git --version": "git version 2.49.0\n",
+                "/bin/git config --global --get gpg.format": "ssh\n",
+                "/bin/git config --global --get user.signingKey": "test@example.com\n",
+                "/bin/git config --global --get commit.gpgSign": "true\n",
+                "/bin/git config --global --get tag.gpgSign": "false\n",
+                "/bin/git config --global --null --get-all credential.helper":
+                    "\0osxkeychain --token \(sensitive)\0store --file=/tmp/\(sensitive)\0!echo \(sensitive)\0\"/opt/helpers/git-credential-company\" --secret \(sensitive)\0",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.gitSigningConfiguration?.format, "ssh")
+        XCTAssertEqual(snapshot.gitSigningConfiguration?.signingKey, "test@example.com")
+        XCTAssertEqual(snapshot.gitSigningConfiguration?.commitSigning, "true")
+        XCTAssertEqual(snapshot.gitSigningConfiguration?.tagSigning, "false")
+        XCTAssertEqual(snapshot.gitCredentialHelpers, ["清空 helper chain", "osxkeychain", "store", "自定义命令", "company"])
+        XCTAssertFalse(String(data: try JSONEncoder().encode(snapshot), encoding: .utf8)!.contains(sensitive))
+    }
+
+    func testSigningAndCredentialHelperFailuresAreIsolated() {
+        let helperCommand = "/bin/git config --global --null --get-all credential.helper"
+        let signingFailure = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/bin/git"],
+            commandOutputs: [
+                "/bin/git --version": "git version 2.49.0\n",
+                helperCommand: "osxkeychain\0",
+            ],
+            commandStatuses: ["/bin/git config --global --get gpg.format": 2]
+        )).scan()
+        let helperFailure = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/bin/git"],
+            commandOutputs: [
+                "/bin/git --version": "git version 2.49.0\n",
+                "/bin/git config --global --get gpg.format": "openpgp\n",
+            ],
+            commandStatuses: [helperCommand: 2]
+        )).scan()
+
+        XCTAssertNil(signingFailure.snapshot.gitSigningConfiguration)
+        XCTAssertEqual(signingFailure.snapshot.gitCredentialHelpers, ["osxkeychain"])
+        XCTAssertNotNil(signingFailure.snapshot.userGitConfiguration)
+        XCTAssertEqual(signingFailure.snapshot.issues.filter { $0.hasPrefix("Git Signing Configuration：") }, ["Git Signing Configuration：读取失败"])
+        XCTAssertTrue(signingFailure.canPersist)
+
+        XCTAssertEqual(helperFailure.snapshot.gitSigningConfiguration?.format, "openpgp")
+        XCTAssertNil(helperFailure.snapshot.gitCredentialHelpers)
+        XCTAssertNotNil(helperFailure.snapshot.userGitConfiguration)
+        XCTAssertEqual(helperFailure.snapshot.issues.filter { $0.hasPrefix("Git Credential Helpers：") }, ["Git Credential Helpers：读取失败"])
+        XCTAssertTrue(helperFailure.canPersist)
+    }
+
     func testUserGitConfigurationUsesExplicitExcludesFile() throws {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
@@ -166,6 +256,12 @@ final class EnvironmentScannerTests: XCTestCase {
 
         XCTAssertNil(unavailable.userGitConfiguration)
         XCTAssertNil(failed.userGitConfiguration)
+        XCTAssertNil(unavailable.gitLFS)
+        XCTAssertNil(failed.gitLFS)
+        XCTAssertNil(unavailable.gitSigningConfiguration)
+        XCTAssertNil(failed.gitSigningConfiguration)
+        XCTAssertNil(unavailable.gitCredentialHelpers)
+        XCTAssertNil(failed.gitCredentialHelpers)
         XCTAssertFalse(unavailable.issues.contains { $0.hasPrefix("User Git Configuration：") })
         XCTAssertFalse(failed.issues.contains { $0.hasPrefix("User Git Configuration：") })
     }
@@ -184,7 +280,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 5)
+        XCTAssertEqual(snapshot.schemaVersion, 6)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -1019,7 +1115,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV5SnapshotRoundTripsGitConfigurationAndV4IsRejected() throws {
+    func testV6SnapshotRoundTripsGitToolingAndV5IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -1027,13 +1123,18 @@ final class EnvironmentScannerTests: XCTestCase {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
             environment: ["HOME": "/Users/test"],
-            executables: ["/bin/git", "/bin/node"],
+            executables: ["/bin/git", "/bin/git-lfs", "/bin/node"],
             commandOutputs: [
                 "/bin/git --version": "git version 2.49.0 (Apple Git-154)\n",
+                "/bin/git-lfs version": "git-lfs/3.7.0 (GitHub; darwin arm64)\n",
                 "/bin/git config --global --get user.name": "Test User\n",
                 "/bin/git config --global --get user.email": "test@example.com\n",
                 "/bin/git config --global --get init.defaultBranch": "main\n",
                 "/bin/git config --global --path --get core.excludesFile": "/Users/test/.gitignore\n",
+                "/bin/git config --global --get gpg.format": "ssh\n",
+                "/bin/git config --global --get user.signingKey": "test@example.com\n",
+                "/bin/git config --global --get commit.gpgSign": "true\n",
+                "/bin/git config --global --null --get-all credential.helper": "osxkeychain\0store --file=/tmp/credentials\0",
                 "/bin/node": "v22.0.0\n",
                 "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
             ],
@@ -1041,13 +1142,16 @@ final class EnvironmentScannerTests: XCTestCase {
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 5)
+        XCTAssertEqual(store.load()?.schemaVersion, 6)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultBranch, "main")
         XCTAssertEqual(store.load()?.userGitConfiguration?.excludesFile.path, "/Users/test/.gitignore")
         XCTAssertTrue(store.load()?.userGitConfiguration?.excludesFile.exists == true)
+        XCTAssertEqual(store.load()?.gitLFS?.version, "3.7.0")
+        XCTAssertEqual(store.load()?.gitSigningConfiguration?.format, "ssh")
+        XCTAssertEqual(store.load()?.gitCredentialHelpers, ["osxkeychain", "store"])
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
@@ -1063,7 +1167,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 4
+        json["schemaVersion"] = 5
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }

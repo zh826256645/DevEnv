@@ -92,6 +92,14 @@ _Avoid_: Git Account, Git User
 当前 App 运行用户用于跨仓库忽略路径的 Git 规则文件，其位置可来自 User Git Configuration 或 Git 的用户默认位置。
 _Avoid_: Global .gitignore, Default Ignore File
 
+**Git Signing Configuration**:
+User Git Configuration 中用于选择签名格式、签名标识及提交和标签签名开关的本地事实，不表示签名密钥已经验证或可用。
+_Avoid_: Verified Signing Identity, Signing Health
+
+**Credential Helper Chain**:
+User Git Configuration 中按配置顺序生效的凭据助手标识序列；不包含 helper 参数或自定义命令正文。
+_Avoid_: Git Credentials, Credential Health
+
 **GitHub Authentication Configuration**:
 当前 App 运行用户存在可供 GitHub CLI 使用的本地或进程级认证来源，不表示凭据已经联网验证或当前处于登录状态。
 _Avoid_: GitHub Login Status, Authenticated GitHub Account

@@ -872,7 +872,13 @@ struct ContentView: View {
             HStack(alignment: .top, spacing: 14) {
                 homebrewCard(snapshot.homebrew)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                gitCard(snapshot.gitCLI, configuration: snapshot.userGitConfiguration)
+                gitCard(
+                    snapshot.gitCLI,
+                    lfs: snapshot.gitLFS,
+                    configuration: snapshot.userGitConfiguration,
+                    signing: snapshot.gitSigningConfiguration,
+                    credentialHelpers: snapshot.gitCredentialHelpers
+                )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 pathCard(snapshot.path, warningCount: pathWarningCount)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -898,7 +904,13 @@ struct ContentView: View {
         }
     }
 
-    private func gitCard(_ git: GitCLISnapshot, configuration: UserGitConfigurationSnapshot?) -> some View {
+    private func gitCard(
+        _ git: GitCLISnapshot,
+        lfs: GitLFSSnapshot?,
+        configuration: UserGitConfigurationSnapshot?,
+        signing: GitSigningConfigurationSnapshot?,
+        credentialHelpers: [String]?
+    ) -> some View {
         let appearance: (color: Color, status: String, badge: String, pill: String) = switch git.state {
         case .available: (.green, "可用", "checkmark", "checkmark.circle.fill")
         case .failed: (.orange, "读取失败", "exclamationmark", "exclamationmark.circle.fill")
@@ -951,6 +963,16 @@ struct ContentView: View {
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
                     .background(appearance.color.opacity(0.10), in: Capsule())
+
+                if let lfs {
+                    HStack {
+                        Text("Git LFS")
+                        Spacer()
+                        Text(lfs.version ?? (lfs.state == .failed ? "读取失败" : "未发现"))
+                            .foregroundStyle(lfs.state == .failed ? .orange : .secondary)
+                    }
+                    .font(.caption)
+                }
             }
             .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
@@ -970,7 +992,12 @@ struct ContentView: View {
 
                 if isGitConfigurationExpanded {
                     Divider()
-                    gitConfigurationDetails(configuration, executable: executable)
+                    gitConfigurationDetails(
+                        configuration,
+                        signing: signing,
+                        credentialHelpers: credentialHelpers,
+                        executable: executable
+                    )
                         .transition(.opacity)
                 }
             } else if let executable = git.executable {
@@ -995,6 +1022,8 @@ struct ContentView: View {
 
     private func gitConfigurationDetails(
         _ configuration: UserGitConfigurationSnapshot?,
+        signing: GitSigningConfigurationSnapshot?,
+        credentialHelpers: [String]?,
         executable: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1033,6 +1062,38 @@ struct ContentView: View {
                 Text("User Git Configuration 读取失败，请查看 Scan Notice")
                     .font(.callout)
                     .foregroundStyle(.orange)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("签名配置")
+                    .font(.callout.weight(.semibold))
+                if let signing {
+                    gitConfigurationValue("格式", signing.format ?? "未配置")
+                    gitConfigurationValue("签名标识", signing.signingKey ?? "未配置")
+                    gitConfigurationValue("提交签名", signing.commitSigning ?? "未配置")
+                    gitConfigurationValue("标签签名", signing.tagSigning ?? "未配置")
+                } else {
+                    Text("读取失败，请查看 Scan Notice")
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Credential Helper Chain")
+                    .font(.callout.weight(.semibold))
+                if let credentialHelpers {
+                    if credentialHelpers.isEmpty {
+                        Text("未配置")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(credentialHelpers.enumerated()), id: \.offset) { index, helper in
+                            gitConfigurationValue("\(index + 1)", helper)
+                        }
+                    }
+                } else {
+                    Text("读取失败，请查看 Scan Notice")
+                        .foregroundStyle(.orange)
+                }
             }
         }
     }

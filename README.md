@@ -17,10 +17,10 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 - 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见语言 Runtime 的只读扫描和最新快照持久化。
 - 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源 Runtime Installation 发现。
 - 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
-- 已完成当前 `PATH` 首个生效 Git CLI，以及 Default Git Identity、默认分支与 User Excludes File 的只读扫描。
+- 已完成当前 `PATH` 首个生效 Git CLI、Git LFS，以及用户级身份、签名与 Credential Helper Chain 的只读扫描。
 - 已完成加载页、顶部状态总览、Runtime 自适应卡片、按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
-- v0.1 与 v0.2 的只读扫描范围已交付；Git Tooling State 已交付 Git CLI 与 User Git Configuration。
+- v0.1 与 v0.2 的只读扫描范围已交付；Git Tooling State 已交付 Git CLI、Git LFS 与脱敏后的 User Git Configuration。
 
 Docker、服务管理、端口管理、环境修改和诊断仍属于后续规划；现有 Environment Scan 保持只读。
 
@@ -613,13 +613,15 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 **Git Tooling State（已完成）**
 
-按当前 `PATH` 顺序展示首个生效 Git CLI；展开 Git 卡片可查看用户级 Default Git Identity、默认分支和 User Excludes File 的位置、来源与存在状态。扫描只查询四个确认的用户级配置键，不读取全量、system 或 repository-local 配置，也不读取 ignore 规则内容。结果随最新 Machine Snapshot 持久化。
+按当前 `PATH` 顺序展示首个生效 Git CLI 与 Git LFS；展开 Git 卡片可查看用户级 Default Git Identity、默认分支、User Excludes File、签名配置和脱敏后的 Credential Helper Chain。扫描只查询确认的用户级配置白名单，不读取全量、system 或 repository-local 配置，不读取 ignore 规则、密钥、凭据、helper 参数或自定义命令正文。结果随最新 Machine Snapshot 持久化。
 
 解决：
 
 > 当前 App 运行用户实际会调用哪个 Git？
 
 > 没有具体仓库上下文时，Git 默认使用什么身份、分支与跨仓库忽略文件？
+
+> 用户级签名开关与 Credential Helper Chain 当前如何配置？
 
 ---
 
