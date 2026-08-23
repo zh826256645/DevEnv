@@ -5,7 +5,7 @@ DevEnv 帮助 macOS 开发者理解本机的开发工具状态，并将其与项
 ## Language
 
 **Machine Environment**:
-一台 Mac 在某个时刻与开发相关的工具、运行时和服务的实际状态。
+当前 App 运行用户在一台 Mac 上可观察、可调用的开发工具、运行时和服务的实际状态。
 _Avoid_: Environment, Development Environment
 
 **Project Requirements**:
@@ -25,7 +25,7 @@ Environment Scan 发现的读取失败、不可用安装或状态冲突，表示
 _Avoid_: Issue, Error, Health Problem
 
 **Machine Snapshot**:
-一次 Environment Scan 产生的、描述主机基础信息与开发工具状态的结果。
+一次 Environment Scan 产生的、描述主机基础信息与当前 App 运行用户可见开发工具状态的结果。
 _Avoid_: Environment, System Profile
 
 **Runtime Installation**:
@@ -35,6 +35,14 @@ _Avoid_: Runtime, Package
 **Runtime Provider**:
 从已知工具或平台索引中发现未进入当前 `PATH` 的 Runtime Installation 的来源。
 _Avoid_: Scanner, Version Manager
+
+**Local Service**:
+当前 App 运行用户可见、按 PID 聚合且至少具有一个 TCP Listener Binding 的本机进程。
+_Avoid_: Daemon, Background Service
+
+**Listener Binding**:
+Local Service 监听 TCP 连接的地址、端口和地址族组合。
+_Avoid_: Port, Endpoint
 
 **Effective Runtime Installation**:
 当前 `PATH` 对某类语言运行时优先解析到的 Runtime Installation。
@@ -47,3 +55,23 @@ _Avoid_: Version Conflict, PATH Error
 **Homebrew Availability**:
 Homebrew 在当前 Mac 上是否可调用，以及可识别的安装位置。
 _Avoid_: Homebrew Environment
+
+**Git Tooling State**:
+当前 App 运行用户在该 Mac 上生效的 Git CLI、User Git Configuration 及配套工具状态，不包含任何具体仓库的分支、远端或工作区状态。
+_Avoid_: Git Environment, Git Health, Repository State
+
+**User Git Configuration**:
+当前 App 运行用户所拥有、独立于具体仓库生效的 Git 配置，不包含整机或仓库局部配置。
+_Avoid_: Global Git Configuration
+
+**Default Git Identity**:
+User Git Configuration 在没有具体仓库上下文时用于标识提交作者的默认名称与邮箱，不包含条件式或仓库局部身份。
+_Avoid_: Git Account, Git User
+
+**User Excludes File**:
+当前 App 运行用户用于跨仓库忽略路径的 Git 规则文件，其位置可来自 User Git Configuration 或 Git 的用户默认位置。
+_Avoid_: Global .gitignore, Default Ignore File
+
+**GitHub Authentication Configuration**:
+当前 App 运行用户存在可供 GitHub CLI 使用的本地或进程级认证来源，不表示凭据已经联网验证或当前处于登录状态。
+_Avoid_: GitHub Login Status, Authenticated GitHub Account

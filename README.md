@@ -10,6 +10,19 @@ DevEnv 是一个面向 macOS 开发者的本地开发环境管理工具。
 
 DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在这些成熟工具之上提供统一的扫描、管理、诊断和可视化能力。
 
+## 当前进度
+
+截至 2026-08-23：
+
+- 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见语言 Runtime 的只读扫描和最新快照持久化。
+- 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源 Runtime Installation 发现。
+- 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
+- 已完成加载页、顶部状态总览、Runtime 自适应卡片、按需展开详情、通知与状态说明等原生 SwiftUI 界面。
+- 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
+- v0.1 已冻结为已交付的只读 Environment Scanner；当前下一阶段是 v0.2 — Services & Ports。
+
+Git、Docker、服务管理、端口管理、环境修改和诊断仍属于后续规划；v0.2 的 Services & Ports 也保持只读。
+
 你可以通过 DevEnv 快速了解：
 
 * 当前 Mac 安装了哪些开发环境
@@ -546,29 +559,19 @@ Apple Silicon first
 
 第一阶段不会尝试管理所有开发工具。
 
-### v0.1
+### v0.1（已完成）
 
-计划完成：
+只包含以下已交付的只读 Environment Scanner 能力：
 
-* [ ] macOS 系统环境扫描
-* [ ] Homebrew 检测
-* [ ] Node.js 检测
-* [ ] Python 检测
-* [ ] Go 检测
-* [ ] Java 检测
-* [ ] Rust 检测
-* [ ] Git 检测
-* [ ] Docker 检测
-* [ ] Runtime 版本展示
-* [ ] Runtime binary path 展示
-* [ ] Runtime 来源识别
-* [ ] Homebrew packages 查看
-* [ ] Homebrew services 查看
-* [ ] Service Start / Stop / Restart
-* [ ] 本地监听端口扫描
-* [ ] PATH 分析
-* [ ] Runtime 冲突检测
-* [ ] Environment Health 页面
+* [x] macOS 系统与系统卷只读扫描
+* [x] 最新 Machine Snapshot 持久化
+* [x] PATH 与 Homebrew Availability 扫描
+* [x] Node.js、Python、Go、Java、Rust、Ruby 与 Lua 扫描
+* [x] Runtime Installation 版本、路径、来源与多版本展示
+* [x] Effective Runtime Installation 与 Runtime Conflict 识别
+* [x] 原生 SwiftUI 总览、Scan Notice 与重新扫描
+
+v0.1 范围已冻结；新增能力进入后续里程碑。
 
 ---
 
@@ -576,7 +579,9 @@ Apple Silicon first
 
 ### v0.1
 
-**Environment Scanner**
+**Environment Scanner（已完成）**
+
+以只读方式扫描系统、Homebrew、PATH 与 Runtime Installation，并持久化最新 Machine Snapshot。
 
 解决：
 
@@ -585,6 +590,25 @@ Apple Silicon first
 ---
 
 ### v0.2
+
+**Services & Ports**
+
+以只读方式展示：
+
+* TCP 监听端口
+* 监听进程与 PID
+* 仅本机或可能对局域网开放的监听范围
+* 端口扫描失败产生的 Scan Notice
+
+不包含 Start、Stop、Restart、Kill 或其他 Machine Environment 修改能力。
+
+解决：
+
+> 当前有哪些本地服务正在运行，监听了哪些端口？
+
+---
+
+### v0.3
 
 **Environment Manager**
 
@@ -601,7 +625,7 @@ Apple Silicon first
 
 ---
 
-### v0.3
+### v0.4
 
 **Projects**
 
@@ -625,7 +649,7 @@ Apple Silicon first
 
 ---
 
-### v0.4
+### v0.5
 
 **Environment Diagnostics**
 
@@ -637,7 +661,7 @@ Apple Silicon first
 
 ---
 
-### v0.5
+### v0.6
 
 **Profiles & Snapshots**
 

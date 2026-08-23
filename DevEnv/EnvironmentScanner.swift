@@ -1,13 +1,44 @@
 import Foundation
 
 struct MachineSnapshot: Codable, Sendable {
+    static let localServiceTimeoutNotice = "本地服务：命令超时"
+    static let localServiceFailureNotice = "本地服务：读取失败"
+
     let schemaVersion: Int
     let scannedAt: Date
     let system: SystemSnapshot
+    let localServices: [LocalServiceSnapshot]
     let path: [String]
     let runtimes: [RuntimeSnapshot]
     let homebrew: HomebrewSnapshot
     let issues: [String]
+
+    var localServiceScanNotice: String? {
+        issues.first { $0 == Self.localServiceTimeoutNotice || $0 == Self.localServiceFailureNotice }
+    }
+}
+
+enum ListenerAddressFamily: String, Codable, Sendable {
+    case ipv4 = "IPv4"
+    case ipv6 = "IPv6"
+}
+
+struct ListenerBinding: Codable, Hashable, Sendable {
+    let address: String
+    let port: UInt16
+    let family: ListenerAddressFamily
+
+    var isLoopback: Bool {
+        family == .ipv4 ? address.split(separator: ".").first == "127" : address == "::1"
+    }
+}
+
+struct LocalServiceSnapshot: Codable, Identifiable, Sendable {
+    var id: Int32 { pid }
+
+    let processName: String
+    let pid: Int32
+    let bindings: [ListenerBinding]
 }
 
 struct SystemSnapshot: Codable, Sendable {
@@ -160,6 +191,11 @@ struct LiveMachineAccess: MachineAccess {
 }
 
 struct EnvironmentScanner: Sendable {
+    private struct LocalServiceAccumulator {
+        var processName = ""
+        var bindings: Set<ListenerBinding> = []
+    }
+
     private struct RuntimeDefinition: Sendable {
         let id: String
         let name: String
@@ -225,6 +261,7 @@ struct EnvironmentScanner: Sendable {
             diskTotalBytes: disk.totalBytes,
             diskFreeBytes: disk.freeBytes
         )
+        let localServices = scanLocalServices(issues: &issues)
 
         let homebrew = scanHomebrew(path: path, issues: &issues)
         let homebrewInstallations = homebrew.available ? homebrew.executable.map {
@@ -248,9 +285,10 @@ struct EnvironmentScanner: Sendable {
             )
         }
         let snapshot = MachineSnapshot(
-            schemaVersion: 2,
+            schemaVersion: 3,
             scannedAt: Date(),
             system: system,
+            localServices: localServices,
             path: path,
             runtimes: runtimes,
             homebrew: homebrew,
@@ -260,6 +298,69 @@ struct EnvironmentScanner: Sendable {
             snapshot: snapshot,
             canPersist: system.macOSVersion != nil && system.architecture != nil
         )
+    }
+
+    private func scanLocalServices(issues: inout [String]) -> [LocalServiceSnapshot] {
+        let result = machine.command(
+            executable: "/usr/sbin/lsof",
+            arguments: ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcftn"]
+        )
+        if result.timedOut {
+            issues.append(MachineSnapshot.localServiceTimeoutNotice)
+            return []
+        }
+        let hasNoMatches = result.status == 1 && result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard result.status == 0 || hasNoMatches else {
+            issues.append(MachineSnapshot.localServiceFailureNotice)
+            return []
+        }
+
+        var services: [Int32: LocalServiceAccumulator] = [:]
+        var currentPID: Int32?
+        var currentFamily: ListenerAddressFamily?
+
+        for line in result.output.split(whereSeparator: \.isNewline) {
+            let value = String(line.dropFirst())
+            switch line.first {
+            case "p":
+                currentPID = Int32(value)
+                currentFamily = nil
+            case "c":
+                if let currentPID { services[currentPID, default: LocalServiceAccumulator()].processName = value }
+            case "t":
+                currentFamily = ListenerAddressFamily(rawValue: value)
+            case "n":
+                guard let currentPID, let currentFamily,
+                      let binding = listenerBinding(from: value, family: currentFamily) else { continue }
+                services[currentPID, default: LocalServiceAccumulator()].bindings.insert(binding)
+            default:
+                continue
+            }
+        }
+
+        return services.compactMap { pid, service -> LocalServiceSnapshot? in
+            guard !service.processName.isEmpty, !service.bindings.isEmpty else { return nil }
+            let bindings = service.bindings.sorted {
+                if $0.port != $1.port { return $0.port < $1.port }
+                if $0.family != $1.family { return $0.family.rawValue < $1.family.rawValue }
+                return $0.address < $1.address
+            }
+            return LocalServiceSnapshot(processName: service.processName, pid: pid, bindings: bindings)
+        }.sorted {
+            if $0.bindings[0].port != $1.bindings[0].port { return $0.bindings[0].port < $1.bindings[0].port }
+            if $0.processName != $1.processName { return $0.processName < $1.processName }
+            return $0.pid < $1.pid
+        }
+    }
+
+    private func listenerBinding(from name: String, family: ListenerAddressFamily) -> ListenerBinding? {
+        let value = name.hasSuffix(" (LISTEN)") ? String(name.dropLast(9)) : name
+        guard let separator = value.lastIndex(of: ":"),
+              let port = UInt16(value[value.index(after: separator)...]) else { return nil }
+        var address = String(value[..<separator])
+        if address.first == "[", address.last == "]" { address = String(address.dropFirst().dropLast()) }
+        guard !address.isEmpty else { return nil }
+        return ListenerBinding(address: address, port: port, family: family)
     }
 
     private func scanRuntime(
@@ -643,7 +744,7 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 2 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 3 else { return nil }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

@@ -1,6 +1,105 @@
 import AppKit
 import SwiftUI
 
+struct LocalServiceDisplayGroup: Identifiable {
+    var id: Int32 { pids[0] }
+
+    let processName: String
+    var pids: [Int32]
+    let bindings: [ListenerBinding]
+}
+
+struct LocalServiceDescriptor {
+    let displayName: String
+    let explanation: String
+    let symbolName: String
+    let tint: Color
+    let assetName: String?
+}
+
+func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
+    let name = processName.lowercased()
+    func descriptor(
+        _ displayName: String,
+        _ explanation: String,
+        _ symbolName: String,
+        _ tint: Color,
+        _ assetName: String? = nil
+    ) -> LocalServiceDescriptor {
+        LocalServiceDescriptor(
+            displayName: displayName,
+            explanation: explanation,
+            symbolName: symbolName,
+            tint: tint,
+            assetName: assetName
+        )
+    }
+
+    if name.hasPrefix("python") {
+        return descriptor("Python", "Python 解释器启动的本地服务", "chevron.left.forwardslash.chevron.right", .blue, "RuntimePythonLogo")
+    }
+    if name.hasPrefix("redis") {
+        return descriptor("Redis", "内存键值数据库与缓存服务", "square.stack.3d.up.fill", .red, "ServiceRedisLogo")
+    }
+
+    switch name {
+    case "node", "nodejs":
+        return descriptor("Node.js", "JavaScript 运行时启动的本地服务", "hexagon.fill", .green, "RuntimeNodeLogo")
+    case "postgres", "postmaster":
+        return descriptor("PostgreSQL", "PostgreSQL 关系型数据库", "cylinder.fill", .blue, "ServicePostgreSQLLogo")
+    case "mongod", "mongos":
+        return descriptor("MongoDB", "MongoDB 文档数据库", "leaf.fill", .green, "ServiceMongoDBLogo")
+    case "mysqld", "mysql":
+        return descriptor("MySQL", "MySQL 关系型数据库", "cylinder.fill", Color(red: 0.27, green: 0.47, blue: 0.63), "ServiceMySQLLogo")
+    case "mariadbd":
+        return descriptor("MariaDB", "MariaDB 关系型数据库", "cylinder.fill", Color(red: 0, green: 0.36, blue: 0.43), "ServiceMariaDBLogo")
+    case "adb":
+        return descriptor("Android Debug Bridge", "Android 设备调试桥接服务", "apps.iphone", .green)
+    case "rapportd":
+        return descriptor("Apple 设备互联", "附近 Apple 设备发现与接续服务", "link.circle.fill", .blue)
+    case "controlcenter":
+        return descriptor("控制中心", "macOS 控制中心与隔空播放相关服务", "switch.2", .blue)
+    case "wechat":
+        return descriptor("微信", "微信客户端内部本地通信服务", "message.fill", .green)
+    case "sparkle":
+        return descriptor("Sparkle", "Sparkle 应用的本地通信服务", "sparkles", .purple)
+    default:
+        return descriptor(processName, "未识别的本地 TCP 监听进程", "server.rack", .secondary)
+    }
+}
+
+func groupLocalServicesForDisplay(
+    _ services: [LocalServiceSnapshot]
+) -> [LocalServiceDisplayGroup] {
+    var groups: [LocalServiceDisplayGroup] = []
+
+    // ponytail: listener counts are small; use keyed indices if this becomes measurable.
+    for service in services {
+        if let index = groups.firstIndex(where: {
+            $0.processName == service.processName && $0.bindings == service.bindings
+        }) {
+            groups[index].pids.append(service.pid)
+            groups[index].pids.sort()
+        } else {
+            groups.append(LocalServiceDisplayGroup(
+                processName: service.processName,
+                pids: [service.pid],
+                bindings: service.bindings
+            ))
+        }
+    }
+
+    return groups
+}
+
+func localServiceNotifications(_ services: [LocalServiceSnapshot]) -> [String] {
+    groupLocalServicesForDisplay(services).compactMap { group in
+        let exposedCount = group.bindings.count { !$0.isLoopback }
+        guard exposedCount > 0 else { return nil }
+        return "\(localServiceDescriptor(for: group.processName).displayName)：\(exposedCount) 个监听项可能可被局域网访问"
+    }
+}
+
 @MainActor
 final class EnvironmentViewModel: ObservableObject {
     @Published private(set) var snapshot: MachineSnapshot?
@@ -85,7 +184,7 @@ struct ContentView: View {
                     .frame(width: 20, height: 20)
                 }
                 .accessibilityLabel(hasUnreadNotices
-                    ? "通知，当前有未读扫描提示"
+                    ? "通知，当前有未读通知"
                     : "通知")
                 .help("通知")
                 .popover(isPresented: $isShowingNotifications) {
@@ -118,6 +217,7 @@ struct ContentView: View {
                 }
                 topOverviewSection(snapshot)
                 runtimesSection(snapshot.runtimes)
+                localServicesSection(snapshot)
                 environmentSection(snapshot)
             }
             .frame(maxWidth: 900)
@@ -246,13 +346,13 @@ struct ContentView: View {
     private func summarySection(_ snapshot: MachineSnapshot) -> some View {
         let discoveredCount = snapshot.runtimes.filter { $0.state == .discovered }.count
         let installationCount = snapshot.runtimes.reduce(0) { $0 + $1.installations.count }
-        let noticeCount = scanNotices(in: snapshot).count
+        let localServiceCount = groupLocalServicesForDisplay(snapshot.localServices).count
 
         return topOverviewCard("扫描汇总", systemImage: "chart.bar.fill") {
             VStack(spacing: 12) {
                 summaryMetric(discoveredCount, label: "已发现 Runtime 类别", systemImage: "magnifyingglass")
                 summaryMetric(installationCount, label: "Runtime Installation", systemImage: "arrow.down.to.line.compact")
-                summaryMetric(noticeCount, label: "扫描提示", systemImage: "lightbulb.max")
+                summaryMetric(localServiceCount, label: "本地服务", systemImage: "network")
             }
         }
     }
@@ -336,6 +436,173 @@ struct ContentView: View {
                 runtimeCard(runtime)
             }
         }
+    }
+
+    private func localServicesSection(_ snapshot: MachineSnapshot) -> some View {
+        let groups = groupLocalServicesForDisplay(snapshot.localServices)
+        let portCount = groups.reduce(0) { $0 + Set($1.bindings.map(\.port)).count }
+
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "network")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.accentColor.opacity(0.85), in: Circle())
+                    .shadow(color: Color.accentColor.opacity(0.25), radius: 8, y: 3)
+                Text("本地服务")
+                    .font(.title2.bold())
+                Spacer()
+                Text("\(groups.count) 组服务 · \(portCount) 个端口")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            if groups.isEmpty {
+                if let notice = snapshot.localServiceScanNotice {
+                    ContentUnavailableView {
+                        Label("监听读取失败", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text("\(notice)。请通过右上角通知查看详情或重新扫描。")
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 110)
+                } else {
+                    ContentUnavailableView("当前没有可见的 TCP 监听服务", systemImage: "network.slash")
+                        .frame(maxWidth: .infinity, minHeight: 110)
+                }
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(groups) { group in
+                        localServiceRow(group)
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.primary.opacity(0.025))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
+                }
+        }
+    }
+
+    private func localServiceRow(_ group: LocalServiceDisplayGroup) -> some View {
+        let descriptor = localServiceDescriptor(for: group.processName)
+        let applicationIcon = runningApplicationIcon(for: group.pids)
+        let pidText = group.pids.count == 1
+            ? "PID \(group.pids[0].formatted())"
+            : "\(group.pids.count) 个进程 · PID \(group.pids.map { $0.formatted() }.joined(separator: "、"))"
+        let processText = descriptor.displayName == group.processName
+            ? pidText
+            : "\(group.processName) · \(pidText)"
+
+        return HStack(alignment: .center, spacing: 16) {
+            Group {
+                if let applicationIcon {
+                    Image(nsImage: applicationIcon)
+                        .resizable()
+                        .scaledToFit()
+                } else if let assetName = descriptor.assetName {
+                    Image(assetName)
+                        .resizable()
+                        .scaledToFit()
+                        .foregroundStyle(descriptor.tint)
+                        .padding(13)
+                        .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+                } else {
+                    Image(systemName: descriptor.symbolName)
+                        .font(.system(size: 23, weight: .semibold))
+                        .foregroundStyle(descriptor.tint)
+                        .padding(13)
+                        .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+                }
+            }
+            .frame(width: 54, height: 54)
+            .shadow(color: .black.opacity(0.14), radius: 7, y: 4)
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 9, height: 9)
+                        .shadow(color: .green.opacity(0.65), radius: 4)
+                        .accessibilityHidden(true)
+                    Text(descriptor.displayName)
+                        .font(.title3.bold())
+                }
+                Text(descriptor.explanation)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(processText)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 150, maximum: 205), spacing: 8)],
+                alignment: .trailing,
+                spacing: 7
+            ) {
+                ForEach(group.bindings, id: \.self) { binding in
+                    listenerBindingBadge(binding)
+                }
+            }
+            .frame(minWidth: 170, maxWidth: 420, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.58))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
+                }
+        }
+    }
+
+    private func runningApplicationIcon(for pids: [Int32]) -> NSImage? {
+        for pid in pids {
+            if let icon = NSRunningApplication(processIdentifier: pid)?.icon { return icon }
+        }
+        return nil
+    }
+
+    private func listenerBindingText(_ binding: ListenerBinding) -> String {
+        let address = binding.family == .ipv6 ? "[\(binding.address)]" : binding.address
+        return "\(address):\(binding.port)"
+    }
+
+    private func listenerBindingBadge(_ binding: ListenerBinding) -> some View {
+        let tint = binding.family == .ipv4 ? Color.blue : Color.purple
+
+        return HStack(spacing: 6) {
+            Text(binding.family.rawValue)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(tint)
+            Text(listenerBindingText(binding))
+                .font(.callout.monospaced())
+                .lineLimit(1)
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
+            if !binding.isLoopback {
+                ListenerExposureIcon()
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.primary.opacity(0.08))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func runtimeCard(_ runtime: RuntimeSnapshot) -> some View {
@@ -961,7 +1228,7 @@ struct ContentView: View {
     }
 
     private var currentNotices: [String] {
-        model.snapshot.map(scanNotices(in:)) ?? []
+        model.snapshot.map(notifications(in:)) ?? []
     }
 
     private var hasUnreadNotices: Bool {
@@ -985,12 +1252,12 @@ struct ContentView: View {
             Divider()
 
             if notices.isEmpty {
-                ContentUnavailableView("暂无扫描提示", systemImage: "checkmark.circle")
+                ContentUnavailableView("暂无通知", systemImage: "checkmark.circle")
                     .frame(maxWidth: .infinity, minHeight: 100)
             } else {
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(notices, id: \.self) { notice in
-                        Label(notice, systemImage: "exclamationmark.circle.fill")
+                    ForEach(notices.indices, id: \.self) { index in
+                        Label(notices[index], systemImage: "exclamationmark.circle.fill")
                             .foregroundStyle(.orange)
                     }
                 }
@@ -1005,10 +1272,11 @@ struct ContentView: View {
         readNoticeSnapshotDate = model.snapshot?.scannedAt
     }
 
-    private func scanNotices(in snapshot: MachineSnapshot) -> [String] {
+    private func notifications(in snapshot: MachineSnapshot) -> [String] {
         snapshot.runtimes
             .filter(\.hasPathVersionConflict)
             .map { "\($0.name)：PATH 版本冲突" }
+            + localServiceNotifications(snapshot.localServices)
             + snapshot.issues
     }
 
@@ -1060,5 +1328,29 @@ private struct RuntimeHelpIcon: View {
             }
             .accessibilityLabel("说明")
             .accessibilityHint(explanation)
+    }
+}
+
+private struct ListenerExposureIcon: View {
+    @State private var isShowingExplanation = false
+
+    var body: some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.caption.weight(.bold))
+            .foregroundStyle(.orange)
+            .padding(7)
+            .background(Color.orange.opacity(0.17), in: Circle())
+            .contentShape(Circle())
+            .onHover { isShowingExplanation = $0 }
+            .popover(isPresented: $isShowingExplanation, arrowEdge: .bottom) {
+                Text("可能可被局域网访问。仅依据监听地址范围判断，未验证防火墙或其他设备的实际可达性。")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+                    .frame(width: 280, alignment: .leading)
+            }
+            .accessibilityLabel("可能可被局域网访问")
+            .accessibilityHint("仅依据监听地址范围判断，未验证实际可达性")
     }
 }
