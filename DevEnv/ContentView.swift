@@ -145,6 +145,8 @@ final class EnvironmentViewModel: ObservableObject {
 }
 
 struct ContentView: View {
+    private let environmentCardHeaderHeight: CGFloat = 72
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model = EnvironmentViewModel()
     @State private var copiedPath: String?
@@ -919,7 +921,7 @@ struct ContentView: View {
                     .background(appearance.color.opacity(0.10), in: Circle())
                     .accessibilityHidden(true)
             }
-            .frame(minHeight: 72, alignment: .top)
+            .frame(height: environmentCardHeaderHeight, alignment: .top)
 
             Label(appearance.status, systemImage: appearance.pill)
             .font(.caption.weight(.semibold))
@@ -985,16 +987,14 @@ struct ContentView: View {
                     .frame(width: 38, height: 38)
                     .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
             }
-            .frame(minHeight: 72, alignment: .top)
+            .frame(height: environmentCardHeaderHeight, alignment: .top)
 
-            if homebrew.available {
-                Text("已安装")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.green)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Color.green.opacity(0.10), in: Capsule())
-            }
+            Text(homebrew.available ? "已安装" : "未安装")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Capsule())
 
             Divider()
 
@@ -1073,7 +1073,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(minHeight: 72, alignment: .top)
+            .frame(height: environmentCardHeaderHeight, alignment: .top)
 
             HStack(spacing: 8) {
                 Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
