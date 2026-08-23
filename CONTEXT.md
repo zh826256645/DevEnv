@@ -32,6 +32,26 @@ _Avoid_: Environment, System Profile
 本机可被发现的某个语言运行时实例，包含其版本与来源位置。
 _Avoid_: Runtime, Package
 
+**Database Installation**:
+本机可被发现的某个数据库服务端软件安装实例，包含数据库类型、版本与服务端可执行文件路径。
+_Avoid_: Database, 数据库, DB
+
+**Listening Database Installation**:
+服务端可执行文件实际路径与至少一个 Local Service 匹配的 Database Installation；该状态只说明存在 TCP Listener Binding，不覆盖仅使用 Unix Socket 的运行形态，也不表示数据库健康或可用。
+_Avoid_: Running Database, Healthy Database, Available Database, Active Database
+
+**Database Listening State**:
+Environment Scan 对某个 Database Installation 是否能精确匹配 TCP 监听进程的观察结果，取值为“正在监听”“未监听”或“监听状态未知”。
+_Avoid_: Database Run State, Health Status
+
+**Database Discovery State**:
+Environment Scan 对 Database Installation 发现完整性的观察结果，取值为“已发现”“未发现”或“发现状态未知”；该状态不证明软件在本机上绝对存在或不存在。
+_Avoid_: Installation State, Installed Status
+
+**Database Provider**:
+从已知工具、平台索引或 Local Service 的真实可执行文件路径中，发现未进入当前 `PATH` 的 Database Installation 的来源。
+_Avoid_: Database Scanner, Database Manager
+
 **Runtime Provider**:
 从已知工具或平台索引中发现未进入当前 `PATH` 的 Runtime Installation 的来源。
 _Avoid_: Scanner, Version Manager

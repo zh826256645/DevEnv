@@ -161,6 +161,34 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - Runtime Conflict 在扫描提示中集中展示，并在对应 Runtime 行旁显示“PATH 版本冲突”。
 - 扫描提示保留版本读取失败、可执行文件不可用和 Provider 失败。
 
+## Database Installation 扩展
+
+状态：已确认，待实现。首批固定覆盖 PostgreSQL、MySQL、MariaDB、MongoDB 和 Redis，只读展示 Database Installation 及其 TCP 监听状态，不连接或查询数据库。
+
+### 发现与匹配
+
+1. 按当前 `PATH` 遍历已知数据库服务端可执行文件，Homebrew Database Provider 补充未进入 `PATH` 的安装。
+2. Local Service Database Provider 使用 PID 读取进程真实可执行文件路径，并补充未被 `PATH` 或 Homebrew 发现的正在监听安装。
+3. 以规范化路径和软链接实际目标去重；只有 Local Service 的真实可执行文件路径与 Database Installation 实际路径精确匹配时，才标记为“正在监听”，不按进程名或端口猜测。
+4. 每项展示版本、调用路径和不同的实际路径。版本读取失败时保留 Database Installation，并产生 Scan Notice。
+5. 只由 Local Service 发现且无法精确识别数据库类型的进程不创建 Database Installation；例如无法区分 MySQL 与 MariaDB 的 `mysqld` 时，保留 Local Service 并产生 Scan Notice。
+
+Database Discovery State 为“已发现”“未发现”或“发现状态未知”。任一适用 Database Provider 失败时保留已有结果并产生 Scan Notice；没有结果时显示“发现状态未知”，不声称“未安装”。
+
+Database Listening State 为“正在监听”“未监听”或“监听状态未知”。Local Service 扫描失败或已识别数据库进程的真实路径不可读时不猜测匹配；同一 Database Installation 的多个监听进程聚合为一个“正在监听”状态，不建立数据库实例模型。
+
+该扩展只观察 TCP Listener Binding，不覆盖仅使用 Unix Socket 或容器内的数据库。如需覆盖，由后续显式 Database Provider 扩展。完整取舍见 [ADR-0005](../adr/0005-map-database-listeners-by-installation-path.md)。
+
+### 展示
+
+- 总览顺序为 Runtime、数据库、本地服务、环境配置；顶部扫描汇总暂不增加数据库指标。
+- 按 PostgreSQL、MySQL、MariaDB、MongoDB、Redis 的固定顺序展示五张卡片，摘要显示安装数和正在监听数。
+- 卡片复用 Runtime 的折叠与展开交互：同时只展开一张，默认最多展示前 3 个 Database Installation，存在更多安装时才提供“查看全部”。
+- “正在监听”使用绿色；“未发现”和“未监听”是中性灰色，不产生 Scan Notice；发现或监听状态未知以及读取失败使用橙色并产生 Scan Notice。
+- 数据库监听进程仍保留在完整的“本地服务”区域；进程真实路径只用于 Database Installation 发现与匹配，不增加到 Local Service 行。
+- 数据库结果只随应用启动扫描和手动“重新扫描”更新，不增加轮询或独立刷新入口。
+- 实现时将 Machine Snapshot 升级为 `schemaVersion = 4`；V1–V3 快照直接忽略并重新扫描，不增加快照迁移。
+
 ## TCP 监听服务扩展
 
 - Environment Scan 固定执行 `/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn`，不调用 Shell、不接收用户参数、不请求管理员权限。
@@ -189,10 +217,18 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - `PATH` 首个 Runtime Installation 启动失败、第二个可用：首项仍标记 Effective 并显示“版本读取失败”。
 - Provider 超时：保留其他来源的安装，扫描提示记录对应 Provider 失败。
 - Provider 返回的可执行文件不可用：保留版本和预期绝对路径并显示错误。
+- 同一 PostgreSQL 可执行文件经 `PATH`、Homebrew 和 Local Service 重复发现：合并为一个 Database Installation 并显示“正在监听”。
+- 安装两个 PostgreSQL 版本且只有一个实际路径正在监听：只标记该 Database Installation，不连带标记另一个版本。
+- 发现 Homebrew 数据库但没有匹配 Local Service：显示“未监听”，不产生 Scan Notice。
+- Homebrew Database Provider 失败且没有其他发现结果：显示“发现状态未知”并产生 Scan Notice，不显示“未安装”。
+- Local Service 扫描失败或已识别数据库进程的真实路径不可读：相关 Database Listening State 显示“监听状态未知”。
+- 只启用 Unix Socket 或位于容器内的 PostgreSQL：不标记为 Listening Database Installation；容器端口代理仍可作为 Local Service 展示。
 - 读取 V1 或 V2 快照：忽略旧快照并执行扫描，成功后写入 V3 快照。
+- Database Installation 扩展实现后读取 V1–V3 快照：忽略旧快照并执行扫描，成功后写入 V4 快照。
 
 ## 相关决策
 
 - [ADR-0001：不启用 App Sandbox](../adr/0001-run-without-app-sandbox.md)
 - [ADR-0002：只读扫描并持久化最新环境快照](../adr/0002-read-only-environment-scan-snapshot.md)
 - [ADR-0003：按 PATH 与 Provider 分层发现 Runtime](../adr/0003-source-aware-runtime-discovery.md)
+- [ADR-0005：按安装路径映射数据库 TCP 监听状态](../adr/0005-map-database-listeners-by-installation-path.md)
