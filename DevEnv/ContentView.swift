@@ -919,6 +919,7 @@ struct ContentView: View {
                     .background(appearance.color.opacity(0.10), in: Circle())
                     .accessibilityHidden(true)
             }
+            .frame(minHeight: 72, alignment: .top)
 
             Label(appearance.status, systemImage: appearance.pill)
             .font(.caption.weight(.semibold))
@@ -984,6 +985,7 @@ struct ContentView: View {
                     .frame(width: 38, height: 38)
                     .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
             }
+            .frame(minHeight: 72, alignment: .top)
 
             if homebrew.available {
                 Text("已安装")
@@ -1071,8 +1073,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-
-            Divider()
+            .frame(minHeight: 72, alignment: .top)
 
             HStack(spacing: 8) {
                 Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
@@ -1090,25 +1091,27 @@ struct ContentView: View {
                         .padding(.vertical, 4)
                         .background(Color.orange.opacity(0.10), in: Capsule())
                 }
-
-                Spacer(minLength: 4)
-
-                Button {
-                    if reduceMotion {
-                        isPathExpanded.toggle()
-                    } else {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            isPathExpanded.toggle()
-                        }
-                    }
-                } label: {
-                    Label(isPathExpanded ? "收起" : "查看全部", systemImage: isPathExpanded ? "arrow.up" : "arrow.right")
-                        .labelStyle(.titleAndIcon)
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-                .buttonStyle(.borderless)
             }
             .font(.caption.weight(.semibold))
+
+            Divider()
+
+            Button {
+                if reduceMotion {
+                    isPathExpanded.toggle()
+                } else {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isPathExpanded.toggle()
+                    }
+                }
+            } label: {
+                Label(isPathExpanded ? "收起" : "查看全部", systemImage: isPathExpanded ? "arrow.up" : "arrow.right")
+                    .labelStyle(.titleAndIcon)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.borderless)
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
