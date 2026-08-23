@@ -947,9 +947,9 @@ struct ContentView: View {
         let symbol = installation.isEffective
             ? "checkmark.circle.fill"
             : (installation.state == .failed || isConflictingPath ? "exclamationmark.circle" : "circle.fill")
-        let source = installation.isEffective
+        let state = installation.isEffective
             ? "当前生效"
-            : (installation.isInPath ? "PATH" : "已发现")
+            : (installation.isInPath ? "PATH" : "未进入 PATH")
 
         return HStack(alignment: .center, spacing: 14) {
             Image(systemName: symbol)
@@ -962,12 +962,23 @@ struct ContentView: View {
                 .monospacedDigit()
                 .frame(width: 90, alignment: .leading)
 
-            Text(source)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(installation.isEffective ? .green : .secondary)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
+            HStack(spacing: 5) {
+                ForEach(installation.sources.filter { $0 != .path }, id: \.self) { source in
+                    Text(source.displayName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                }
+
+                Text(state)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(installation.isEffective ? .green : .secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
+            }
 
             VStack(alignment: .leading, spacing: 5) {
                 copyablePath(installation.executable)

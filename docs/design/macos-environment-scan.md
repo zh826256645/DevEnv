@@ -83,10 +83,11 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - User Git Configuration 扩展版本：`schemaVersion = 5`
 - Git LFS、签名与 Credential Helper Chain 扩展版本：`schemaVersion = 6`
 - GitHub Authentication Configuration 扩展版本：`schemaVersion = 7`
+- Runtime Installation 来源扩展版本：`schemaVersion = 8`
 - 写入方式：原子替换
 - 启动读取到损坏或不支持版本的文件时忽略该文件，不尝试迁移
 
-GitHub Authentication Configuration 扩展启用后，V1–V6 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
+Runtime Installation 来源扩展启用后，V1–V7 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
 
 只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
 
@@ -159,7 +160,7 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 ### 展示
 
 - 每类 Runtime 默认折叠，通过行内展开查看所有安装，不提供版本切换操作。
-- 每项展示版本和可复制的绝对文件路径，不展示 Runtime Provider。
+- 每项展示版本、Runtime Installation Source 和可复制的绝对文件路径。来源与“当前生效”“PATH”“未进入 PATH”状态分开展示；已知 Provider 来源优先，无法归属时显示“系统”或“PATH”。
 - 软链接以 `PATH` 中的调用路径为主；实际路径不同时同时展示。
 - Effective Runtime Installation 始终排第一；其余 `PATH` 安装保持 PATH 优先级顺序；Provider-only 安装最后按版本倒序、路径作为同版本稳定次序。
 - Runtime Conflict 在扫描提示中集中展示，并在对应 Runtime 行旁显示“PATH 版本冲突”。
@@ -210,7 +211,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - “正在监听”使用绿色；“未发现”和“未监听”是中性灰色，不产生 Scan Notice；发现或监听状态未知以及读取失败使用橙色并产生 Scan Notice。
 - 数据库监听进程仍保留在完整的“本地服务”区域；进程真实路径只用于 Database Installation 发现与匹配，不增加到 Local Service 行。
 - 数据库结果只随应用启动扫描和手动“重新扫描”更新，不增加轮询或独立刷新入口。
-- 实现时将 Machine Snapshot 升级为 `schemaVersion = 8`；V1–V7 快照直接忽略并重新扫描，不增加快照迁移。
+- 实现时将 Machine Snapshot 升级为 `schemaVersion = 9`；V1–V8 快照直接忽略并重新扫描，不增加快照迁移。
 
 ## TCP 监听服务扩展
 

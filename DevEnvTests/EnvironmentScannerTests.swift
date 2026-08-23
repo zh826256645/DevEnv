@@ -386,7 +386,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 7)
+        XCTAssertEqual(snapshot.schemaVersion, 8)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -413,6 +413,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(node.installations.map(\.executable), ["/first/bin/node", "/other/bin/node"])
         XCTAssertEqual(node.installations.first?.actualExecutable, "/runtimes/node-22/bin/node")
         XCTAssertNil(node.installations.last?.actualExecutable)
+        XCTAssertTrue(node.installations.allSatisfy { $0.sources == [.path] })
     }
 
     func testFailedFirstMatchStaysEffectiveAndUnknownVersionsDoNotConflict() {
@@ -488,6 +489,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.runtimes.flatMap { $0.installations }.count, 7)
         XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.count, 1)
         XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.version, "22.3.0")
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.sources, [.homebrew])
         XCTAssertEqual(
             snapshot.runtimes.first { $0.id == "python" }?.installations.first?.executable,
             "/opt/homebrew/Cellar/python@3.13/3.13.4/bin/python3.13"
@@ -589,6 +591,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(snapshot.runtimes.allSatisfy { $0.installations.count == 1 })
         XCTAssertTrue(snapshot.runtimes.allSatisfy { $0.installations.first?.state == .discovered })
         XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.executable, "/custom/bin/node")
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.sources, [.homebrew, .mise])
         XCTAssertEqual(snapshot.runtimes.first { $0.id == "python" }?.installations.first?.executable,
                        "/custom/mise/installs/python/3.13.4/bin/python3")
         XCTAssertTrue(snapshot.runtimes.filter { $0.id != "node" }.allSatisfy {
@@ -639,6 +642,7 @@ final class EnvironmentScannerTests: XCTestCase {
             pyenvPython,
         ])
         XCTAssertEqual(python.installations.map(\.isInPath), [true, false, false])
+        XCTAssertEqual(python.installations.map(\.sources), [[.uv, .pyenv], [.uv], [.pyenv]])
         XCTAssertFalse(python.hasPathVersionConflict)
     }
 
@@ -858,6 +862,27 @@ final class EnvironmentScannerTests: XCTestCase {
         ])
         XCTAssertEqual(node.installations.map(\.isInPath), [true, false])
         XCTAssertEqual(node.installations.first?.actualExecutable, "/opt/nvm/versions/node/v22.3.0/bin/node")
+        XCTAssertEqual(node.installations.map(\.sources), [[.nvm], [.nvm]])
+    }
+
+    func testManagerShimKeepsItsOwnPathAndSource() {
+        let root = "/custom/pyenv"
+        let shim = "\(root)/shims/python3"
+        let installed = "\(root)/versions/3.12.1/bin/python3"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["\(root)/shims", "/custom/bin"],
+            environment: ["PYENV_ROOT": root],
+            executables: [shim, "/custom/bin/pyenv", installed],
+            commandOutputs: [
+                "\(shim) --version": "Python 3.12.1\n",
+                "/custom/bin/pyenv versions --bare": "3.12.1\n",
+            ]
+        )).scan().snapshot
+
+        let python = try! XCTUnwrap(snapshot.runtimes.first { $0.id == "python" })
+        XCTAssertEqual(python.installations.map(\.executable), [shim, installed])
+        XCTAssertEqual(python.installations.map(\.sources), [[.pyenv], [.pyenv]])
+        XCTAssertEqual(python.installations.map(\.isInPath), [true, false])
     }
 
     func testNVMRetainsUnavailableInstallationWithoutRunningNode() {
@@ -1225,7 +1250,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV7SnapshotRoundTripsGitToolingAndV6IsRejected() throws {
+    func testV8SnapshotRoundTripsSourcesAndV7IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -1253,7 +1278,7 @@ final class EnvironmentScannerTests: XCTestCase {
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 7)
+        XCTAssertEqual(store.load()?.schemaVersion, 8)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
@@ -1268,6 +1293,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.localConfigurationExists == true)
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.ghTokenExists == true)
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
+        XCTAssertEqual(store.load()?.runtimes.first { $0.id == "node" }?.installations.first?.sources, [.system])
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
         var runtimes = try XCTUnwrap(json["runtimes"] as? [[String: Any]])
@@ -1282,7 +1308,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 6
+        json["schemaVersion"] = 7
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
