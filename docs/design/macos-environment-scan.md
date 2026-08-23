@@ -1,6 +1,6 @@
 # macOS 系统环境扫描
 
-状态：v0.1 范围已冻结；Runtime 多版本发现、TCP 监听服务与总览界面已实现。
+状态：v0.1 范围已冻结；Runtime 多版本发现、TCP 监听服务、Git CLI 与总览界面已实现。
 
 ## 目标
 
@@ -79,12 +79,13 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - V1 实现版本：`schemaVersion = 1`
 - Runtime 多版本扩展版本：`schemaVersion = 2`
 - TCP 监听服务扩展版本：`schemaVersion = 3`
+- Git CLI 扩展版本：`schemaVersion = 4`
 - 写入方式：原子替换
 - 启动读取到损坏或不支持版本的文件时忽略该文件，不尝试迁移
 
-TCP 监听服务扩展启用后，V1 和 V2 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
+Git CLI 扩展启用后，V1–V3 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
 
-只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime 或 Homebrew 单项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
+只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew 或 Git CLI 单项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
 
 ## 触发与界面
 
@@ -96,7 +97,7 @@ TCP 监听服务扩展启用后，V1 和 V2 快照视为不支持版本并立即
 - 标题下方首先展示一个圆角总览面板，面板内按双列划分系统信息与扫描汇总；每列由图标标题和独立内层卡片组成，两张内层卡片始终以内容较高的一侧为准保持可见背景等高，不使用固定高度。其后依次展示 Runtime、本地服务和环境配置，不在正文中重复系统信息或单独展示 Scan Notice 模块。
 - 摘要展示已发现 Runtime 类别数、Runtime Installation 总数和本地服务组数，不给出 Scan Notice 数量、环境健康评分或“正常/异常”的整体判断。
 - 系统信息卡使用大号系统 Apple 标志，集中展示 macOS 版本、Build、架构，并以图标指标展示主机名和内存；系统卷使用线性进度条显示已用容量占总容量的比例，并同时标注已用、可用和总容量。扫描汇总的三个指标分别使用带图标底板和细描边的独立圆角行，数值右对齐突出显示。
-- Runtime 使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew 与 PATH 合并到“环境配置”圆角模块内并使用双列等高卡片：Homebrew 展示版本、安装状态和可执行路径，PATH 展示目录总数与真实的 Runtime PATH 版本冲突数。PATH 详情默认折叠，点击“查看全部”后在双卡下方占满整行展开，避免把 Homebrew 卡片同步撑出空白。
+- Runtime 使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git 与 PATH 合并到“环境配置”圆角模块内并使用三张同级等高卡片：Homebrew 展示版本、安装状态和可执行路径，Git 展示当前生效 CLI 的状态、版本和可复制路径，PATH 展示目录总数与真实的 Runtime PATH 版本冲突数。PATH 详情默认折叠，点击“查看全部”后在三张卡片下方占满整行展开。
 
 ### 扫描状态
 
@@ -161,6 +162,15 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - Runtime Conflict 在扫描提示中集中展示，并在对应 Runtime 行旁显示“PATH 版本冲突”。
 - 扫描提示保留版本读取失败、可执行文件不可用和 Provider 失败。
 
+## Git CLI 扩展
+
+- 按当前 `PATH` 顺序只取第一个可执行 `git`，记录规范化的绝对调用路径，不枚举其他安装来源或软链接目标。
+- 只以已发现的绝对路径和固定参数 `--version` 直接启动进程，不调用 Shell，不拼接用户输入，并沿用单命令 2 秒超时。
+- 状态固定为“可用”“未发现”或“读取失败”。未发现保持中性且不产生 Scan Notice；命令失败、超时或版本输出不可识别时保留路径并只产生一条 Git CLI Scan Notice。
+- Git CLI 子扫描失败不丢弃系统、Homebrew Availability、PATH、Runtime Installation 或 Local Service 结果，也不改变主机基础信息可用时 Machine Snapshot 的可持久化性。
+- Git CLI 随整份 Machine Snapshot 原子持久化和恢复，应用启动扫描与手动“重新扫描”继续共用现有刷新模型。
+- “环境配置”中的 Git 卡片只展示状态、版本和可复制路径，不计算就绪度、健康分或配置完成度。
+
 ## Database Installation 扩展
 
 状态：已确认，待实现。首批固定覆盖 PostgreSQL、MySQL、MariaDB、MongoDB 和 Redis，只读展示 Database Installation 及其 TCP 监听状态，不连接或查询数据库。
@@ -187,7 +197,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - “正在监听”使用绿色；“未发现”和“未监听”是中性灰色，不产生 Scan Notice；发现或监听状态未知以及读取失败使用橙色并产生 Scan Notice。
 - 数据库监听进程仍保留在完整的“本地服务”区域；进程真实路径只用于 Database Installation 发现与匹配，不增加到 Local Service 行。
 - 数据库结果只随应用启动扫描和手动“重新扫描”更新，不增加轮询或独立刷新入口。
-- 实现时将 Machine Snapshot 升级为 `schemaVersion = 4`；V1–V3 快照直接忽略并重新扫描，不增加快照迁移。
+- 实现时将 Machine Snapshot 升级为 `schemaVersion = 5`；V1–V4 快照直接忽略并重新扫描，不增加快照迁移。
 
 ## TCP 监听服务扩展
 
@@ -209,6 +219,9 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - Lua 未安装：Lua 显示“未发现”，其他结果正常保存。
 - 单个 Runtime 命令超时：该项显示“读取失败”，其他扫描继续。
 - Homebrew 不在标准路径：显示“未发现”，不执行 Shell 配置。
+- `PATH` 中存在多个 Git：只展示顺序最靠前的可执行文件及其版本。
+- Git 未发现：Git 卡片显示中性“未发现”，不产生 Scan Notice。
+- Git 版本命令失败、输出不可识别或超时：Git 卡片保留调用路径并显示“读取失败”，只产生一条 Git CLI Scan Notice，其他扫描结果仍可保存。
 - 主机基础信息无法建立：显示整体错误，磁盘中的上一份快照保持不变。
 - 快照文件损坏或版本不支持：忽略旧文件并执行启动扫描。
 - `PATH` 依次包含 Python 3.12 和 3.9：两项均展示，3.12 标记“当前生效”，Runtime 行和扫描提示显示“PATH 版本冲突”。
@@ -223,12 +236,13 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - Homebrew Database Provider 失败且没有其他发现结果：显示“发现状态未知”并产生 Scan Notice，不显示“未安装”。
 - Local Service 扫描失败或已识别数据库进程的真实路径不可读：相关 Database Listening State 显示“监听状态未知”。
 - 只启用 Unix Socket 或位于容器内的 PostgreSQL：不标记为 Listening Database Installation；容器端口代理仍可作为 Local Service 展示。
-- 读取 V1 或 V2 快照：忽略旧快照并执行扫描，成功后写入 V3 快照。
-- Database Installation 扩展实现后读取 V1–V3 快照：忽略旧快照并执行扫描，成功后写入 V4 快照。
+- 读取 V1–V3 快照：忽略旧快照并执行扫描，成功后写入 V4 快照。
+- Database Installation 扩展实现后读取 V1–V4 快照：忽略旧快照并执行扫描，成功后写入 V5 快照。
 
 ## 相关决策
 
 - [ADR-0001：不启用 App Sandbox](../adr/0001-run-without-app-sandbox.md)
 - [ADR-0002：只读扫描并持久化最新环境快照](../adr/0002-read-only-environment-scan-snapshot.md)
 - [ADR-0003：按 PATH 与 Provider 分层发现 Runtime](../adr/0003-source-aware-runtime-discovery.md)
+- [ADR-0004：Environment Scan 保持本地观察](../adr/0004-keep-environment-scan-local.md)
 - [ADR-0005：按安装路径映射数据库 TCP 监听状态](../adr/0005-map-database-listeners-by-installation-path.md)

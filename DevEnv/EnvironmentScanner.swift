@@ -11,6 +11,7 @@ struct MachineSnapshot: Codable, Sendable {
     let path: [String]
     let runtimes: [RuntimeSnapshot]
     let homebrew: HomebrewSnapshot
+    let gitCLI: GitCLISnapshot
     let issues: [String]
 
     var localServiceScanNotice: String? {
@@ -106,6 +107,18 @@ struct HomebrewSnapshot: Codable, Sendable {
     let version: String?
     let available: Bool
     let error: String?
+}
+
+enum GitCLIState: String, Codable, Sendable {
+    case available
+    case unavailable
+    case failed
+}
+
+struct GitCLISnapshot: Codable, Sendable {
+    let executable: String?
+    let version: String?
+    let state: GitCLIState
 }
 
 struct ScanResult: Sendable {
@@ -264,6 +277,7 @@ struct EnvironmentScanner: Sendable {
         let localServices = scanLocalServices(issues: &issues)
 
         let homebrew = scanHomebrew(path: path, issues: &issues)
+        let gitCLI = scanGitCLI(path: path, notices: &issues)
         let homebrewInstallations = homebrew.available ? homebrew.executable.map {
             scanHomebrewRuntimes(executable: $0, issues: &issues)
         } ?? [] : []
@@ -285,19 +299,49 @@ struct EnvironmentScanner: Sendable {
             )
         }
         let snapshot = MachineSnapshot(
-            schemaVersion: 3,
+            schemaVersion: 4,
             scannedAt: Date(),
             system: system,
             localServices: localServices,
             path: path,
             runtimes: runtimes,
             homebrew: homebrew,
+            gitCLI: gitCLI,
             issues: issues
         )
         return ScanResult(
             snapshot: snapshot,
             canPersist: system.macOSVersion != nil && system.architecture != nil
         )
+    }
+
+    private func scanGitCLI(path: [String], notices: inout [String]) -> GitCLISnapshot {
+        guard let executable = path.lazy.map({ absoluteExecutable("git", directory: $0) })
+            .first(where: { machine.isExecutableFile(atPath: $0) }) else {
+            return GitCLISnapshot(executable: nil, version: nil, state: .unavailable)
+        }
+        let result = machine.command(executable: executable, arguments: ["--version"])
+        let version = result.status == 0 && !result.timedOut ? gitVersion(from: result.output) : nil
+        guard let version else {
+            let failureReason = result.timedOut ? "命令超时" : "版本读取失败"
+            notices.append("Git CLI：\(failureReason)")
+            return GitCLISnapshot(executable: executable, version: nil, state: .failed)
+        }
+        return GitCLISnapshot(executable: executable, version: version, state: .available)
+    }
+
+    private func gitVersion(from output: String) -> String? {
+        guard let line = output.split(whereSeparator: \.isNewline).map(String.init)
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return nil }
+        let prefix = "git version "
+        let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.hasPrefix(prefix) else { return nil }
+        let version = String(value.dropFirst(prefix.count))
+        guard version.range(
+            of: #"^[0-9]+(?:\.[0-9A-Za-z]+)+(?:[-.A-Za-z0-9+() ]*)$"#,
+            options: .regularExpression
+        ) != nil else { return nil }
+        return version
     }
 
     private func scanLocalServices(issues: inout [String]) -> [LocalServiceSnapshot] {
@@ -744,7 +788,7 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 3 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 4 else { return nil }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

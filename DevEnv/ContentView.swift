@@ -851,6 +851,8 @@ struct ContentView: View {
             HStack(alignment: .top, spacing: 14) {
                 homebrewCard(snapshot.homebrew)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                gitCard(snapshot.gitCLI)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 pathCard(snapshot.path, warningCount: pathWarningCount)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
@@ -868,6 +870,79 @@ struct ContentView: View {
                 .overlay {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .stroke(Color.primary.opacity(0.08))
+                }
+        }
+    }
+
+    private func gitCard(_ git: GitCLISnapshot) -> some View {
+        let appearance: (color: Color, status: String, badge: String, pill: String) = switch git.state {
+        case .available: (.green, "可用", "checkmark", "checkmark.circle.fill")
+        case .failed: (.orange, "读取失败", "exclamationmark", "exclamationmark.circle.fill")
+        case .unavailable: (.secondary, "未发现", "questionmark", "circle.fill")
+        }
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.orange.opacity(0.09))
+                    Image(systemName: "terminal")
+                        .font(.system(size: 23, weight: .medium))
+                        .foregroundStyle(.orange)
+                }
+                .frame(width: 54, height: 54)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.07))
+                }
+                .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Git")
+                        .font(.headline)
+                    Text(git.version ?? appearance.status)
+                        .font(.title2.bold())
+                        .monospacedDigit()
+                    Text("当前生效 CLI")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: appearance.badge)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(appearance.color)
+                    .frame(width: 38, height: 38)
+                    .background(appearance.color.opacity(0.10), in: Circle())
+                    .accessibilityHidden(true)
+            }
+
+            Label(appearance.status, systemImage: appearance.pill)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(appearance.color)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(appearance.color.opacity(0.10), in: Capsule())
+
+            Divider()
+
+            if let executable = git.executable {
+                copyablePath(executable)
+            } else {
+                Text("当前 PATH 未发现 Git")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(0.09))
                 }
         }
     }

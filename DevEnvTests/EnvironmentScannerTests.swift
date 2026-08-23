@@ -3,6 +3,63 @@ import XCTest
 @testable import DevEnv
 
 final class EnvironmentScannerTests: XCTestCase {
+    func testGitCLIUsesFirstExecutableInPath() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["tools/../first/bin", "/second/bin"],
+            executables: ["/first/bin/git", "/second/bin/git"],
+            commandOutputs: [
+                "/first/bin/git --version": "git version 2.49.0 (Apple Git-154)\n",
+                "/second/bin/git --version": "git version 2.50.0\n",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.gitCLI.state, .available)
+        XCTAssertEqual(snapshot.gitCLI.version, "2.49.0 (Apple Git-154)")
+        XCTAssertEqual(snapshot.gitCLI.executable, "/first/bin/git")
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Git CLI：") })
+    }
+
+    func testGitCLIMissingIsNeutral() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(path: ["/bin"])).scan().snapshot
+
+        XCTAssertEqual(snapshot.gitCLI.state, .unavailable)
+        XCTAssertNil(snapshot.gitCLI.version)
+        XCTAssertNil(snapshot.gitCLI.executable)
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Git CLI：") })
+    }
+
+    func testGitCLIFailuresProduceOneIsolatedNotice() {
+        let cases: [(output: String, status: Int32, timedOut: Bool, notice: String)] = [
+            ("fatal\n", 1, false, "Git CLI：版本读取失败"),
+            ("not a git version\n", 0, false, "Git CLI：版本读取失败"),
+            ("", 0, true, "Git CLI：命令超时"),
+        ]
+
+        for testCase in cases {
+            let command = "/bin/git --version"
+            let result = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin", "/opt/homebrew/bin"],
+                executables: ["/bin/git", "/bin/node", "/opt/homebrew/bin/brew"],
+                commandOutputs: [
+                    command: testCase.output,
+                    "/bin/node --version": "v22.0.0\n",
+                    "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                ],
+                commandStatuses: [command: testCase.status],
+                commandTimeouts: testCase.timedOut ? [command] : []
+            )).scan()
+
+            XCTAssertEqual(result.snapshot.gitCLI.state, .failed)
+            XCTAssertEqual(result.snapshot.gitCLI.executable, "/bin/git")
+            XCTAssertNil(result.snapshot.gitCLI.version)
+            XCTAssertEqual(result.snapshot.issues.filter { $0.hasPrefix("Git CLI：") }, [testCase.notice])
+            XCTAssertEqual(result.snapshot.path, ["/bin", "/opt/homebrew/bin"])
+            XCTAssertEqual(result.snapshot.runtimes.first { $0.id == "node" }?.installations.first?.version, "22.0.0")
+            XCTAssertTrue(result.snapshot.homebrew.available)
+            XCTAssertTrue(result.canPersist)
+        }
+    }
+
     func testDiscoversEveryRuntimeInPathOrder() {
         let names = ["node", "python3", "go", "java", "rustc", "ruby", "lua"]
         let path = ["/first/bin", "/second/bin"]
@@ -17,7 +74,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 3)
+        XCTAssertEqual(snapshot.schemaVersion, 4)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -852,22 +909,25 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV3SnapshotRoundTripsAndV2IsRejected() throws {
+    func testV4SnapshotRoundTripsGitCLIAndV3IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
         let store = SnapshotStore(fileURL: fileURL)
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
-            executables: ["/bin/node"],
+            executables: ["/bin/git", "/bin/node"],
             commandOutputs: [
+                "/bin/git --version": "git version 2.49.0 (Apple Git-154)\n",
                 "/bin/node": "v22.0.0\n",
                 "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
             ]
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 3)
+        XCTAssertEqual(store.load()?.schemaVersion, 4)
+        XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
+        XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
@@ -883,7 +943,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 2
+        json["schemaVersion"] = 3
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
