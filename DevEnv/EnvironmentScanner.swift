@@ -16,6 +16,7 @@ struct MachineSnapshot: Codable, Sendable {
     let userGitConfiguration: UserGitConfigurationSnapshot?
     let gitSigningConfiguration: GitSigningConfigurationSnapshot?
     let gitCredentialHelpers: [String]?
+    let githubAuthenticationConfiguration: GitHubAuthenticationConfigurationSnapshot
     let issues: [String]
 
     var localServiceScanNotice: String? {
@@ -157,6 +158,18 @@ struct GitSigningConfigurationSnapshot: Codable, Sendable {
     let signingKey: String?
     let commitSigning: String?
     let tagSigning: String?
+}
+
+struct GitHubAuthenticationConfigurationSnapshot: Codable, Sendable {
+    let cliState: GitCLIState
+    let gitProtocol: String?
+    let localConfigurationExists: Bool
+    let ghTokenExists: Bool
+    let githubTokenExists: Bool
+
+    var isConfigured: Bool {
+        localConfigurationExists || ghTokenExists || githubTokenExists
+    }
 }
 
 struct ScanResult: Sendable {
@@ -332,6 +345,7 @@ struct EnvironmentScanner: Sendable {
         let gitCredentialHelpers = gitAvailable ? gitCLI.executable.flatMap {
             scanGitCredentialHelpers(executable: $0, notices: &issues)
         } : nil
+        let githubAuthenticationConfiguration = scanGitHubAuthenticationConfiguration(path: path, notices: &issues)
         let homebrewInstallations = homebrew.available ? homebrew.executable.map {
             scanHomebrewRuntimes(executable: $0, issues: &issues)
         } ?? [] : []
@@ -353,7 +367,7 @@ struct EnvironmentScanner: Sendable {
             )
         }
         let snapshot = MachineSnapshot(
-            schemaVersion: 6,
+            schemaVersion: 7,
             scannedAt: Date(),
             system: system,
             localServices: localServices,
@@ -365,6 +379,7 @@ struct EnvironmentScanner: Sendable {
             userGitConfiguration: userGitConfiguration,
             gitSigningConfiguration: gitSigningConfiguration,
             gitCredentialHelpers: gitCredentialHelpers,
+            githubAuthenticationConfiguration: githubAuthenticationConfiguration,
             issues: issues
         )
         return ScanResult(
@@ -400,6 +415,62 @@ struct EnvironmentScanner: Sendable {
             return GitLFSSnapshot(version: nil, state: .failed)
         }
         return GitLFSSnapshot(version: version, state: .available)
+    }
+
+    private func scanGitHubAuthenticationConfiguration(
+        path: [String],
+        notices: inout [String]
+    ) -> GitHubAuthenticationConfigurationSnapshot {
+        let environment = machine.environment
+        let configurationDirectory = environment["GH_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : "\($0)/gh" }
+            ?? environment["HOME"].flatMap { $0.isEmpty ? nil : "\($0)/.config/gh" }
+        let localConfigurationExists = configurationDirectory.map {
+            machine.fileExists(atPath: standardizedPath("\($0)/hosts.yml"))
+        } ?? false
+        let ghTokenExists = environment["GH_TOKEN"].map { !$0.isEmpty } ?? false
+        let githubTokenExists = environment["GITHUB_TOKEN"].map { !$0.isEmpty } ?? false
+
+        guard let executable = path.lazy.map({ absoluteExecutable("gh", directory: $0) })
+            .first(where: { machine.isExecutableFile(atPath: $0) }) else {
+            return GitHubAuthenticationConfigurationSnapshot(
+                cliState: .unavailable,
+                gitProtocol: nil,
+                localConfigurationExists: localConfigurationExists,
+                ghTokenExists: ghTokenExists,
+                githubTokenExists: githubTokenExists
+            )
+        }
+
+        guard localConfigurationExists else {
+            return GitHubAuthenticationConfigurationSnapshot(
+                cliState: .available,
+                gitProtocol: nil,
+                localConfigurationExists: false,
+                ghTokenExists: ghTokenExists,
+                githubTokenExists: githubTokenExists
+            )
+        }
+
+        let result = machine.command(
+            executable: executable,
+            arguments: ["config", "get", "git_protocol", "--host", "github.com"]
+        )
+        let protocolValue = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let missing = result.status == 1 && protocolValue.isEmpty
+        let validProtocol = ["https", "ssh"].contains(protocolValue)
+        let failed = result.timedOut || (!missing && result.status != 0) || (!protocolValue.isEmpty && !validProtocol)
+        if failed {
+            notices.append("GitHub CLI Configuration：\(result.timedOut ? "命令超时" : "读取失败")")
+        }
+
+        return GitHubAuthenticationConfigurationSnapshot(
+            cliState: failed ? .failed : .available,
+            gitProtocol: !failed && validProtocol ? protocolValue : nil,
+            localConfigurationExists: localConfigurationExists,
+            ghTokenExists: ghTokenExists,
+            githubTokenExists: githubTokenExists
+        )
     }
 
     private func scanUserGitConfiguration(
@@ -1020,7 +1091,7 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 6 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 7 else { return nil }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

@@ -877,7 +877,8 @@ struct ContentView: View {
                     lfs: snapshot.gitLFS,
                     configuration: snapshot.userGitConfiguration,
                     signing: snapshot.gitSigningConfiguration,
-                    credentialHelpers: snapshot.gitCredentialHelpers
+                    credentialHelpers: snapshot.gitCredentialHelpers,
+                    github: snapshot.githubAuthenticationConfiguration
                 )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 pathCard(snapshot.path, warningCount: pathWarningCount)
@@ -909,7 +910,8 @@ struct ContentView: View {
         lfs: GitLFSSnapshot?,
         configuration: UserGitConfigurationSnapshot?,
         signing: GitSigningConfigurationSnapshot?,
-        credentialHelpers: [String]?
+        credentialHelpers: [String]?,
+        github: GitHubAuthenticationConfigurationSnapshot
     ) -> some View {
         let appearance: (color: Color, status: String, badge: String, pill: String) = switch git.state {
         case .available: (.green, "可用", "checkmark", "checkmark.circle.fill")
@@ -973,39 +975,50 @@ struct ContentView: View {
                     }
                     .font(.caption)
                 }
+
+                HStack {
+                    Text("GitHub Authentication Configuration")
+                    Spacer()
+                    Text(github.isConfigured ? "已配置" : "未配置")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
             }
             .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
             Divider()
 
-            if git.state == .available, let executable = git.executable {
-                Button {
-                    toggleGitConfiguration()
-                } label: {
-                    Label(
-                        isGitConfigurationExpanded ? "收起 User Git Configuration" : "查看 User Git Configuration",
-                        systemImage: isGitConfigurationExpanded ? "chevron.up" : "chevron.down"
-                    )
+            if git.state != .available {
+                if let executable = git.executable {
+                    copyablePath(executable)
+                } else {
+                    Text("当前 PATH 未发现 Git")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderless)
-                .accessibilityValue(isGitConfigurationExpanded ? "已展开" : "已折叠")
+            }
 
-                if isGitConfigurationExpanded {
-                    Divider()
-                    gitConfigurationDetails(
-                        configuration,
-                        signing: signing,
-                        credentialHelpers: credentialHelpers,
-                        executable: executable
-                    )
-                        .transition(.opacity)
-                }
-            } else if let executable = git.executable {
-                copyablePath(executable)
-            } else {
-                Text("当前 PATH 未发现 Git")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            Button {
+                toggleGitConfiguration()
+            } label: {
+                Label(
+                    isGitConfigurationExpanded ? "收起 Git 配置" : "查看 Git 配置",
+                    systemImage: isGitConfigurationExpanded ? "chevron.up" : "chevron.down"
+                )
+            }
+            .buttonStyle(.borderless)
+            .accessibilityValue(isGitConfigurationExpanded ? "已展开" : "已折叠")
+
+            if isGitConfigurationExpanded {
+                Divider()
+                gitConfigurationDetails(
+                    configuration,
+                    signing: signing,
+                    credentialHelpers: credentialHelpers,
+                    executable: git.state == .available ? git.executable : nil,
+                    github: github
+                )
+                    .transition(.opacity)
             }
         }
         .padding(16)
@@ -1024,76 +1037,95 @@ struct ContentView: View {
         _ configuration: UserGitConfigurationSnapshot?,
         signing: GitSigningConfigurationSnapshot?,
         credentialHelpers: [String]?,
-        executable: String
+        executable: String?,
+        github: GitHubAuthenticationConfigurationSnapshot
     ) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Git CLI 路径")
-                    .font(.callout.weight(.semibold))
-                copyablePath(executable)
-            }
+        let githubCLIStatus = switch github.cliState {
+        case .available: "已发现"
+        case .unavailable: "未发现"
+        case .failed: "读取失败"
+        }
 
-            if let configuration {
+        return VStack(alignment: .leading, spacing: 14) {
+            if let executable {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Default Git Identity")
+                    Text("Git CLI 路径")
                         .font(.callout.weight(.semibold))
-                    if configuration.defaultIdentity.name == nil || configuration.defaultIdentity.email == nil {
-                        Text("未配置默认身份")
-                            .foregroundStyle(.secondary)
-                    }
-                    if let name = configuration.defaultIdentity.name { gitConfigurationValue("名称", name) }
-                    if let email = configuration.defaultIdentity.email { gitConfigurationValue("邮箱", email) }
+                    copyablePath(executable)
                 }
 
-                gitConfigurationValue("默认分支", configuration.defaultBranch ?? "未配置")
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("User Excludes File")
-                        .font(.callout.weight(.semibold))
-                    Text(configuration.excludesFile.source == .explicitConfiguration ? "显式配置" : "Git 默认")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    copyablePath(configuration.excludesFile.path)
-                    Text(configuration.excludesFile.exists ? "文件存在" : "文件不存在")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text("User Git Configuration 读取失败，请查看 Scan Notice")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text("签名配置")
-                    .font(.callout.weight(.semibold))
-                if let signing {
-                    gitConfigurationValue("格式", signing.format ?? "未配置")
-                    gitConfigurationValue("签名标识", signing.signingKey ?? "未配置")
-                    gitConfigurationValue("提交签名", signing.commitSigning ?? "未配置")
-                    gitConfigurationValue("标签签名", signing.tagSigning ?? "未配置")
-                } else {
-                    Text("读取失败，请查看 Scan Notice")
-                        .foregroundStyle(.orange)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Credential Helper Chain")
-                    .font(.callout.weight(.semibold))
-                if let credentialHelpers {
-                    if credentialHelpers.isEmpty {
-                        Text("未配置")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(Array(credentialHelpers.enumerated()), id: \.offset) { index, helper in
-                            gitConfigurationValue("\(index + 1)", helper)
+                if let configuration {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Default Git Identity")
+                            .font(.callout.weight(.semibold))
+                        if configuration.defaultIdentity.name == nil || configuration.defaultIdentity.email == nil {
+                            Text("未配置默认身份")
+                                .foregroundStyle(.secondary)
                         }
+                        if let name = configuration.defaultIdentity.name { gitConfigurationValue("名称", name) }
+                        if let email = configuration.defaultIdentity.email { gitConfigurationValue("邮箱", email) }
+                    }
+
+                    gitConfigurationValue("默认分支", configuration.defaultBranch ?? "未配置")
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("User Excludes File")
+                            .font(.callout.weight(.semibold))
+                        Text(configuration.excludesFile.source == .explicitConfiguration ? "显式配置" : "Git 默认")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        copyablePath(configuration.excludesFile.path)
+                        Text(configuration.excludesFile.exists ? "文件存在" : "文件不存在")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 } else {
-                    Text("读取失败，请查看 Scan Notice")
+                    Text("User Git Configuration 读取失败，请查看 Scan Notice")
+                        .font(.callout)
                         .foregroundStyle(.orange)
                 }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("签名配置")
+                        .font(.callout.weight(.semibold))
+                    if let signing {
+                        gitConfigurationValue("格式", signing.format ?? "未配置")
+                        gitConfigurationValue("签名标识", signing.signingKey ?? "未配置")
+                        gitConfigurationValue("提交签名", signing.commitSigning ?? "未配置")
+                        gitConfigurationValue("标签签名", signing.tagSigning ?? "未配置")
+                    } else {
+                        Text("读取失败，请查看 Scan Notice")
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Credential Helper Chain")
+                        .font(.callout.weight(.semibold))
+                    if let credentialHelpers {
+                        if credentialHelpers.isEmpty {
+                            Text("未配置")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(Array(credentialHelpers.enumerated()), id: \.offset) { index, helper in
+                                gitConfigurationValue("\(index + 1)", helper)
+                            }
+                        }
+                    } else {
+                        Text("读取失败，请查看 Scan Notice")
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("GitHub Authentication Configuration")
+                    .font(.callout.weight(.semibold))
+                gitConfigurationValue("GitHub CLI", githubCLIStatus)
+                gitConfigurationValue("git_protocol", github.gitProtocol ?? (github.cliState == .failed ? "读取失败" : "未配置"))
+                gitConfigurationValue("本地配置", github.localConfigurationExists ? "已配置" : "未配置")
+                gitConfigurationValue("进程 GH_TOKEN", github.ghTokenExists ? "已配置" : "未配置")
+                gitConfigurationValue("进程 GITHUB_TOKEN", github.githubTokenExists ? "已配置" : "未配置")
             }
         }
     }

@@ -17,10 +17,10 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 - 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见语言 Runtime 的只读扫描和最新快照持久化。
 - 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源 Runtime Installation 发现。
 - 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
-- 已完成当前 `PATH` 首个生效 Git CLI、Git LFS，以及用户级身份、签名与 Credential Helper Chain 的只读扫描。
+- 已完成当前 `PATH` 首个生效 Git CLI、Git LFS、用户级配置与脱敏后的 GitHub Authentication Configuration 只读扫描。
 - 已完成加载页、顶部状态总览、Runtime 自适应卡片、按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
-- v0.1 与 v0.2 的只读扫描范围已交付；Git Tooling State 已交付 Git CLI、Git LFS 与脱敏后的 User Git Configuration。
+- v0.1 与 v0.2 的只读扫描范围已交付；Git Tooling State 已交付 Git CLI、Git LFS、脱敏后的 User Git Configuration 与 GitHub Authentication Configuration。
 
 Docker、服务管理、端口管理、环境修改和诊断仍属于后续规划；现有 Environment Scan 保持只读。
 
@@ -613,7 +613,7 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 **Git Tooling State（已完成）**
 
-按当前 `PATH` 顺序展示首个生效 Git CLI 与 Git LFS；展开 Git 卡片可查看用户级 Default Git Identity、默认分支、User Excludes File、签名配置和脱敏后的 Credential Helper Chain。扫描只查询确认的用户级配置白名单，不读取全量、system 或 repository-local 配置，不读取 ignore 规则、密钥、凭据、helper 参数或自定义命令正文。结果随最新 Machine Snapshot 持久化。
+按当前 `PATH` 顺序展示首个生效 Git CLI、Git LFS 与 GitHub CLI 的本地 `git_protocol`；展开 Git 卡片可查看用户级 Default Git Identity、默认分支、User Excludes File、签名配置、脱敏后的 Credential Helper Chain，以及 GitHub 本地/进程级认证来源是否已配置。Environment Scan 不联网验证认证，不读取或持久化账号名、token、配置文件内容、密钥、helper 参数或自定义命令正文。结果随最新 Machine Snapshot 持久化。
 
 解决：
 
@@ -622,6 +622,8 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 > 没有具体仓库上下文时，Git 默认使用什么身份、分支与跨仓库忽略文件？
 
 > 用户级签名开关与 Credential Helper Chain 当前如何配置？
+
+> GitHub CLI 是否存在本地或进程级认证来源，当前使用哪种 Git 协议？
 
 ---
 

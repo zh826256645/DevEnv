@@ -89,6 +89,112 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(failed.issues.filter { $0.hasPrefix("Git LFS：") }, ["Git LFS：命令超时"])
     }
 
+    func testGitHubAuthenticationKeepsOnlyLocalSourceFactsWithoutGit() throws {
+        let ghToken = "recognizable-gh-token-19"
+        let githubToken = "recognizable-github-token-19"
+        let localAccount = "recognizable-account-19"
+        let localToken = "recognizable-local-token-19"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: [
+                "GH_CONFIG_DIR": "/Users/test/custom-gh",
+                "GH_TOKEN": ghToken,
+                "GITHUB_TOKEN": githubToken,
+            ],
+            executables: ["/bin/gh"],
+            commandOutputs: [
+                "/bin/gh config get git_protocol --host github.com": "ssh\n",
+            ],
+            fileContents: [
+                "/Users/test/custom-gh/hosts.yml": "github.com:\n  user: \(localAccount)\n  oauth_token: \(localToken)\n",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.gitCLI.state, .unavailable)
+        XCTAssertEqual(snapshot.githubAuthenticationConfiguration.cliState, .available)
+        XCTAssertEqual(snapshot.githubAuthenticationConfiguration.gitProtocol, "ssh")
+        XCTAssertTrue(snapshot.githubAuthenticationConfiguration.localConfigurationExists)
+        XCTAssertTrue(snapshot.githubAuthenticationConfiguration.ghTokenExists)
+        XCTAssertTrue(snapshot.githubAuthenticationConfiguration.githubTokenExists)
+
+        let json = try XCTUnwrap(String(data: JSONEncoder().encode(snapshot), encoding: .utf8))
+        XCTAssertFalse(json.contains(ghToken))
+        XCTAssertFalse(json.contains(githubToken))
+        XCTAssertFalse(json.contains(localAccount))
+        XCTAssertFalse(json.contains(localToken))
+    }
+
+    func testGitHubAuthenticationUsesStandardConfigurationDirectoryPriority() {
+        let customDirectoryWins = EnvironmentScanner(machine: StubMachine(
+            path: [],
+            environment: [
+                "GH_CONFIG_DIR": "/custom/gh",
+                "XDG_CONFIG_HOME": "/xdg",
+                "HOME": "/Users/test",
+            ],
+            existingFiles: ["/xdg/gh/hosts.yml", "/Users/test/.config/gh/hosts.yml"]
+        )).scan().snapshot
+        let xdgFallback = EnvironmentScanner(machine: StubMachine(
+            path: [],
+            environment: ["GH_CONFIG_DIR": "", "XDG_CONFIG_HOME": "/xdg", "HOME": "/Users/test"],
+            existingFiles: ["/xdg/gh/hosts.yml"]
+        )).scan().snapshot
+        let homeFallback = EnvironmentScanner(machine: StubMachine(
+            path: [],
+            environment: ["HOME": "/Users/test"],
+            existingFiles: ["/Users/test/.config/gh/hosts.yml"]
+        )).scan().snapshot
+
+        XCTAssertFalse(customDirectoryWins.githubAuthenticationConfiguration.localConfigurationExists)
+        XCTAssertTrue(xdgFallback.githubAuthenticationConfiguration.localConfigurationExists)
+        XCTAssertTrue(homeFallback.githubAuthenticationConfiguration.localConfigurationExists)
+    }
+
+    func testGitHubCLIConfigurationMissingAndFailuresStayIsolated() {
+        let command = "/bin/gh config get git_protocol --host github.com"
+        let missingCLI = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["GH_TOKEN": "configured"]
+        )).scan()
+        let missingConfiguration = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/gh"],
+            commandOutputs: [command: "https\n"]
+        )).scan()
+        let failed = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["GH_CONFIG_DIR": "/custom/gh", "GITHUB_TOKEN": "configured"],
+            executables: ["/bin/gh"],
+            commandOutputs: [command: "ssh\n"],
+            commandStatuses: [command: 2],
+            existingFiles: ["/custom/gh/hosts.yml"]
+        )).scan()
+        let timedOut = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["GH_CONFIG_DIR": "/custom/gh"],
+            executables: ["/bin/gh"],
+            commandOutputs: [command: "https\n"],
+            commandTimeouts: [command],
+            existingFiles: ["/custom/gh/hosts.yml"]
+        )).scan()
+
+        XCTAssertEqual(missingCLI.snapshot.githubAuthenticationConfiguration.cliState, .unavailable)
+        XCTAssertTrue(missingCLI.snapshot.githubAuthenticationConfiguration.ghTokenExists)
+        XCTAssertFalse(missingCLI.snapshot.issues.contains { $0.hasPrefix("GitHub CLI Configuration：") })
+        XCTAssertEqual(missingConfiguration.snapshot.githubAuthenticationConfiguration.cliState, .available)
+        XCTAssertNil(missingConfiguration.snapshot.githubAuthenticationConfiguration.gitProtocol)
+        XCTAssertEqual(failed.snapshot.githubAuthenticationConfiguration.cliState, .failed)
+        XCTAssertNil(failed.snapshot.githubAuthenticationConfiguration.gitProtocol)
+        XCTAssertTrue(failed.snapshot.githubAuthenticationConfiguration.githubTokenExists)
+        XCTAssertEqual(failed.snapshot.issues.filter { $0.hasPrefix("GitHub CLI Configuration：") }, ["GitHub CLI Configuration：读取失败"])
+        XCTAssertEqual(timedOut.snapshot.githubAuthenticationConfiguration.cliState, .failed)
+        XCTAssertNil(timedOut.snapshot.githubAuthenticationConfiguration.gitProtocol)
+        XCTAssertTrue(timedOut.snapshot.githubAuthenticationConfiguration.localConfigurationExists)
+        XCTAssertEqual(timedOut.snapshot.issues.filter { $0.hasPrefix("GitHub CLI Configuration：") }, ["GitHub CLI Configuration：命令超时"])
+        XCTAssertTrue(failed.canPersist)
+        XCTAssertTrue(timedOut.canPersist)
+    }
+
     func testSigningAndCredentialHelpersKeepOnlyWhitelistedRedactedFacts() throws {
         let sensitive = "recognizable-secret-18"
         let snapshot = EnvironmentScanner(machine: StubMachine(
@@ -280,7 +386,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 6)
+        XCTAssertEqual(snapshot.schemaVersion, 7)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -1115,15 +1221,15 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV6SnapshotRoundTripsGitToolingAndV5IsRejected() throws {
+    func testV7SnapshotRoundTripsGitToolingAndV6IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
         let store = SnapshotStore(fileURL: fileURL)
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
-            environment: ["HOME": "/Users/test"],
-            executables: ["/bin/git", "/bin/git-lfs", "/bin/node"],
+            environment: ["HOME": "/Users/test", "GH_TOKEN": "recognizable-token-19"],
+            executables: ["/bin/git", "/bin/git-lfs", "/bin/gh", "/bin/node"],
             commandOutputs: [
                 "/bin/git --version": "git version 2.49.0 (Apple Git-154)\n",
                 "/bin/git-lfs version": "git-lfs/3.7.0 (GitHub; darwin arm64)\n",
@@ -1135,14 +1241,15 @@ final class EnvironmentScannerTests: XCTestCase {
                 "/bin/git config --global --get user.signingKey": "test@example.com\n",
                 "/bin/git config --global --get commit.gpgSign": "true\n",
                 "/bin/git config --global --null --get-all credential.helper": "osxkeychain\0store --file=/tmp/credentials\0",
+                "/bin/gh config get git_protocol --host github.com": "https\n",
                 "/bin/node": "v22.0.0\n",
                 "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
             ],
-            existingFiles: ["/Users/test/.gitignore"]
+            existingFiles: ["/Users/test/.config/gh/hosts.yml", "/Users/test/.gitignore"]
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 6)
+        XCTAssertEqual(store.load()?.schemaVersion, 7)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
@@ -1152,6 +1259,10 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(store.load()?.gitLFS?.version, "3.7.0")
         XCTAssertEqual(store.load()?.gitSigningConfiguration?.format, "ssh")
         XCTAssertEqual(store.load()?.gitCredentialHelpers, ["osxkeychain", "store"])
+        XCTAssertEqual(store.load()?.githubAuthenticationConfiguration.cliState, .available)
+        XCTAssertEqual(store.load()?.githubAuthenticationConfiguration.gitProtocol, "https")
+        XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.localConfigurationExists == true)
+        XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.ghTokenExists == true)
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
@@ -1167,7 +1278,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 5
+        json["schemaVersion"] = 6
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
@@ -1196,7 +1307,8 @@ private struct StubMachine: MachineAccess {
         commandTimeouts: Set<String> = [],
         directoryContents: [String: [String]] = [:],
         directoryFailures: Set<String> = [],
-        existingFiles: Set<String> = []
+        existingFiles: Set<String> = [],
+        fileContents: [String: String] = [:]
     ) {
         self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
         self.executables = executables
@@ -1206,7 +1318,7 @@ private struct StubMachine: MachineAccess {
         self.commandTimeouts = commandTimeouts
         self.directoryContents = directoryContents
         self.directoryFailures = directoryFailures
-        self.existingFiles = existingFiles
+        self.existingFiles = existingFiles.union(fileContents.keys)
     }
 
     func diskSpace() -> DiskSpace { DiskSpace(totalBytes: 1, freeBytes: 1) }
