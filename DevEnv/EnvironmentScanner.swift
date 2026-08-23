@@ -12,6 +12,7 @@ struct MachineSnapshot: Codable, Sendable {
     let runtimes: [RuntimeSnapshot]
     let homebrew: HomebrewSnapshot
     let gitCLI: GitCLISnapshot
+    let userGitConfiguration: UserGitConfigurationSnapshot?
     let issues: [String]
 
     var localServiceScanNotice: String? {
@@ -121,6 +122,28 @@ struct GitCLISnapshot: Codable, Sendable {
     let state: GitCLIState
 }
 
+struct DefaultGitIdentitySnapshot: Codable, Sendable {
+    let name: String?
+    let email: String?
+}
+
+enum UserExcludesFileSource: String, Codable, Sendable {
+    case explicitConfiguration
+    case gitDefault
+}
+
+struct UserExcludesFileSnapshot: Codable, Sendable {
+    let path: String
+    let source: UserExcludesFileSource
+    let exists: Bool
+}
+
+struct UserGitConfigurationSnapshot: Codable, Sendable {
+    let defaultIdentity: DefaultGitIdentitySnapshot
+    let defaultBranch: String?
+    let excludesFile: UserExcludesFileSnapshot
+}
+
 struct ScanResult: Sendable {
     let snapshot: MachineSnapshot
     let canPersist: Bool
@@ -143,6 +166,7 @@ protocol MachineAccess: Sendable {
     var currentDirectoryPath: String { get }
     func diskSpace() -> DiskSpace
     func isExecutableFile(atPath path: String) -> Bool
+    func fileExists(atPath path: String) -> Bool
     func directoryEntries(atPath path: String) throws -> [String]
     func resolvingSymlinksInPath(_ path: String) -> String
     func command(executable: String, arguments: [String]) -> MachineCommandResult
@@ -163,6 +187,10 @@ struct LiveMachineAccess: MachineAccess {
 
     func isExecutableFile(atPath path: String) -> Bool {
         FileManager.default.isExecutableFile(atPath: path)
+    }
+
+    func fileExists(atPath path: String) -> Bool {
+        FileManager.default.fileExists(atPath: path)
     }
 
     func directoryEntries(atPath path: String) throws -> [String] {
@@ -278,6 +306,9 @@ struct EnvironmentScanner: Sendable {
 
         let homebrew = scanHomebrew(path: path, issues: &issues)
         let gitCLI = scanGitCLI(path: path, notices: &issues)
+        let userGitConfiguration = gitCLI.executable.flatMap { executable in
+            gitCLI.state == .available ? scanUserGitConfiguration(executable: executable, notices: &issues) : nil
+        }
         let homebrewInstallations = homebrew.available ? homebrew.executable.map {
             scanHomebrewRuntimes(executable: $0, issues: &issues)
         } ?? [] : []
@@ -299,7 +330,7 @@ struct EnvironmentScanner: Sendable {
             )
         }
         let snapshot = MachineSnapshot(
-            schemaVersion: 4,
+            schemaVersion: 5,
             scannedAt: Date(),
             system: system,
             localServices: localServices,
@@ -307,6 +338,7 @@ struct EnvironmentScanner: Sendable {
             runtimes: runtimes,
             homebrew: homebrew,
             gitCLI: gitCLI,
+            userGitConfiguration: userGitConfiguration,
             issues: issues
         )
         return ScanResult(
@@ -328,6 +360,72 @@ struct EnvironmentScanner: Sendable {
             return GitCLISnapshot(executable: executable, version: nil, state: .failed)
         }
         return GitCLISnapshot(executable: executable, version: version, state: .available)
+    }
+
+    private func scanUserGitConfiguration(
+        executable: String,
+        notices: inout [String]
+    ) -> UserGitConfigurationSnapshot? {
+        let keys = ["user.name", "user.email", "init.defaultBranch", "core.excludesFile"]
+        var values: [String: String] = [:]
+
+        for key in keys {
+            let arguments = ["config", "--global"]
+                + (key == "core.excludesFile" ? ["--path"] : [])
+                + ["--get", key]
+            let result = machine.command(executable: executable, arguments: arguments)
+            let value = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if result.timedOut {
+                notices.append("User Git Configuration：命令超时")
+                return nil
+            }
+            if result.status == 1, value.isEmpty { continue }
+            guard result.status == 0 else {
+                notices.append("User Git Configuration：读取失败")
+                return nil
+            }
+            if !value.isEmpty { values[key] = value }
+        }
+
+        let source: UserExcludesFileSource
+        let excludesPath: String
+        if let configuredPath = values["core.excludesFile"] {
+            source = .explicitConfiguration
+            excludesPath = absoluteUserPath(configuredPath)
+        } else {
+            guard let home = machine.environment["HOME"], !home.isEmpty else { return nil }
+            source = .gitDefault
+            let configurationDirectory = machine.environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+                ?? URL(fileURLWithPath: home, isDirectory: true).appendingPathComponent(".config").path
+            excludesPath = standardizedPath(URL(
+                fileURLWithPath: absoluteUserPath(configurationDirectory),
+                isDirectory: true
+            ).appendingPathComponent("git/ignore").path)
+        }
+
+        return UserGitConfigurationSnapshot(
+            defaultIdentity: DefaultGitIdentitySnapshot(
+                name: values["user.name"],
+                email: values["user.email"]
+            ),
+            defaultBranch: values["init.defaultBranch"],
+            excludesFile: UserExcludesFileSnapshot(
+                path: excludesPath,
+                source: source,
+                exists: machine.fileExists(atPath: excludesPath)
+            )
+        )
+    }
+
+    private func absoluteUserPath(_ path: String) -> String {
+        if path == "~", let home = machine.environment["HOME"] { return standardizedPath(home) }
+        if path.hasPrefix("~/"), let home = machine.environment["HOME"] {
+            return standardizedPath(URL(fileURLWithPath: home, isDirectory: true)
+                .appendingPathComponent(String(path.dropFirst(2))).path)
+        }
+        if path.hasPrefix("/") { return standardizedPath(path) }
+        let home = machine.environment["HOME"] ?? machine.currentDirectoryPath
+        return standardizedPath(URL(fileURLWithPath: home, isDirectory: true).appendingPathComponent(path).path)
     }
 
     private func gitVersion(from output: String) -> String? {
@@ -788,7 +886,7 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 4 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 5 else { return nil }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

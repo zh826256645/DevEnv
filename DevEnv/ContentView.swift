@@ -170,6 +170,7 @@ struct ContentView: View {
     @State private var hoveredPath: String?
     @State private var expandedRuntimeID: String?
     @State private var fullyShownRuntimeID: String?
+    @State private var isGitConfigurationExpanded = false
     @State private var isPathExpanded = false
     @State private var isShowingNotifications = false
     @State private var readNoticeSnapshotDate: Date?
@@ -871,7 +872,7 @@ struct ContentView: View {
             HStack(alignment: .top, spacing: 14) {
                 homebrewCard(snapshot.homebrew)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                gitCard(snapshot.gitCLI)
+                gitCard(snapshot.gitCLI, configuration: snapshot.userGitConfiguration)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 pathCard(snapshot.path, warningCount: pathWarningCount)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -897,7 +898,7 @@ struct ContentView: View {
         }
     }
 
-    private func gitCard(_ git: GitCLISnapshot) -> some View {
+    private func gitCard(_ git: GitCLISnapshot, configuration: UserGitConfigurationSnapshot?) -> some View {
         let appearance: (color: Color, status: String, badge: String, pill: String) = switch git.state {
         case .available: (.green, "可用", "checkmark", "checkmark.circle.fill")
         case .failed: (.orange, "读取失败", "exclamationmark", "exclamationmark.circle.fill")
@@ -962,6 +963,25 @@ struct ContentView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+
+            if git.state == .available {
+                Button {
+                    toggleGitConfiguration()
+                } label: {
+                    Label(
+                        isGitConfigurationExpanded ? "收起 User Git Configuration" : "查看 User Git Configuration",
+                        systemImage: isGitConfigurationExpanded ? "chevron.up" : "chevron.down"
+                    )
+                }
+                .buttonStyle(.borderless)
+                .accessibilityValue(isGitConfigurationExpanded ? "已展开" : "已折叠")
+
+                if isGitConfigurationExpanded {
+                    Divider()
+                    gitConfigurationDetails(configuration)
+                        .transition(.opacity)
+                }
+            }
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -972,6 +992,62 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.primary.opacity(0.09))
                 }
+        }
+    }
+
+    @ViewBuilder
+    private func gitConfigurationDetails(_ configuration: UserGitConfigurationSnapshot?) -> some View {
+        if let configuration {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Default Git Identity")
+                        .font(.callout.weight(.semibold))
+                    if configuration.defaultIdentity.name == nil || configuration.defaultIdentity.email == nil {
+                        Text("未配置默认身份")
+                            .foregroundStyle(.secondary)
+                    }
+                    if let name = configuration.defaultIdentity.name { gitConfigurationValue("名称", name) }
+                    if let email = configuration.defaultIdentity.email { gitConfigurationValue("邮箱", email) }
+                }
+
+                gitConfigurationValue("默认分支", configuration.defaultBranch ?? "未配置")
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("User Excludes File")
+                        .font(.callout.weight(.semibold))
+                    Text(configuration.excludesFile.source == .explicitConfiguration ? "显式配置" : "Git 默认")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    copyablePath(configuration.excludesFile.path)
+                    Text(configuration.excludesFile.exists ? "文件存在" : "文件不存在")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } else {
+            Text("User Git Configuration 读取失败，请查看 Scan Notice")
+                .font(.callout)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private func gitConfigurationValue(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func toggleGitConfiguration() {
+        if reduceMotion {
+            isGitConfigurationExpanded.toggle()
+        } else {
+            withAnimation(.smooth(duration: 0.25)) {
+                isGitConfigurationExpanded.toggle()
+            }
         }
     }
 

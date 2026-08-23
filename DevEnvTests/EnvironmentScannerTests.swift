@@ -60,6 +60,116 @@ final class EnvironmentScannerTests: XCTestCase {
         }
     }
 
+    func testUserGitConfigurationUsesExplicitExcludesFile() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
+            executables: ["/bin/git"],
+            commandOutputs: [
+                "/bin/git --version": "git version 2.49.0\n",
+                "/bin/git config --global --get user.name": "Test User\n",
+                "/bin/git config --global --get user.email": "test@example.com\n",
+                "/bin/git config --global --get init.defaultBranch": "main\n",
+                "/bin/git config --global --path --get core.excludesFile": "/Users/test/notes/../.gitignore\n",
+            ],
+            existingFiles: ["/Users/test/.gitignore"]
+        )).scan().snapshot
+
+        let configuration = try XCTUnwrap(snapshot.userGitConfiguration)
+        XCTAssertEqual(configuration.defaultIdentity.name, "Test User")
+        XCTAssertEqual(configuration.defaultIdentity.email, "test@example.com")
+        XCTAssertEqual(configuration.defaultBranch, "main")
+        XCTAssertEqual(configuration.excludesFile.path, "/Users/test/.gitignore")
+        XCTAssertEqual(configuration.excludesFile.source, .explicitConfiguration)
+        XCTAssertTrue(configuration.excludesFile.exists)
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("User Git Configuration：") })
+    }
+
+    func testUserGitConfigurationUsesNeutralDefaultExcludesFilesWhenConfigurationIsMissing() throws {
+        let configCommands = [
+            "/bin/git config --global --get user.name",
+            "/bin/git config --global --get user.email",
+            "/bin/git config --global --get init.defaultBranch",
+            "/bin/git config --global --path --get core.excludesFile",
+        ]
+        let cases: [(environment: [String: String], path: String, exists: Bool)] = [
+            (["HOME": "/Users/test", "XDG_CONFIG_HOME": "/Users/test/xdg"], "/Users/test/xdg/git/ignore", true),
+            (["HOME": "/Users/test", "XDG_CONFIG_HOME": ""], "/Users/test/.config/git/ignore", false),
+        ]
+
+        for testCase in cases {
+            let snapshot = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin"],
+                environment: testCase.environment,
+                executables: ["/bin/git"],
+                commandOutputs: ["/bin/git --version": "git version 2.49.0\n"],
+                commandStatuses: Dictionary(uniqueKeysWithValues: configCommands.map { ($0, 1) }),
+                existingFiles: testCase.exists ? [testCase.path] : []
+            )).scan().snapshot
+
+            let configuration = try XCTUnwrap(snapshot.userGitConfiguration)
+            XCTAssertNil(configuration.defaultIdentity.name)
+            XCTAssertNil(configuration.defaultIdentity.email)
+            XCTAssertNil(configuration.defaultBranch)
+            XCTAssertEqual(configuration.excludesFile.path, testCase.path)
+            XCTAssertEqual(configuration.excludesFile.source, .gitDefault)
+            XCTAssertEqual(configuration.excludesFile.exists, testCase.exists)
+            XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("User Git Configuration：") })
+        }
+    }
+
+    func testUserGitConfigurationFailuresProduceOneIsolatedNotice() {
+        let cases: [(status: Int32, timedOut: Bool, notice: String)] = [
+            (2, false, "User Git Configuration：读取失败"),
+            (0, true, "User Git Configuration：命令超时"),
+        ]
+
+        for testCase in cases {
+            let command = "/bin/git config --global --get user.name"
+            let result = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin"],
+                environment: ["HOME": "/Users/test"],
+                executables: ["/bin/git", "/bin/node"],
+                commandOutputs: [
+                    "/bin/git --version": "git version 2.49.0\n",
+                    "/bin/node --version": "v22.0.0\n",
+                ],
+                commandStatuses: [command: testCase.status],
+                commandTimeouts: testCase.timedOut ? [command] : []
+            )).scan()
+
+            XCTAssertNil(result.snapshot.userGitConfiguration)
+            XCTAssertEqual(result.snapshot.gitCLI.state, .available)
+            XCTAssertEqual(result.snapshot.runtimes.first { $0.id == "node" }?.installations.first?.version, "22.0.0")
+            XCTAssertEqual(
+                result.snapshot.issues.filter { $0.hasPrefix("User Git Configuration：") },
+                [testCase.notice]
+            )
+            XCTAssertTrue(result.canPersist)
+        }
+    }
+
+    func testUserGitConfigurationIsSkippedWhenGitCLIIsUnavailable() {
+        let configCommand = "/bin/git config --global --get user.name"
+        let unavailable = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandStatuses: [configCommand: 2]
+        )).scan().snapshot
+        let failed = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/git"],
+            commandStatuses: [
+                "/bin/git --version": 2,
+                configCommand: 2,
+            ]
+        )).scan().snapshot
+
+        XCTAssertNil(unavailable.userGitConfiguration)
+        XCTAssertNil(failed.userGitConfiguration)
+        XCTAssertFalse(unavailable.issues.contains { $0.hasPrefix("User Git Configuration：") })
+        XCTAssertFalse(failed.issues.contains { $0.hasPrefix("User Git Configuration：") })
+    }
+
     func testDiscoversEveryRuntimeInPathOrder() {
         let names = ["node", "python3", "go", "java", "rustc", "ruby", "lua"]
         let path = ["/first/bin", "/second/bin"]
@@ -74,7 +184,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 4)
+        XCTAssertEqual(snapshot.schemaVersion, 5)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -909,25 +1019,35 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV4SnapshotRoundTripsGitCLIAndV3IsRejected() throws {
+    func testV5SnapshotRoundTripsGitConfigurationAndV4IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
         let store = SnapshotStore(fileURL: fileURL)
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
+            environment: ["HOME": "/Users/test"],
             executables: ["/bin/git", "/bin/node"],
             commandOutputs: [
                 "/bin/git --version": "git version 2.49.0 (Apple Git-154)\n",
+                "/bin/git config --global --get user.name": "Test User\n",
+                "/bin/git config --global --get user.email": "test@example.com\n",
+                "/bin/git config --global --get init.defaultBranch": "main\n",
+                "/bin/git config --global --path --get core.excludesFile": "/Users/test/.gitignore\n",
                 "/bin/node": "v22.0.0\n",
                 "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
-            ]
+            ],
+            existingFiles: ["/Users/test/.gitignore"]
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 4)
+        XCTAssertEqual(store.load()?.schemaVersion, 5)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
+        XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
+        XCTAssertEqual(store.load()?.userGitConfiguration?.defaultBranch, "main")
+        XCTAssertEqual(store.load()?.userGitConfiguration?.excludesFile.path, "/Users/test/.gitignore")
+        XCTAssertTrue(store.load()?.userGitConfiguration?.excludesFile.exists == true)
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
@@ -943,7 +1063,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 3
+        json["schemaVersion"] = 4
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
@@ -960,6 +1080,7 @@ private struct StubMachine: MachineAccess {
     let commandTimeouts: Set<String>
     let directoryContents: [String: [String]]
     let directoryFailures: Set<String>
+    let existingFiles: Set<String>
 
     init(
         path: [String],
@@ -970,7 +1091,8 @@ private struct StubMachine: MachineAccess {
         commandStatuses: [String: Int32] = [:],
         commandTimeouts: Set<String> = [],
         directoryContents: [String: [String]] = [:],
-        directoryFailures: Set<String> = []
+        directoryFailures: Set<String> = [],
+        existingFiles: Set<String> = []
     ) {
         self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
         self.executables = executables
@@ -980,11 +1102,14 @@ private struct StubMachine: MachineAccess {
         self.commandTimeouts = commandTimeouts
         self.directoryContents = directoryContents
         self.directoryFailures = directoryFailures
+        self.existingFiles = existingFiles
     }
 
     func diskSpace() -> DiskSpace { DiskSpace(totalBytes: 1, freeBytes: 1) }
 
     func isExecutableFile(atPath path: String) -> Bool { executables.contains(path) }
+
+    func fileExists(atPath path: String) -> Bool { existingFiles.contains(path) }
 
     func directoryEntries(atPath path: String) throws -> [String] {
         if directoryFailures.contains(path) { throw CocoaError(.fileReadNoPermission) }
