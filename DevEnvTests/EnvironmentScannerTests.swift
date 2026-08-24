@@ -1016,7 +1016,7 @@ final class EnvironmentScannerTests: XCTestCase {
             executables: ["/bin/mysqld", "/bin/mariadbd"],
             commandOutputs: [
                 "/bin/mysqld --version": "/bin/mysqld  Ver 8.4.3 for macos14.7 on arm64 (MySQL Community Server - GPL)\n",
-                "/bin/mariadbd --version": "/bin/mariadbd  Ver 11.4.5-MariaDB for osx10.19 on arm64 (Homebrew)\n",
+                "/bin/mariadbd --version": "/bin/mariadbd  Ver 15.1 Distrib 11.4.5-MariaDB for osx10.19 on arm64 (Homebrew)\n",
             ]
         )).scan().snapshot
 
@@ -1089,11 +1089,11 @@ final class EnvironmentScannerTests: XCTestCase {
     }
 
     func testAmbiguousLocalServiceMysqldStaysUnclassifiedAndProducesNotice() throws {
-        let mysqld = "/Applications/UnknownSQL/bin/mysqld"
+        let mysqld = "/opt/mysql/bin/mysqld"
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
             commandOutputs: [
-                "\(mysqld) --version": "mysqld Ver 8.0.0 for macos on arm64\n",
+                "\(mysqld) --version": "\(mysqld) Ver 8.0.0 for macos on arm64\n",
                 "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmysqld\nf7\ntIPv4\nn127.0.0.1:3306\n",
             ],
             processExecutablePaths: [42: mysqld]

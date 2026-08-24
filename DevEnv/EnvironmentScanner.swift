@@ -884,20 +884,13 @@ struct EnvironmentScanner: Sendable {
             source: DatabaseInstallationSource,
             error: String?
         ) {
-            if let index = candidates.firstIndex(where: { $0.actualExecutable == actualExecutable }) {
-                candidates[index].version = candidates[index].version ?? version
-                candidates[index].error = candidates[index].version == nil ? candidates[index].error ?? error : nil
-                let sources = candidates[index].sources + [source]
-                candidates[index].sources = DatabaseInstallationSource.allCases.filter(Set(sources).contains)
-                return
-            }
-            candidates.append(DatabaseCandidate(
+            mergeDatabaseCandidate(DatabaseCandidate(
                 executable: executable,
                 actualExecutable: actualExecutable,
                 version: version,
                 sources: [source],
                 error: error
-            ))
+            ), into: &candidates)
         }
 
         func readVersion(executable: String) -> (String?, String?) {
@@ -1036,6 +1029,22 @@ struct EnvironmentScanner: Sendable {
         return value.hasPrefix(prefix) ? String(value.dropFirst(prefix.count)) : nil
     }
 
+    private func mergeDatabaseCandidate(
+        _ candidate: DatabaseCandidate,
+        into candidates: inout [DatabaseCandidate]
+    ) {
+        guard let index = candidates.firstIndex(where: { $0.actualExecutable == candidate.actualExecutable }) else {
+            candidates.append(candidate)
+            return
+        }
+        candidates[index].version = candidates[index].version ?? candidate.version
+        candidates[index].error = candidates[index].version == nil
+            ? candidates[index].error ?? candidate.error
+            : nil
+        let sources = candidates[index].sources + candidate.sources
+        candidates[index].sources = DatabaseInstallationSource.allCases.filter(Set(sources).contains)
+    }
+
     private func scanMySQLFamily(
         path: [String],
         homebrew: HomebrewInventory,
@@ -1058,22 +1067,13 @@ struct EnvironmentScanner: Sendable {
             error: String?
         ) {
             var databaseCandidates = candidates[database, default: []]
-            if let index = databaseCandidates.firstIndex(where: { $0.actualExecutable == actualExecutable }) {
-                databaseCandidates[index].version = databaseCandidates[index].version ?? version
-                databaseCandidates[index].error = databaseCandidates[index].version == nil
-                    ? databaseCandidates[index].error ?? error
-                    : nil
-                let sources = databaseCandidates[index].sources + [source]
-                databaseCandidates[index].sources = DatabaseInstallationSource.allCases.filter(Set(sources).contains)
-            } else {
-                databaseCandidates.append(DatabaseCandidate(
-                    executable: executable,
-                    actualExecutable: actualExecutable,
-                    version: version,
-                    sources: [source],
-                    error: error
-                ))
-            }
+            mergeDatabaseCandidate(DatabaseCandidate(
+                executable: executable,
+                actualExecutable: actualExecutable,
+                version: version,
+                sources: [source],
+                error: error
+            ), into: &databaseCandidates)
             candidates[database] = databaseCandidates
         }
 
@@ -1265,18 +1265,23 @@ struct EnvironmentScanner: Sendable {
         guard result.status == 0, !result.timedOut, let value = normalizedVersion(result.output) else {
             return (knownDatabase, nil, knownDatabase == nil ? nil : "版本读取失败")
         }
-        let lowercased = value.lowercased()
-        let mentionsMySQL = lowercased.range(of: #"\bmysql\b"#, options: .regularExpression) != nil
-        let database = knownDatabase
-            ?? (lowercased.contains("mariadb") ? .mariadb : mentionsMySQL ? .mysql : nil)
-        guard let database else { return (nil, nil, nil) }
         let fields = value.split(whereSeparator: \.isWhitespace)
         guard let marker = fields.firstIndex(where: { $0.caseInsensitiveCompare("Ver") == .orderedSame }),
               fields.indices.contains(marker + 1) else {
-            return (database, nil, "版本读取失败")
+            return (knownDatabase, nil, knownDatabase == nil ? nil : "版本读取失败")
         }
-        let version = fields[marker + 1].split(separator: "-").first.map(String.init)
-        return (database, version, version == nil ? "版本读取失败" : nil)
+        let productDetails = fields[(marker + 1)...].joined(separator: " ").lowercased()
+        let mentionsMySQL = productDetails.range(of: #"\bmysql\b"#, options: .regularExpression) != nil
+        let database = knownDatabase
+            ?? (productDetails.contains("mariadb") ? .mariadb : mentionsMySQL ? .mysql : nil)
+        guard let database else { return (nil, nil, nil) }
+        let versionIndex = fields.indices.contains(marker + 3)
+            && fields[marker + 2].caseInsensitiveCompare("Distrib") == .orderedSame
+            ? marker + 3
+            : marker + 1
+        let version = fields[versionIndex].split(separator: "-").first.map(String.init)
+        guard let version, version.first?.isNumber == true else { return (database, nil, "版本读取失败") }
+        return (database, version, nil)
     }
 
     private func scanRuntime(

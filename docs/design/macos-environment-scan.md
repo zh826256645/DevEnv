@@ -202,7 +202,7 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 
 Database Discovery State 为“已发现”“未发现”或“发现状态未知”。任一适用 Database Provider 失败时保留已有结果并产生 Scan Notice；没有结果时显示“发现状态未知”，不声称“未安装”。
 
-Database Listening State 为“正在监听”“未监听”或“监听状态未知”。Local Service 扫描失败或已识别数据库进程的真实路径不可读时不猜测匹配；同一 Database Installation 的多个监听进程聚合为一个“正在监听”状态，不建立数据库实例模型。
+Database Listening State 为“正在监听”“未监听”或“监听状态未知”。适用 Database Provider 失败且没有精确监听匹配、Local Service 扫描失败或已识别数据库进程的真实路径不可读时不猜测完整状态；已发现 Database Installation 自身可精确确定的监听状态不受影响。同一 Database Installation 的多个监听进程聚合为一个“正在监听”状态，不建立数据库实例模型。
 
 该扩展只观察 TCP Listener Binding，不覆盖仅使用 Unix Socket 或容器内的数据库。如需覆盖，由后续显式 Database Provider 扩展。完整取舍见 [ADR-0005](../adr/0005-map-database-listeners-by-installation-path.md)。
 
