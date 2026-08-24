@@ -68,7 +68,9 @@ func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
         return descriptor("PostgreSQL", "PostgreSQL 关系型数据库", "cylinder.fill", .blue, "ServicePostgreSQLLogo")
     case "mongod", "mongos":
         return descriptor("MongoDB", "MongoDB 文档数据库", "leaf.fill", .green, "ServiceMongoDBLogo")
-    case "mysqld", "mysql":
+    case "mysqld":
+        return descriptor("mysqld", "仅凭进程名无法区分 MySQL 与 MariaDB", "cylinder.fill", .secondary)
+    case "mysql":
         return descriptor("MySQL", "MySQL 关系型数据库", "cylinder.fill", Color(red: 0.27, green: 0.47, blue: 0.63), "ServiceMySQLLogo")
     case "mariadbd":
         return descriptor("MariaDB", "MariaDB 关系型数据库", "cylinder.fill", Color(red: 0, green: 0.36, blue: 0.43), "ServiceMariaDBLogo")
@@ -602,7 +604,7 @@ struct ContentView: View {
         let listening = databaseListeningStyle(database.listeningState)
 
         return HStack(alignment: .center, spacing: 18) {
-            databaseLogo(size: 64, padding: 11)
+            databaseLogo(database, size: 64, padding: 11)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(database.name)
@@ -655,7 +657,7 @@ struct ContentView: View {
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top) {
-                databaseLogo(size: 46, padding: 8)
+                databaseLogo(database, size: 46, padding: 8)
                 Spacer(minLength: 0)
                 ZStack {
                     Circle().fill(tint.opacity(0.13))
@@ -701,12 +703,16 @@ struct ContentView: View {
         .contentShape(Rectangle())
     }
 
-    private func databaseLogo(size: CGFloat, padding: CGFloat) -> some View {
-        let color = Color(red: 0.20, green: 0.45, blue: 0.64)
+    private func databaseLogo(_ database: DatabaseInstallationOverview, size: CGFloat, padding: CGFloat) -> some View {
+        let appearance: (asset: String, color: Color) = switch database.id {
+        case "mysql": ("ServiceMySQLLogo", Color(red: 0.27, green: 0.47, blue: 0.63))
+        case "mariadb": ("ServiceMariaDBLogo", Color(red: 0, green: 0.36, blue: 0.43))
+        default: ("ServicePostgreSQLLogo", Color(red: 0.20, green: 0.45, blue: 0.64))
+        }
         return ZStack {
             RoundedRectangle(cornerRadius: size > 50 ? 14 : 11, style: .continuous)
-                .fill(color.opacity(0.10))
-            Image("ServicePostgreSQLLogo")
+                .fill(appearance.color.opacity(0.10))
+            Image(appearance.asset)
                 .resizable()
                 .scaledToFit()
                 .padding(padding)
@@ -714,7 +720,7 @@ struct ContentView: View {
         .frame(width: size, height: size)
         .overlay {
             RoundedRectangle(cornerRadius: size > 50 ? 14 : 11, style: .continuous)
-                .stroke(color.opacity(0.16))
+                .stroke(appearance.color.opacity(0.16))
         }
         .accessibilityHidden(true)
     }

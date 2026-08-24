@@ -397,6 +397,16 @@ struct EnvironmentScanner: Sendable {
         var error: String?
     }
 
+    private enum MySQLFamilyDatabase: CaseIterable {
+        case mysql
+        case mariadb
+
+        var id: String { self == .mysql ? "mysql" : "mariadb" }
+        var name: String { self == .mysql ? "MySQL" : "MariaDB" }
+        var formula: String { self == .mysql ? "mysql" : "mariadb" }
+        var executableNames: [String] { self == .mysql ? ["mysqld"] : ["mariadbd", "mysqld"] }
+    }
+
     private struct MiseInstallation: Decodable {
         let version: String
         let installPath: String
@@ -491,9 +501,15 @@ struct EnvironmentScanner: Sendable {
             homebrewAvailabilityFailed: homebrew.error != nil,
             localServices: localServiceScan,
             issues: &issues
-        )]
+        )] + scanMySQLFamily(
+            path: path,
+            homebrew: homebrewInventory,
+            homebrewAvailabilityFailed: homebrew.error != nil,
+            localServices: localServiceScan,
+            issues: &issues
+        )
         let snapshot = MachineSnapshot(
-            schemaVersion: 9,
+            schemaVersion: 10,
             scannedAt: Date(),
             system: system,
             localServices: localServiceScan.services,
@@ -1020,6 +1036,249 @@ struct EnvironmentScanner: Sendable {
         return value.hasPrefix(prefix) ? String(value.dropFirst(prefix.count)) : nil
     }
 
+    private func scanMySQLFamily(
+        path: [String],
+        homebrew: HomebrewInventory,
+        homebrewAvailabilityFailed: Bool,
+        localServices: LocalServiceScan,
+        issues: inout [String]
+    ) -> [DatabaseInstallationOverview] {
+        var candidates: [MySQLFamilyDatabase: [DatabaseCandidate]] = [:]
+        var listeningPaths: [MySQLFamilyDatabase: Set<String>] = [:]
+        var relevantPathFailures: Set<MySQLFamilyDatabase> = []
+        var classificationFailures: Set<MySQLFamilyDatabase> = []
+        var reportedAmbiguousPaths: Set<String> = []
+
+        func addCandidate(
+            database: MySQLFamilyDatabase,
+            executable: String,
+            actualExecutable: String,
+            version: String?,
+            source: DatabaseInstallationSource,
+            error: String?
+        ) {
+            var databaseCandidates = candidates[database, default: []]
+            if let index = databaseCandidates.firstIndex(where: { $0.actualExecutable == actualExecutable }) {
+                databaseCandidates[index].version = databaseCandidates[index].version ?? version
+                databaseCandidates[index].error = databaseCandidates[index].version == nil
+                    ? databaseCandidates[index].error ?? error
+                    : nil
+                let sources = databaseCandidates[index].sources + [source]
+                databaseCandidates[index].sources = DatabaseInstallationSource.allCases.filter(Set(sources).contains)
+            } else {
+                databaseCandidates.append(DatabaseCandidate(
+                    executable: executable,
+                    actualExecutable: actualExecutable,
+                    version: version,
+                    sources: [source],
+                    error: error
+                ))
+            }
+            candidates[database] = databaseCandidates
+        }
+
+        for directory in path {
+            for executableName in ["mysqld", "mariadbd"] {
+                let executable = absoluteExecutable(executableName, directory: directory)
+                guard machine.isExecutableFile(atPath: executable) else { continue }
+                let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+                let knownDatabase: MySQLFamilyDatabase? = URL(fileURLWithPath: actual).lastPathComponent == "mariadbd"
+                    ? .mariadb
+                    : nil
+                let result = machine.command(executable: executable, arguments: ["--version"])
+                let details = mysqlFamilyVersion(from: result, knownDatabase: knownDatabase)
+                guard let database = details.database else {
+                    classificationFailures.formUnion(MySQLFamilyDatabase.allCases)
+                    if reportedAmbiguousPaths.insert(actual).inserted {
+                        issues.append("MySQL/MariaDB：无法分类 mysqld（\(executable)）")
+                    }
+                    continue
+                }
+                if let error = details.error { issues.append("\(database.name)：\(error)（\(executable)）") }
+                addCandidate(
+                    database: database,
+                    executable: executable,
+                    actualExecutable: actual,
+                    version: details.version,
+                    source: .path,
+                    error: details.error
+                )
+            }
+        }
+
+        if let cellar = homebrew.cellar {
+            for database in MySQLFamilyDatabase.allCases {
+                for formula in homebrew.formulas where formula.formula == database.formula
+                    || formula.formula.hasPrefix("\(database.formula)@") {
+                    for version in formula.versions {
+                        let directory = URL(fileURLWithPath: cellar, isDirectory: true)
+                            .appendingPathComponent(formula.formula, isDirectory: true)
+                            .appendingPathComponent(version, isDirectory: true)
+                            .appendingPathComponent("bin", isDirectory: true)
+                        let executablePaths = database.executableNames.map {
+                            directory.appendingPathComponent($0).path
+                        }
+                        let executable = executablePaths.first(where: { machine.isExecutableFile(atPath: $0) })
+                            ?? executablePaths[0]
+                        let available = machine.isExecutableFile(atPath: executable)
+                        let actual = available
+                            ? standardizedPath(machine.resolvingSymlinksInPath(executable))
+                            : standardizedPath(executable)
+                        let error = available ? nil : "可执行文件不可用"
+                        if let error { issues.append("\(database.name)：\(error)（\(executable)）") }
+                        addCandidate(
+                            database: database,
+                            executable: executable,
+                            actualExecutable: actual,
+                            version: version,
+                            source: .homebrew,
+                            error: error
+                        )
+                    }
+                }
+            }
+        }
+
+        var homebrewProviderFailures: Set<MySQLFamilyDatabase> = []
+        for database in MySQLFamilyDatabase.allCases {
+            let hasFormula = homebrew.formulas.contains {
+                $0.formula == database.formula || $0.formula.hasPrefix("\(database.formula)@")
+            }
+            let providerFailed = homebrewAvailabilityFailed
+                || (homebrew.failureReason != nil && (homebrew.formulas.isEmpty || hasFormula))
+            guard providerFailed else { continue }
+            homebrewProviderFailures.insert(database)
+            if let failure = homebrew.failureReason {
+                issues.append("\(database.name) Database Provider：Homebrew \(failure)")
+            } else {
+                issues.append("\(database.name) Database Provider：Homebrew 读取失败")
+            }
+        }
+
+        for service in localServices.services {
+            guard let executable = localServices.executablePaths[service.pid] else {
+                guard localServices.executablePathFailures.contains(service.pid) else { continue }
+                switch service.processName.lowercased() {
+                case "mariadbd":
+                    relevantPathFailures.insert(.mariadb)
+                    issues.append("MariaDB：进程路径读取失败（PID \(service.pid)）")
+                case "mysqld":
+                    relevantPathFailures.formUnion(MySQLFamilyDatabase.allCases)
+                    issues.append("MySQL/MariaDB：进程路径读取失败（PID \(service.pid)）")
+                default:
+                    continue
+                }
+                continue
+            }
+
+            let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+            let executableName = URL(fileURLWithPath: actual).lastPathComponent.lowercased()
+            guard executableName == "mysqld" || executableName == "mariadbd" else { continue }
+            let existingDatabase = MySQLFamilyDatabase.allCases.first {
+                candidates[$0, default: []].contains { $0.actualExecutable == actual }
+            }
+            let details: (database: MySQLFamilyDatabase?, version: String?, error: String?)
+            if let existingDatabase {
+                details = (existingDatabase, nil, nil)
+            } else {
+                let knownDatabase: MySQLFamilyDatabase? = executableName == "mariadbd" ? .mariadb : nil
+                details = mysqlFamilyVersion(
+                    from: machine.command(executable: actual, arguments: ["--version"]),
+                    knownDatabase: knownDatabase
+                )
+            }
+            guard let database = details.database else {
+                classificationFailures.formUnion(MySQLFamilyDatabase.allCases)
+                if reportedAmbiguousPaths.insert(actual).inserted {
+                    issues.append("MySQL/MariaDB：无法分类 mysqld（\(actual)）")
+                }
+                continue
+            }
+            listeningPaths[database, default: []].insert(actual)
+            if let error = details.error { issues.append("\(database.name)：\(error)（\(actual)）") }
+            addCandidate(
+                database: database,
+                executable: actual,
+                actualExecutable: actual,
+                version: details.version,
+                source: .localService,
+                error: details.error
+            )
+        }
+
+        return MySQLFamilyDatabase.allCases.map { database in
+            let installations = candidates[database, default: []].map { candidate in
+                let listeningState: DatabaseListeningState = if listeningPaths[database, default: []]
+                    .contains(candidate.actualExecutable) {
+                    .listening
+                } else if !localServices.complete || relevantPathFailures.contains(database) {
+                    .unknown
+                } else {
+                    .notListening
+                }
+                return DatabaseInstallation(
+                    id: candidate.actualExecutable,
+                    executable: candidate.executable,
+                    actualExecutable: candidate.executable == candidate.actualExecutable ? nil : candidate.actualExecutable,
+                    version: candidate.version,
+                    error: candidate.error,
+                    sources: candidate.sources,
+                    listeningState: listeningState
+                )
+            }
+            let providerFailed = homebrewProviderFailures.contains(database)
+                || !localServices.complete
+                || relevantPathFailures.contains(database)
+                || classificationFailures.contains(database)
+            let discoveryState: DatabaseDiscoveryState = if !installations.isEmpty {
+                .discovered
+            } else if providerFailed {
+                .unknown
+            } else {
+                .notFound
+            }
+            let listeningState: DatabaseListeningState = if installations.contains(where: { $0.listeningState == .listening }) {
+                .listening
+            } else if installations.contains(where: { $0.listeningState == .unknown })
+                || !localServices.complete
+                || relevantPathFailures.contains(database)
+                || homebrewProviderFailures.contains(database)
+                || (installations.isEmpty && classificationFailures.contains(database)) {
+                .unknown
+            } else {
+                .notListening
+            }
+            return DatabaseInstallationOverview(
+                id: database.id,
+                name: database.name,
+                installations: installations,
+                discoveryState: discoveryState,
+                listeningState: listeningState
+            )
+        }
+    }
+
+    private func mysqlFamilyVersion(
+        from result: MachineCommandResult,
+        knownDatabase: MySQLFamilyDatabase?
+    ) -> (database: MySQLFamilyDatabase?, version: String?, error: String?) {
+        guard result.status == 0, !result.timedOut, let value = normalizedVersion(result.output) else {
+            return (knownDatabase, nil, knownDatabase == nil ? nil : "版本读取失败")
+        }
+        let lowercased = value.lowercased()
+        let mentionsMySQL = lowercased.range(of: #"\bmysql\b"#, options: .regularExpression) != nil
+        let database = knownDatabase
+            ?? (lowercased.contains("mariadb") ? .mariadb : mentionsMySQL ? .mysql : nil)
+        guard let database else { return (nil, nil, nil) }
+        let fields = value.split(whereSeparator: \.isWhitespace)
+        guard let marker = fields.firstIndex(where: { $0.caseInsensitiveCompare("Ver") == .orderedSame }),
+              fields.indices.contains(marker + 1) else {
+            return (database, nil, "版本读取失败")
+        }
+        let version = fields[marker + 1].split(separator: "-").first.map(String.init)
+        return (database, version, version == nil ? "版本读取失败" : nil)
+    }
+
     private func scanRuntime(
         _ definition: RuntimeDefinition,
         path: [String],
@@ -1316,7 +1575,10 @@ struct EnvironmentScanner: Sendable {
             let isRuntime = runtimeDefinitions.contains {
                 formula == $0.homebrewFormula || formula.hasPrefix("\($0.homebrewFormula)@")
             }
-            guard isRuntime || formula == "postgresql" || formula.hasPrefix("postgresql@") else { return nil }
+            let isDatabase = ["postgresql", "mysql", "mariadb"].contains {
+                formula == $0 || formula.hasPrefix("\($0)@")
+            }
+            guard isRuntime || isDatabase else { return nil }
             return HomebrewFormulaInstallation(formula: formula, versions: Array(fields.dropFirst()))
         }
         guard !formulas.isEmpty else { return .empty }
@@ -1501,7 +1763,7 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 9 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 10 else { return nil }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

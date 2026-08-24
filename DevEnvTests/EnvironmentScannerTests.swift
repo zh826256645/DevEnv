@@ -386,7 +386,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 9)
+        XCTAssertEqual(snapshot.schemaVersion, 10)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -1010,6 +1010,153 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Ruby：") })
     }
 
+    func testDiscoversMySQLAndMariaDBFromPathInDatabaseDisplayOrder() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/mysqld", "/bin/mariadbd"],
+            commandOutputs: [
+                "/bin/mysqld --version": "/bin/mysqld  Ver 8.4.3 for macos14.7 on arm64 (MySQL Community Server - GPL)\n",
+                "/bin/mariadbd --version": "/bin/mariadbd  Ver 11.4.5-MariaDB for osx10.19 on arm64 (Homebrew)\n",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.id), ["postgresql", "mysql", "mariadb"])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.name), ["PostgreSQL", "MySQL", "MariaDB"])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews[1].installations.first?.version, "8.4.3")
+        XCTAssertEqual(snapshot.databaseInstallationOverviews[2].installations.first?.version, "11.4.5")
+    }
+
+    func testMySQLAndMariaDBDeduplicateProvidersAndMatchExactListeningVersions() throws {
+        let mysql84 = "/opt/mysql/8.4/bin/mysqld"
+        let mysql80 = "/opt/homebrew/Cellar/mysql@8.0/8.0.40/bin/mysqld"
+        let mariadb114 = "/opt/homebrew/Cellar/mariadb/11.4.5/bin/mariadbd"
+        let mariadb1011 = "/opt/homebrew/Cellar/mariadb@10.11/10.11.10/bin/mariadbd"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/usr/local/bin"],
+            executables: [
+                "/usr/local/bin/mysqld",
+                "/opt/homebrew/bin/brew",
+                "/opt/homebrew/Cellar/mysql/8.4.3/bin/mysqld",
+                mysql80,
+                mariadb114,
+                mariadb1011,
+            ],
+            resolvedPaths: [
+                "/usr/local/bin/mysqld": mysql84,
+                "/opt/homebrew/Cellar/mysql/8.4.3/bin/mysqld": mysql84,
+            ],
+            commandOutputs: [
+                "/usr/local/bin/mysqld --version": "mysqld Ver 8.4.3 for macos (MySQL Community Server - GPL)\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "mysql 8.4.3\nmysql@8.0 8.0.40\nmariadb 11.4.5\nmariadb@10.11 10.11.10\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmysqld\nf7\ntIPv4\nn127.0.0.1:3306\np43\ncmariadbd\nf8\ntIPv4\nn127.0.0.1:3307\n",
+            ],
+            processExecutablePaths: [42: mysql84, 43: mariadb1011]
+        )).scan().snapshot
+
+        let mysql = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mysql" })
+        XCTAssertEqual(mysql.installations.map(\.id), [mysql84, mysql80])
+        XCTAssertEqual(mysql.installations.map(\.version), ["8.4.3", "8.0.40"])
+        XCTAssertEqual(mysql.installations.map(\.listeningState), [.listening, .notListening])
+        XCTAssertEqual(mysql.installations[0].executable, "/usr/local/bin/mysqld")
+        XCTAssertEqual(mysql.installations[0].actualExecutable, mysql84)
+        XCTAssertEqual(mysql.installations[0].sources, [.path, .homebrew, .localService])
+
+        let mariadb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mariadb" })
+        XCTAssertEqual(mariadb.installations.map(\.id), [mariadb114, mariadb1011])
+        XCTAssertEqual(mariadb.installations.map(\.listeningState), [.notListening, .listening])
+        XCTAssertEqual(mariadb.installations[1].sources, [.homebrew, .localService])
+        XCTAssertEqual(snapshot.localServices.map(\.processName), ["mysqld", "mariadbd"])
+    }
+
+    func testMySQLAndMariaDBProviderFailureUsesUnknownStates() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew"],
+            commandOutputs: ["/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n"],
+            commandTimeouts: ["/opt/homebrew/bin/brew list --formula --versions"]
+        )).scan().snapshot
+
+        for id in ["mysql", "mariadb"] {
+            let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == id })
+            XCTAssertEqual(database.discoveryState, .unknown)
+            XCTAssertEqual(database.listeningState, .unknown)
+            XCTAssertTrue(database.installations.isEmpty)
+        }
+        XCTAssertTrue(snapshot.issues.contains("MySQL Database Provider：Homebrew 命令超时"))
+        XCTAssertTrue(snapshot.issues.contains("MariaDB Database Provider：Homebrew 命令超时"))
+    }
+
+    func testAmbiguousLocalServiceMysqldStaysUnclassifiedAndProducesNotice() throws {
+        let mysqld = "/Applications/UnknownSQL/bin/mysqld"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "\(mysqld) --version": "mysqld Ver 8.0.0 for macos on arm64\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmysqld\nf7\ntIPv4\nn127.0.0.1:3306\n",
+            ],
+            processExecutablePaths: [42: mysqld]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.map(\.processName), ["mysqld"])
+        XCTAssertTrue(snapshot.databaseInstallationOverviews
+            .filter { $0.id == "mysql" || $0.id == "mariadb" }
+            .allSatisfy { $0.installations.isEmpty && $0.discoveryState == .unknown })
+        XCTAssertTrue(snapshot.issues.contains("MySQL/MariaDB：无法分类 mysqld（\(mysqld)）"))
+
+        let descriptor = localServiceDescriptor(for: "mysqld")
+        XCTAssertEqual(descriptor.displayName, "mysqld")
+        XCTAssertNil(descriptor.assetName)
+    }
+
+    func testLocalServiceOnlyMySQLAndMariaDBKeepKnownTypeWhenVersionFails() throws {
+        let mysqld = "/usr/local/mysql/bin/mysqld"
+        let mariadbd = "/Applications/MariaDB/bin/mariadbd"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "\(mysqld) --version": "mysqld Ver 8.4.3 for macos (MySQL Community Server - GPL)\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmysqld\nf7\ntIPv4\nn127.0.0.1:3306\np43\ncmariadbd\nf8\ntIPv4\nn127.0.0.1:3307\n",
+            ],
+            commandStatuses: ["\(mariadbd) --version": -1],
+            processExecutablePaths: [42: mysqld, 43: mariadbd]
+        )).scan().snapshot
+
+        let mysql = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mysql" })
+        XCTAssertEqual(mysql.installations.first?.version, "8.4.3")
+        XCTAssertEqual(mysql.installations.first?.sources, [.localService])
+        XCTAssertEqual(mysql.listeningState, .listening)
+
+        let mariadb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mariadb" })
+        XCTAssertNil(mariadb.installations.first?.version)
+        XCTAssertEqual(mariadb.installations.first?.error, "版本读取失败")
+        XCTAssertEqual(mariadb.listeningState, .listening)
+        XCTAssertTrue(snapshot.issues.contains("MariaDB：版本读取失败（\(mariadbd)）"))
+    }
+
+    func testMariaDBProcessPathFailureDoesNotChangeMySQLListeningState() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/mysqld"],
+            commandOutputs: [
+                "/bin/mysqld --version": "mysqld Ver 8.4.3 for macos (MySQL Community Server - GPL)\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p43\ncmariadbd\nf8\ntIPv4\nn127.0.0.1:3307\n",
+            ],
+            processExecutableFailures: [43]
+        )).scan().snapshot
+
+        let mysql = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mysql" })
+        XCTAssertEqual(mysql.discoveryState, .discovered)
+        XCTAssertEqual(mysql.listeningState, .notListening)
+        XCTAssertEqual(mysql.installations.first?.listeningState, .notListening)
+
+        let mariadb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mariadb" })
+        XCTAssertEqual(mariadb.discoveryState, .unknown)
+        XCTAssertEqual(mariadb.listeningState, .unknown)
+        XCTAssertTrue(snapshot.issues.contains("MariaDB：进程路径读取失败（PID 43）"))
+    }
+
     func testPostgreSQLDeduplicatesThreeSourcesAndMatchesOnlyTheExactListeningVersion() throws {
         let postgres16 = "/opt/postgresql/16/bin/postgres"
         let postgres15 = "/opt/homebrew/Cellar/postgresql@15/15.8/bin/postgres"
@@ -1322,7 +1469,7 @@ final class EnvironmentScannerTests: XCTestCase {
             ("node", "Node.js", "RuntimeNodeLogo"),
             ("postgres", "PostgreSQL", "ServicePostgreSQLLogo"),
             ("mongod", "MongoDB", "ServiceMongoDBLogo"),
-            ("mysqld", "MySQL", "ServiceMySQLLogo"),
+            ("mysqld", "mysqld", nil),
             ("mariadbd", "MariaDB", "ServiceMariaDBLogo"),
             ("redis-server", "Redis", "ServiceRedisLogo"),
             ("adb", "Android Debug Bridge", nil),
@@ -1416,7 +1563,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV9SnapshotRoundTripsDatabasesAndV8IsRejected() throws {
+    func testV10SnapshotRoundTripsDatabasesAndV9IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -1444,7 +1591,7 @@ final class EnvironmentScannerTests: XCTestCase {
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 9)
+        XCTAssertEqual(store.load()?.schemaVersion, 10)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
@@ -1460,7 +1607,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.ghTokenExists == true)
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
         XCTAssertEqual(store.load()?.runtimes.first { $0.id == "node" }?.installations.first?.sources, [.system])
-        XCTAssertEqual(store.load()?.databaseInstallationOverviews.first?.id, "postgresql")
+        XCTAssertEqual(store.load()?.databaseInstallationOverviews.map(\.id), ["postgresql", "mysql", "mariadb"])
         XCTAssertEqual(store.load()?.databaseInstallationOverviews.first?.discoveryState, .notFound)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
@@ -1476,7 +1623,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 8
+        json["schemaVersion"] = 9
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
