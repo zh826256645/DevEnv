@@ -1163,6 +1163,9 @@ struct ContentView: View {
                             .background(appearance.color.opacity(0.10), in: Circle())
                             .accessibilityHidden(true)
                     }
+                    .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+
+                    Divider()
 
                     Label(appearance.status, systemImage: appearance.pill)
                         .font(.caption.weight(.semibold))
@@ -1170,9 +1173,7 @@ struct ContentView: View {
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
                         .background(appearance.color.opacity(0.10), in: Capsule())
-
                 }
-                .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -1386,17 +1387,17 @@ struct ContentView: View {
                     .frame(width: 38, height: 38)
                     .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
             }
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
-            if homebrew.available {
-                Text("已安装")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.green)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Color.green.opacity(0.10), in: Capsule())
-            }
+            Divider()
+
+            Text(homebrew.available ? "已安装" : "未发现")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Capsule())
         }
-        .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
 
@@ -1526,6 +1527,9 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+
+            Divider()
 
             HStack(spacing: 8) {
                 Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
@@ -1546,7 +1550,6 @@ struct ContentView: View {
             }
             .font(.caption.weight(.semibold))
         }
-        .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }

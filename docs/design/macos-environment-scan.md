@@ -101,7 +101,7 @@ Runtime Installation 来源扩展启用后，V1–V7 快照视为不支持版本
 - 标题下方首先展示一个圆角总览面板，面板内按双列划分系统信息与扫描汇总；每列由图标标题和独立内层卡片组成，两张内层卡片始终以内容较高的一侧为准保持可见背景等高，不使用固定高度。其后依次展示 Runtime、本地服务和环境配置，不在正文中重复系统信息或单独展示 Scan Notice 模块。
 - 摘要展示已发现 Runtime 类别数、Runtime Installation 总数和本地服务组数，不给出 Scan Notice 数量、环境健康评分或“正常/异常”的整体判断。
 - 系统信息卡使用大号系统 Apple 标志，集中展示 macOS 版本、Build、架构，并以图标指标展示主机名和内存；系统卷使用线性进度条显示已用容量占总容量的比例，并同时标注已用、可用和总容量。扫描汇总的三个指标分别使用带图标底板和细描边的独立圆角行，数值右对齐突出显示。
-- Runtime 与“环境配置”都使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git 与 PATH 合并到“环境配置”圆角模块内并作为同级卡片展示：Homebrew 摘要展示版本与安装状态，Git 摘要展示当前生效 CLI，PATH 摘要展示目录总数与真实的 Runtime PATH 版本冲突数。Homebrew、Git 与非空 PATH 复用 Runtime 的展开策略：点击卡片摘要后，选中卡片移动到模块首位并占满整行，其余卡片重排到下方，同一时间只展开一张；Homebrew 展开后展示可执行路径或读取错误，Git 展开后展示 Git LFS、User Git Configuration、GitHub CLI 的 `git_protocol` 与本地/进程级认证来源事实，PATH 展开后默认展示前 3 个目录并可继续展开全部。
+- Runtime 与“环境配置”都使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git 与 PATH 合并到“环境配置”圆角模块内并作为同级卡片展示：Homebrew 摘要展示版本与安装状态，Git 摘要展示当前生效 CLI，PATH 摘要展示目录总数与真实的 Runtime PATH 版本冲突数；三张卡片均使用分隔线将底部状态胶囊与主信息分开。Homebrew、Git 与非空 PATH 复用 Runtime 的展开策略：点击卡片摘要后，选中卡片移动到模块首位并占满整行，其余卡片重排到下方，同一时间只展开一张；Homebrew 展开后展示可执行路径或读取错误，Git 展开后展示 Git LFS、User Git Configuration、GitHub CLI 的 `git_protocol` 与本地/进程级认证来源事实，PATH 展开后默认展示前 3 个目录并可继续展开全部。
 
 ### 扫描状态
 
