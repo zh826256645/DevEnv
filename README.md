@@ -12,14 +12,14 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 
 ## 当前进度
 
-截至 2026-08-24：
+截至 2026-08-25：
 
 - 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见语言 Runtime 的只读扫描和最新快照持久化。
 - 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源 Runtime Installation 发现。
 - 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
 - 已完成当前 `PATH` 首个生效 Git CLI、Git LFS、用户级配置与脱敏后的 GitHub Authentication Configuration 只读扫描。
 - 已完成受支持 Terminal Application 与注册 Shell Installation、Default Login Shell 的只读扫描。
-- 已完成加载页、顶部状态总览、Runtime 自适应卡片、按需展开详情、通知与状态说明等原生 SwiftUI 界面。
+- 已完成总览、Runtime、数据库和本地服务侧边栏页面，以及按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
 - v0.1 与 v0.2 的只读扫描范围已交付；Git Tooling State 已交付 Git CLI、Git LFS、脱敏后的 User Git Configuration 与 GitHub Authentication Configuration。
 
