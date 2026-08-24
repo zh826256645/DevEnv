@@ -86,10 +86,11 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - Runtime Installation 来源扩展版本：`schemaVersion = 8`
 - PostgreSQL Database Installation 纵向基线：`schemaVersion = 9`
 - MySQL 与 MariaDB Database Installation 扩展：`schemaVersion = 10`
+- MongoDB 与 Redis Database Installation 完整扩展：`schemaVersion = 11`
 - 写入方式：原子替换
 - 启动读取到损坏或不支持版本的文件时忽略该文件，不尝试迁移
 
-MySQL 与 MariaDB Database Installation 扩展启用后，V1–V9 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
+MongoDB 与 Redis Database Installation 扩展启用后，V1–V10 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
 
 只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
 
@@ -190,7 +191,7 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 
 ## Database Installation 扩展
 
-状态：PostgreSQL、MySQL 与 MariaDB 纵向切片已实现；MongoDB 和 Redis 待后续切片。只读展示 Database Installation 及其 TCP 监听状态，不连接或查询数据库。
+状态：PostgreSQL、MySQL、MariaDB、MongoDB 与 Redis 已完整实现。只读展示 Database Installation 及其 TCP 监听状态，不连接或查询数据库。
 
 ### 发现与匹配
 
@@ -209,12 +210,12 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 ### 展示
 
 - 总览顺序为 Runtime、数据库、本地服务、环境配置；顶部扫描汇总暂不增加数据库指标。
-- 当前按 PostgreSQL、MySQL、MariaDB 顺序展示三张卡片，摘要显示安装数和正在监听数；后续按 MongoDB、Redis 顺序补齐。
+- 固定按 PostgreSQL、MySQL、MariaDB、MongoDB、Redis 顺序展示五张卡片，摘要显示安装数和正在监听数。
 - 卡片复用 Runtime 的折叠与展开交互：同时只展开一张，默认最多展示前 3 个 Database Installation，存在更多安装时才提供“查看全部”。
 - “正在监听”使用绿色；“未发现”和“未监听”是中性灰色，不产生 Scan Notice；发现或监听状态未知以及读取失败使用橙色并产生 Scan Notice。
 - 数据库监听进程仍保留在完整的“本地服务”区域；进程真实路径只用于 Database Installation 发现与匹配，不增加到 Local Service 行。
 - 数据库结果只随应用启动扫描和手动“重新扫描”更新，不增加轮询或独立刷新入口。
-- Machine Snapshot 已升级为 `schemaVersion = 10`；V1–V9 快照直接忽略并重新扫描，不增加快照迁移。
+- Machine Snapshot 已升级为 `schemaVersion = 11`；V1–V10 快照直接忽略并重新扫描，不增加快照迁移。
 
 ## TCP 监听服务扩展
 
@@ -260,6 +261,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - 同一 PostgreSQL 可执行文件经 `PATH`、Homebrew 和 Local Service 重复发现：合并为一个 Database Installation 并显示“正在监听”。
 - 安装两个 PostgreSQL 版本且只有一个实际路径正在监听：只标记该 Database Installation，不连带标记另一个版本。
 - MySQL 与 MariaDB 的普通或带版本后缀 Homebrew formula 经三个来源重复发现：分别按真实可执行文件目标去重并精确匹配监听版本。
+- MongoDB Community 与 Redis 的普通或带版本后缀 Homebrew formula 经三个来源重复发现：分别按 `mongod` 与 `redis-server` 的真实可执行文件目标去重并精确匹配监听版本。
 - 只由 Local Service 发现的 `mysqld` 无法通过版本输出区分 MySQL 与 MariaDB：不创建 Database Installation，保留 Local Service 并产生 Scan Notice。
 - `mariadbd` 版本读取失败：保留已确定为 MariaDB 的 Database Installation 和精确监听状态，并产生 Scan Notice。
 - 发现 Homebrew 数据库但没有匹配 Local Service：显示“未监听”，不产生 Scan Notice。
@@ -271,6 +273,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - 读取 V1–V6 快照：忽略旧快照并执行扫描，成功后写入 V7 快照。
 - PostgreSQL Database Installation 纵向基线读取 V1–V8 快照：忽略旧快照并执行扫描，成功后写入 V9 快照。
 - MySQL 与 MariaDB Database Installation 扩展读取 V1–V9 快照：忽略旧快照并执行扫描，成功后写入 V10 快照。
+- MongoDB 与 Redis Database Installation 扩展读取 V1–V10 快照：忽略旧快照并执行扫描，成功后写入 V11 快照。
 
 ## 相关决策
 

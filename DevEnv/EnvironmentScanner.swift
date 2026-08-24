@@ -407,6 +407,16 @@ struct EnvironmentScanner: Sendable {
         var executableNames: [String] { self == .mysql ? ["mysqld"] : ["mariadbd", "mysqld"] }
     }
 
+    private enum MongoDBOrRedis: CaseIterable {
+        case mongodb
+        case redis
+
+        var id: String { self == .mongodb ? "mongodb" : "redis" }
+        var name: String { self == .mongodb ? "MongoDB" : "Redis" }
+        var executable: String { self == .mongodb ? "mongod" : "redis-server" }
+        var formula: String { self == .mongodb ? "mongodb-community" : "redis" }
+    }
+
     private struct MiseInstallation: Decodable {
         let version: String
         let installPath: String
@@ -507,9 +517,15 @@ struct EnvironmentScanner: Sendable {
             homebrewAvailabilityFailed: homebrew.error != nil,
             localServices: localServiceScan,
             issues: &issues
+        ) + scanMongoDBAndRedis(
+            path: path,
+            homebrew: homebrewInventory,
+            homebrewAvailabilityFailed: homebrew.error != nil,
+            localServices: localServiceScan,
+            notices: &issues
         )
         let snapshot = MachineSnapshot(
-            schemaVersion: 10,
+            schemaVersion: 11,
             scannedAt: Date(),
             system: system,
             localServices: localServiceScan.services,
@@ -1043,6 +1059,188 @@ struct EnvironmentScanner: Sendable {
             : nil
         let sources = candidates[index].sources + candidate.sources
         candidates[index].sources = DatabaseInstallationSource.allCases.filter(Set(sources).contains)
+    }
+
+    private func scanMongoDBAndRedis(
+        path: [String],
+        homebrew: HomebrewInventory,
+        homebrewAvailabilityFailed: Bool,
+        localServices: LocalServiceScan,
+        notices: inout [String]
+    ) -> [DatabaseInstallationOverview] {
+        MongoDBOrRedis.allCases.map { database in
+            var candidates: [DatabaseCandidate] = []
+
+            func addCandidate(
+                executable: String,
+                actualExecutable: String,
+                version: String?,
+                source: DatabaseInstallationSource,
+                notice: String?
+            ) {
+                mergeDatabaseCandidate(DatabaseCandidate(
+                    executable: executable,
+                    actualExecutable: actualExecutable,
+                    version: version,
+                    sources: [source],
+                    error: notice
+                ), into: &candidates)
+            }
+
+            func readVersion(executable: String) -> (String?, String?) {
+                let result = machine.command(executable: executable, arguments: ["--version"])
+                let version = mongoDBOrRedisVersion(from: result.output, database: database)
+                return result.status == 0 && !result.timedOut && version != nil
+                    ? (version, nil)
+                    : (nil, "版本读取失败")
+            }
+
+            for directory in path {
+                let executable = absoluteExecutable(database.executable, directory: directory)
+                guard machine.isExecutableFile(atPath: executable) else { continue }
+                let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+                guard !candidates.contains(where: { $0.actualExecutable == actual }) else { continue }
+                let (version, notice) = readVersion(executable: executable)
+                if let notice { notices.append("\(database.name)：\(notice)（\(executable)）") }
+                addCandidate(
+                    executable: executable,
+                    actualExecutable: actual,
+                    version: version,
+                    source: .path,
+                    notice: notice
+                )
+            }
+
+            if let cellar = homebrew.cellar {
+                for formula in homebrew.formulas where formula.formula == database.formula
+                    || formula.formula.hasPrefix("\(database.formula)@") {
+                    for version in formula.versions {
+                        let executable = URL(fileURLWithPath: cellar, isDirectory: true)
+                            .appendingPathComponent(formula.formula, isDirectory: true)
+                            .appendingPathComponent(version, isDirectory: true)
+                            .appendingPathComponent("bin", isDirectory: true)
+                            .appendingPathComponent(database.executable)
+                            .path
+                        let available = machine.isExecutableFile(atPath: executable)
+                        let actual = available
+                            ? standardizedPath(machine.resolvingSymlinksInPath(executable))
+                            : standardizedPath(executable)
+                        let notice = available ? nil : "可执行文件不可用"
+                        if let notice { notices.append("\(database.name)：\(notice)（\(executable)）") }
+                        addCandidate(
+                            executable: executable,
+                            actualExecutable: actual,
+                            version: version,
+                            source: .homebrew,
+                            notice: notice
+                        )
+                    }
+                }
+            }
+
+            let hasFormula = homebrew.formulas.contains {
+                $0.formula == database.formula || $0.formula.hasPrefix("\(database.formula)@")
+            }
+            let homebrewProviderFailed = homebrewAvailabilityFailed
+                || (homebrew.failureReason != nil && (homebrew.formulas.isEmpty || hasFormula))
+            if homebrewProviderFailed, let failure = homebrew.failureReason {
+                notices.append("\(database.name) Database Provider：Homebrew \(failure)")
+            } else if homebrewProviderFailed {
+                notices.append("\(database.name) Database Provider：Homebrew 读取失败")
+            }
+
+            var listeningPaths: Set<String> = []
+            var relevantPathFailure = false
+            for service in localServices.services {
+                guard let executable = localServices.executablePaths[service.pid] else {
+                    if service.processName.caseInsensitiveCompare(database.executable) == .orderedSame,
+                       localServices.executablePathFailures.contains(service.pid) {
+                        relevantPathFailure = true
+                        notices.append("\(database.name)：进程路径读取失败（PID \(service.pid)）")
+                    }
+                    continue
+                }
+                let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+                guard URL(fileURLWithPath: actual).lastPathComponent.caseInsensitiveCompare(database.executable) == .orderedSame else {
+                    continue
+                }
+                listeningPaths.insert(actual)
+                if candidates.contains(where: { $0.actualExecutable == actual }) {
+                    addCandidate(
+                        executable: actual,
+                        actualExecutable: actual,
+                        version: nil,
+                        source: .localService,
+                        notice: nil
+                    )
+                } else {
+                    let (version, notice) = readVersion(executable: actual)
+                    if let notice { notices.append("\(database.name)：\(notice)（\(actual)）") }
+                    addCandidate(
+                        executable: actual,
+                        actualExecutable: actual,
+                        version: version,
+                        source: .localService,
+                        notice: notice
+                    )
+                }
+            }
+
+            let installations = candidates.map { candidate in
+                let listeningState: DatabaseListeningState = if listeningPaths.contains(candidate.actualExecutable) {
+                    .listening
+                } else if !localServices.complete || relevantPathFailure {
+                    .unknown
+                } else {
+                    .notListening
+                }
+                return DatabaseInstallation(
+                    id: candidate.actualExecutable,
+                    executable: candidate.executable,
+                    actualExecutable: candidate.executable == candidate.actualExecutable ? nil : candidate.actualExecutable,
+                    version: candidate.version,
+                    error: candidate.error,
+                    sources: candidate.sources,
+                    listeningState: listeningState
+                )
+            }
+            let providerFailed = homebrewProviderFailed || !localServices.complete || relevantPathFailure
+            let discoveryState: DatabaseDiscoveryState = if !installations.isEmpty {
+                .discovered
+            } else if providerFailed {
+                .unknown
+            } else {
+                .notFound
+            }
+            let listeningState: DatabaseListeningState = if installations.contains(where: { $0.listeningState == .listening }) {
+                .listening
+            } else if installations.contains(where: { $0.listeningState == .unknown }) || providerFailed {
+                .unknown
+            } else {
+                .notListening
+            }
+            return DatabaseInstallationOverview(
+                id: database.id,
+                name: database.name,
+                installations: installations,
+                discoveryState: discoveryState,
+                listeningState: listeningState
+            )
+        }
+    }
+
+    private func mongoDBOrRedisVersion(from output: String, database: MongoDBOrRedis) -> String? {
+        guard let value = normalizedVersion(output) else { return nil }
+        switch database {
+        case .mongodb:
+            let prefix = "db version v"
+            guard value.hasPrefix(prefix) else { return nil }
+            return value.dropFirst(prefix.count).split(whereSeparator: \.isWhitespace).first.map(String.init)
+        case .redis:
+            return value.split(whereSeparator: \.isWhitespace)
+                .first { $0.hasPrefix("v=") }
+                .map { String($0.dropFirst(2)) }
+        }
     }
 
     private func scanMySQLFamily(
@@ -1580,7 +1778,7 @@ struct EnvironmentScanner: Sendable {
             let isRuntime = runtimeDefinitions.contains {
                 formula == $0.homebrewFormula || formula.hasPrefix("\($0.homebrewFormula)@")
             }
-            let isDatabase = ["postgresql", "mysql", "mariadb"].contains {
+            let isDatabase = ["postgresql", "mysql", "mariadb", "mongodb-community", "redis"].contains {
                 formula == $0 || formula.hasPrefix("\($0)@")
             }
             guard isRuntime || isDatabase else { return nil }
@@ -1768,7 +1966,7 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 10 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 11 else { return nil }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

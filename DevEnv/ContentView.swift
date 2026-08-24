@@ -676,9 +676,7 @@ struct ContentView: View {
                 .monospacedDigit()
                 .foregroundStyle(database.installations.contains { $0.error != nil } ? .orange : .primary)
             Label(
-                database.installations.isEmpty
-                    ? "未发现 Database Installation"
-                    : "\(database.installations.count) 个安装 · \(database.listeningCount) 个正在监听",
+                "\(database.installations.count) 个安装 · \(database.listeningCount) 个正在监听",
                 systemImage: "square.stack.3d.up.fill"
             )
             .font(.caption)
@@ -707,6 +705,8 @@ struct ContentView: View {
         let appearance: (asset: String, color: Color) = switch database.id {
         case "mysql": ("ServiceMySQLLogo", Color(red: 0.27, green: 0.47, blue: 0.63))
         case "mariadb": ("ServiceMariaDBLogo", Color(red: 0, green: 0.36, blue: 0.43))
+        case "mongodb": ("ServiceMongoDBLogo", Color(red: 0.29, green: 0.66, blue: 0.34))
+        case "redis": ("ServiceRedisLogo", Color(red: 0.82, green: 0.16, blue: 0.15))
         default: ("ServicePostgreSQLLogo", Color(red: 0.20, green: 0.45, blue: 0.64))
         }
         return ZStack {
@@ -751,6 +751,7 @@ struct ContentView: View {
             Text(installation.version ?? "读取失败")
                 .font(.title3.weight(.semibold))
                 .monospacedDigit()
+                .textSelection(.enabled)
                 .frame(width: 90, alignment: .leading)
 
             HStack(spacing: 5) {

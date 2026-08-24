@@ -386,7 +386,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 10)
+        XCTAssertEqual(snapshot.schemaVersion, 11)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -1010,6 +1010,129 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Ruby：") })
     }
 
+    func testDiscoversMongoDBAndRedisFromPathInDatabaseDisplayOrder() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/mongod", "/bin/redis-server"],
+            commandOutputs: [
+                "/bin/mongod --version": "db version v8.0.12\nBuild Info: {}\n",
+                "/bin/redis-server --version": "Redis server v=8.2.1 sha=00000000:0 malloc=libc bits=64 build=0\n",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.id), [
+            "postgresql", "mysql", "mariadb", "mongodb", "redis",
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.name), [
+            "PostgreSQL", "MySQL", "MariaDB", "MongoDB", "Redis",
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.discoveryState), [
+            .notFound, .notFound, .notFound, .discovered, .discovered,
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.listeningState), [
+            .notListening, .notListening, .notListening, .notListening, .notListening,
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map { $0.installations.count }, [0, 0, 0, 1, 1])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.listeningCount), [0, 0, 0, 0, 0])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews[3].installations.first?.version, "8.0.12")
+        XCTAssertEqual(snapshot.databaseInstallationOverviews[4].installations.first?.version, "8.2.1")
+    }
+
+    func testMongoDBAndRedisDeduplicateProvidersAndMatchExactListeningVersions() throws {
+        let mongodb8 = "/opt/mongodb/8/bin/mongod"
+        let mongodb7 = "/opt/homebrew/Cellar/mongodb-community@7.0/7.0.22/bin/mongod"
+        let redis8 = "/opt/redis/8/bin/redis-server"
+        let redis7 = "/opt/homebrew/Cellar/redis@7.2/7.2.10/bin/redis-server"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/usr/local/bin"],
+            executables: [
+                "/usr/local/bin/mongod",
+                "/usr/local/bin/redis-server",
+                "/opt/homebrew/bin/brew",
+                "/opt/homebrew/Cellar/mongodb-community/8.0.12/bin/mongod",
+                mongodb7,
+                "/opt/homebrew/Cellar/redis/8.2.1/bin/redis-server",
+                redis7,
+            ],
+            resolvedPaths: [
+                "/usr/local/bin/mongod": mongodb8,
+                "/opt/homebrew/Cellar/mongodb-community/8.0.12/bin/mongod": mongodb8,
+                "/usr/local/bin/redis-server": redis8,
+                "/opt/homebrew/Cellar/redis/8.2.1/bin/redis-server": redis8,
+            ],
+            commandOutputs: [
+                "/usr/local/bin/mongod --version": "db version v8.0.12\nBuild Info: {}\n",
+                "/usr/local/bin/redis-server --version": "Redis server v=8.2.1 sha=00000000:0 malloc=libc bits=64 build=0\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.6.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "mongodb-community 8.0.12\nmongodb-community@7.0 7.0.22\nredis 8.2.1\nredis@7.2 7.2.10\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmongod\nf7\ntIPv4\nn127.0.0.1:27017\np43\ncredis-server\nf8\ntIPv4\nn127.0.0.1:6379\np44\nccom.docker.backend\nf9\ntIPv4\nn127.0.0.1:65000\n",
+            ],
+            processExecutablePaths: [
+                42: mongodb8,
+                43: redis7,
+                44: "/Applications/Docker.app/Contents/MacOS/com.docker.backend",
+            ]
+        )).scan().snapshot
+
+        let mongodb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mongodb" })
+        XCTAssertEqual(mongodb.installations.map(\.id), [mongodb8, mongodb7])
+        XCTAssertEqual(mongodb.installations.map(\.listeningState), [.listening, .notListening])
+        XCTAssertEqual(mongodb.installations[0].sources, [.path, .homebrew, .localService])
+        XCTAssertEqual(mongodb.listeningState, .listening)
+        XCTAssertEqual(mongodb.listeningCount, 1)
+
+        let redis = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "redis" })
+        XCTAssertEqual(redis.installations.map(\.id), [redis8, redis7])
+        XCTAssertEqual(redis.installations.map(\.listeningState), [.notListening, .listening])
+        XCTAssertEqual(redis.installations[1].sources, [.homebrew, .localService])
+        XCTAssertEqual(redis.listeningState, .listening)
+        XCTAssertEqual(redis.listeningCount, 1)
+        XCTAssertEqual(snapshot.localServices.map(\.processName), ["redis-server", "mongod", "com.docker.backend"])
+    }
+
+    func testMongoDBAndRedisFailuresUseUnknownStatesWithoutCrossContamination() throws {
+        let mongod = "/Applications/MongoDB/bin/mongod"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmongod\nf7\ntIPv4\nn127.0.0.1:27017\np43\ncredis-server\nf8\ntIPv4\nn127.0.0.1:6379\n",
+            ],
+            commandStatuses: ["\(mongod) --version": -1],
+            processExecutablePaths: [42: mongod],
+            processExecutableFailures: [43]
+        )).scan().snapshot
+
+        let mongodb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mongodb" })
+        XCTAssertEqual(mongodb.discoveryState, .discovered)
+        XCTAssertEqual(mongodb.listeningState, .listening)
+        XCTAssertEqual(mongodb.installations.first?.error, "版本读取失败")
+        XCTAssertTrue(snapshot.issues.contains("MongoDB：版本读取失败（\(mongod)）"))
+
+        let redis = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "redis" })
+        XCTAssertEqual(redis.discoveryState, .unknown)
+        XCTAssertEqual(redis.listeningState, .unknown)
+        XCTAssertTrue(redis.installations.isEmpty)
+        XCTAssertTrue(snapshot.issues.contains("Redis：进程路径读取失败（PID 43）"))
+    }
+
+    func testMongoDBAndRedisHomebrewFailureUsesUnknownStates() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew"],
+            commandOutputs: ["/opt/homebrew/bin/brew --version": "Homebrew 4.6.0\n"],
+            commandTimeouts: ["/opt/homebrew/bin/brew list --formula --versions"]
+        )).scan().snapshot
+
+        for name in ["MongoDB", "Redis"] {
+            let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.name == name })
+            XCTAssertEqual(database.discoveryState, .unknown)
+            XCTAssertEqual(database.listeningState, .unknown)
+            XCTAssertTrue(database.installations.isEmpty)
+            XCTAssertTrue(snapshot.issues.contains("\(name) Database Provider：Homebrew 命令超时"))
+        }
+    }
+
     func testDiscoversMySQLAndMariaDBFromPathInDatabaseDisplayOrder() throws {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
@@ -1020,8 +1143,12 @@ final class EnvironmentScannerTests: XCTestCase {
             ]
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.id), ["postgresql", "mysql", "mariadb"])
-        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.name), ["PostgreSQL", "MySQL", "MariaDB"])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.id), [
+            "postgresql", "mysql", "mariadb", "mongodb", "redis",
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.name), [
+            "PostgreSQL", "MySQL", "MariaDB", "MongoDB", "Redis",
+        ])
         XCTAssertEqual(snapshot.databaseInstallationOverviews[1].installations.first?.version, "8.4.3")
         XCTAssertEqual(snapshot.databaseInstallationOverviews[2].installations.first?.version, "11.4.5")
     }
@@ -1563,7 +1690,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV10SnapshotRoundTripsDatabasesAndV9IsRejected() throws {
+    func testV11SnapshotRoundTripsFiveDatabasesAndV10IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -1591,7 +1718,7 @@ final class EnvironmentScannerTests: XCTestCase {
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 10)
+        XCTAssertEqual(store.load()?.schemaVersion, 11)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
@@ -1607,7 +1734,9 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.ghTokenExists == true)
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
         XCTAssertEqual(store.load()?.runtimes.first { $0.id == "node" }?.installations.first?.sources, [.system])
-        XCTAssertEqual(store.load()?.databaseInstallationOverviews.map(\.id), ["postgresql", "mysql", "mariadb"])
+        XCTAssertEqual(store.load()?.databaseInstallationOverviews.map(\.id), [
+            "postgresql", "mysql", "mariadb", "mongodb", "redis",
+        ])
         XCTAssertEqual(store.load()?.databaseInstallationOverviews.first?.discoveryState, .notFound)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
@@ -1623,7 +1752,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 9
+        json["schemaVersion"] = 10
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
