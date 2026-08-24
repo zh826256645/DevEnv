@@ -3,6 +3,54 @@ import XCTest
 @testable import DevEnv
 
 final class EnvironmentScannerTests: XCTestCase {
+    func testScansTerminalApplicationsAndRegisteredShellsInStableOrder() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: [],
+            defaultLoginShellPath: "/opt/homebrew/bin/fish",
+            registeredShells: """
+            # Login shells
+            /bin/../bin/zsh
+            /bin/bash
+            /bin/zsh
+            """,
+            executables: ["/bin/zsh", "/bin/bash", "/opt/homebrew/bin/fish"],
+            applications: [
+                "com.github.wez.wezterm": InstalledApplication(
+                    name: "WezTerm", version: nil, path: "/Applications/WezTerm.app"
+                ),
+                "com.apple.Terminal": InstalledApplication(
+                    name: "Terminal", version: "2.15", path: "/System/Applications/Utilities/Terminal.app"
+                ),
+                "com.mitchellh.ghostty": InstalledApplication(
+                    name: "Ghostty", version: "1.2.0", path: "/Applications/Ghostty.app"
+                ),
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.schemaVersion, 13)
+        XCTAssertEqual(snapshot.terminalApplications.map(\.name), ["Terminal", "Ghostty", "WezTerm"])
+        XCTAssertEqual(snapshot.terminalApplications.map(\.version), ["2.15", "1.2.0", nil])
+        XCTAssertEqual(snapshot.shellInstallations.map(\.path), ["/opt/homebrew/bin/fish", "/bin/zsh", "/bin/bash"])
+        XCTAssertEqual(snapshot.shellInstallations.map(\.isDefault), [true, false, false])
+        XCTAssertEqual(snapshot.shellInstallations.map(\.isAvailable), [false, true, true])
+        XCTAssertEqual(snapshot.issues.filter { $0.hasPrefix("Default Login Shell：") }, ["Default Login Shell：不可用"])
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Shell Installation：") })
+    }
+
+    func testShellDiscoveryFailuresAreIsolatedAndMissingTerminalApplicationsAreNeutral() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: [],
+            defaultLoginShellPath: nil,
+            registeredShells: nil
+        )).scan().snapshot
+
+        XCTAssertTrue(snapshot.terminalApplications.isEmpty)
+        XCTAssertTrue(snapshot.shellInstallations.isEmpty)
+        XCTAssertEqual(snapshot.issues.filter {
+            $0.hasPrefix("Default Login Shell：") || $0.hasPrefix("Shell Installation：")
+        }, ["Default Login Shell：读取失败", "Shell Installation：读取失败"])
+    }
+
     func testGitCLIUsesFirstExecutableInPath() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["tools/../first/bin", "/second/bin"],
@@ -386,7 +434,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 12)
+        XCTAssertEqual(snapshot.schemaVersion, 13)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -1826,7 +1874,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV12SnapshotRoundTripsServiceAttributionAndV11IsRejected() throws {
+    func testV13SnapshotRoundTripsEnvironmentConfigurationAndV12IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -1853,11 +1901,19 @@ final class EnvironmentScannerTests: XCTestCase {
             existingFiles: ["/Users/test/.config/gh/hosts.yml", "/Users/test/.gitignore"],
             fileContents: ["/Users/test/Projects/web/package.json": "{\"name\":\"web-console\"}"],
             processExecutablePaths: [42: "/bin/node"],
-            processWorkingDirectoryPaths: [42: "/Users/test/Projects/web/src"]
+            processWorkingDirectoryPaths: [42: "/Users/test/Projects/web/src"],
+            applications: [
+                "com.apple.Terminal": InstalledApplication(
+                    name: "Terminal", version: "2.15", path: "/System/Applications/Utilities/Terminal.app"
+                ),
+            ]
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 12)
+        XCTAssertEqual(store.load()?.schemaVersion, 13)
+        XCTAssertEqual(store.load()?.terminalApplications.first?.name, "Terminal")
+        XCTAssertEqual(store.load()?.shellInstallations.first?.path, "/bin/zsh")
+        XCTAssertTrue(store.load()?.shellInstallations.first?.isDefault == true)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
@@ -1894,7 +1950,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 11
+        json["schemaVersion"] = 12
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
@@ -1904,6 +1960,7 @@ private struct StubMachine: MachineAccess {
     let environment: [String: String]
     let hostName = "test-host"
     let currentDirectoryPath = "/"
+    let defaultLoginShellPath: String?
     let executables: Set<String>
     let resolvedPaths: [String: String]
     let commandOutputs: [String: String]
@@ -1917,10 +1974,13 @@ private struct StubMachine: MachineAccess {
     let processExecutableFailures: Set<Int32>
     let processWorkingDirectoryPaths: [Int32: String]
     let processWorkingDirectoryFailures: Set<Int32>
+    let applications: [String: InstalledApplication]
 
     init(
         path: [String],
         environment: [String: String] = [:],
+        defaultLoginShellPath: String? = "/bin/zsh",
+        registeredShells: String? = "/bin/zsh\n",
         executables: Set<String> = [],
         resolvedPaths: [String: String] = [:],
         commandOutputs: [String: String] = [:],
@@ -1933,22 +1993,29 @@ private struct StubMachine: MachineAccess {
         processExecutablePaths: [Int32: String] = [:],
         processExecutableFailures: Set<Int32> = [],
         processWorkingDirectoryPaths: [Int32: String] = [:],
-        processWorkingDirectoryFailures: Set<Int32> = []
+        processWorkingDirectoryFailures: Set<Int32> = [],
+        applications: [String: InstalledApplication] = [:]
     ) {
         self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
-        self.executables = executables
+        self.defaultLoginShellPath = defaultLoginShellPath
+        self.executables = executables.union(["/bin/zsh"])
         self.resolvedPaths = resolvedPaths
         self.commandOutputs = commandOutputs
         self.commandStatuses = commandStatuses
         self.commandTimeouts = commandTimeouts
         self.directoryContents = directoryContents
         self.directoryFailures = directoryFailures
-        self.existingFiles = existingFiles.union(fileContents.keys)
-        self.fileContentsByPath = fileContents
+        var allFileContents = fileContents
+        if allFileContents["/etc/shells"] == nil, let registeredShells {
+            allFileContents["/etc/shells"] = registeredShells
+        }
+        self.existingFiles = existingFiles.union(allFileContents.keys)
+        self.fileContentsByPath = allFileContents
         self.processExecutablePaths = processExecutablePaths
         self.processExecutableFailures = processExecutableFailures
         self.processWorkingDirectoryPaths = processWorkingDirectoryPaths
         self.processWorkingDirectoryFailures = processWorkingDirectoryFailures
+        self.applications = applications
     }
 
     func diskSpace() -> DiskSpace { DiskSpace(totalBytes: 1, freeBytes: 1) }
@@ -1981,6 +2048,8 @@ private struct StubMachine: MachineAccess {
         guard let path = processWorkingDirectoryPaths[pid] else { throw CocoaError(.fileNoSuchFile) }
         return path
     }
+
+    func application(bundleIdentifier: String) -> InstalledApplication? { applications[bundleIdentifier] }
 
     func command(executable: String, arguments: [String]) -> MachineCommandResult {
         let key = ([executable] + arguments).joined(separator: " ")

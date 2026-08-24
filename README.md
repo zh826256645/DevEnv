@@ -12,12 +12,13 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 
 ## 当前进度
 
-截至 2026-08-23：
+截至 2026-08-24：
 
 - 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见语言 Runtime 的只读扫描和最新快照持久化。
 - 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源 Runtime Installation 发现。
 - 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
 - 已完成当前 `PATH` 首个生效 Git CLI、Git LFS、用户级配置与脱敏后的 GitHub Authentication Configuration 只读扫描。
+- 已完成受支持 Terminal Application 与注册 Shell Installation、Default Login Shell 的只读扫描。
 - 已完成加载页、顶部状态总览、Runtime 自适应卡片、按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
 - v0.1 与 v0.2 的只读扫描范围已交付；Git Tooling State 已交付 Git CLI、Git LFS、脱敏后的 User Git Configuration 与 GitHub Authentication Configuration。
@@ -624,6 +625,18 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 > 用户级签名开关与 Credential Helper Chain 当前如何配置？
 
 > GitHub CLI 是否存在本地或进程级认证来源，当前使用哪种 Git 协议？
+
+---
+
+### Terminal & Shell
+
+**Terminal Application 与 Shell Installation（已完成）**
+
+通过 Launch Services 展示受支持的 Terminal Application 名称、版本与路径；通过 `/etc/shells` 和当前用户账户记录展示注册 Shell Installation 与 Default Login Shell。扫描不推断默认或当前 Terminal Session，不加载 Shell 配置，也不启动 Shell 读取版本。
+
+解决：
+
+> 当前 Mac 安装了哪些受支持的终端应用，当前账户默认使用哪个登录 Shell？
 
 ---
 

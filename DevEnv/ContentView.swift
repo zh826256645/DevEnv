@@ -174,6 +174,8 @@ struct ContentView: View {
     private enum EnvironmentCard {
         case homebrew
         case git
+        case terminal
+        case shell
         case path
     }
 
@@ -1422,6 +1424,12 @@ struct ContentView: View {
             } else if expandedEnvironmentCard == .path {
                 pathCard(snapshot.path, warningCount: pathWarningCount)
                 environmentCardGrid(snapshot, excluding: .path, pathWarningCount: pathWarningCount)
+            } else if expandedEnvironmentCard == .terminal {
+                terminalCard(snapshot.terminalApplications)
+                environmentCardGrid(snapshot, excluding: .terminal, pathWarningCount: pathWarningCount)
+            } else if expandedEnvironmentCard == .shell {
+                shellCard(snapshot.shellInstallations)
+                environmentCardGrid(snapshot, excluding: .shell, pathWarningCount: pathWarningCount)
             } else {
                 environmentCardGrid(snapshot, pathWarningCount: pathWarningCount)
             }
@@ -1449,6 +1457,12 @@ struct ContentView: View {
                 expandedEnvironmentCard = nil
             }
         }
+        .onChange(of: snapshot.terminalApplications.isEmpty) { _, isEmpty in
+            if isEmpty, expandedEnvironmentCard == .terminal { expandedEnvironmentCard = nil }
+        }
+        .onChange(of: snapshot.shellInstallations.isEmpty) { _, isEmpty in
+            if isEmpty, expandedEnvironmentCard == .shell { expandedEnvironmentCard = nil }
+        }
     }
 
     private func environmentCardGrid(
@@ -1473,6 +1487,12 @@ struct ContentView: View {
                     credentialHelpers: snapshot.gitCredentialHelpers,
                     github: snapshot.githubAuthenticationConfiguration
                 )
+            }
+            if excludedCard != .terminal {
+                terminalCard(snapshot.terminalApplications)
+            }
+            if excludedCard != .shell {
+                shellCard(snapshot.shellInstallations)
             }
             if excludedCard != .path {
                 pathCard(snapshot.path, warningCount: pathWarningCount)
@@ -1897,6 +1917,217 @@ struct ContentView: View {
                 showsAllPathEntries.toggle()
             }
         }
+    }
+
+    private func terminalCard(_ applications: [TerminalApplicationSnapshot]) -> some View {
+        inventoryEnvironmentCard(
+            card: .terminal,
+            title: "Terminal",
+            primaryValue: applications.isEmpty ? "未发现" : "\(applications.count) 个应用",
+            subtitle: "Terminal Application",
+            systemImage: "macwindow.on.rectangle",
+            tint: .cyan,
+            status: applications.isEmpty ? "未发现" : "\(applications.count) 个应用",
+            statusImage: applications.isEmpty ? "circle" : "checkmark.circle.fill",
+            statusColor: applications.isEmpty ? .secondary : .green,
+            hasDetails: !applications.isEmpty
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(applications) { application in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(application.name)
+                                .font(.callout.weight(.semibold))
+                            Spacer()
+                            Text(application.version ?? "版本未知")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        copyablePath(application.path)
+                    }
+                    .padding(12)
+                    .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.primary.opacity(0.09))
+                    }
+                }
+            }
+        }
+    }
+
+    private func shellCard(_ installations: [ShellInstallationSnapshot]) -> some View {
+        let defaultShell = installations.first(where: \.isDefault)
+        let hasWarning = defaultShell == nil || defaultShell?.isAvailable == false
+        let status = if defaultShell == nil {
+            "默认项未读取"
+        } else if hasWarning {
+            "默认项不可用"
+        } else {
+            "\(installations.count) 个 Shell"
+        }
+
+        return inventoryEnvironmentCard(
+            card: .shell,
+            title: "Shell",
+            primaryValue: defaultShell?.name ?? "未读取",
+            subtitle: "\(installations.count) 个 Shell Installation",
+            systemImage: "terminal",
+            tint: .indigo,
+            status: status,
+            statusImage: hasWarning ? "exclamationmark.circle.fill" : "checkmark.circle.fill",
+            statusColor: hasWarning ? .orange : .green,
+            hasDetails: !installations.isEmpty
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(installations) { installation in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Text(installation.name)
+                                .font(.callout.weight(.semibold))
+                            if installation.isDefault {
+                                Text("默认登录 Shell")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color.accentColor)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(Color.accentColor.opacity(0.10), in: Capsule())
+                            }
+                            Spacer()
+                            Label(
+                                installation.isAvailable ? "可用" : "不可用",
+                                systemImage: installation.isAvailable ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+                            )
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(installation.isAvailable ? Color.green : Color.orange)
+                        }
+                        copyablePath(installation.path)
+                    }
+                    .padding(12)
+                    .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.primary.opacity(0.09))
+                    }
+                }
+            }
+        }
+    }
+
+    private func inventoryEnvironmentCard<Details: View>(
+        card: EnvironmentCard,
+        title: String,
+        primaryValue: String,
+        subtitle: String,
+        systemImage: String,
+        tint: Color,
+        status: String,
+        statusImage: String,
+        statusColor: Color,
+        hasDetails: Bool,
+        @ViewBuilder details: () -> Details
+    ) -> some View {
+        let isExpanded = expandedEnvironmentCard == card
+
+        return VStack(alignment: .leading, spacing: 12) {
+            if hasDetails {
+                Button {
+                    toggleEnvironmentCard(card)
+                } label: {
+                    inventoryEnvironmentCardSummary(
+                        title: title,
+                        primaryValue: primaryValue,
+                        subtitle: subtitle,
+                        systemImage: systemImage,
+                        tint: tint,
+                        status: status,
+                        statusImage: statusImage,
+                        statusColor: statusColor
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(isExpanded ? "已展开" : "已折叠")
+            } else {
+                inventoryEnvironmentCardSummary(
+                    title: title,
+                    primaryValue: primaryValue,
+                    subtitle: subtitle,
+                    systemImage: systemImage,
+                    tint: tint,
+                    status: status,
+                    statusImage: statusImage,
+                    statusColor: statusColor
+                )
+            }
+
+            if isExpanded {
+                details()
+                    .transition(.opacity)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(0.09))
+                }
+        }
+    }
+
+    private func inventoryEnvironmentCardSummary(
+        title: String,
+        primaryValue: String,
+        subtitle: String,
+        systemImage: String,
+        tint: Color,
+        status: String,
+        statusImage: String,
+        statusColor: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(tint.opacity(0.09))
+                    Image(systemName: systemImage)
+                        .font(.system(size: 23, weight: .medium))
+                        .foregroundStyle(tint)
+                }
+                .frame(width: 54, height: 54)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.07))
+                }
+                .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.headline)
+                    Text(primaryValue)
+                        .font(.title2.bold())
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+            }
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+
+            Divider()
+
+            Label(status, systemImage: statusImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(statusColor)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(statusColor.opacity(0.10), in: Capsule())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private func homebrewCard(_ homebrew: HomebrewSnapshot) -> some View {

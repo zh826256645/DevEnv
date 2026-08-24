@@ -1,6 +1,6 @@
 # macOS 系统环境扫描
 
-状态：v0.1 范围已冻结；Runtime 多版本发现、TCP 监听服务、Git Tooling State 与总览界面已实现。
+状态：v0.1 范围已冻结；Runtime 多版本发现、TCP 监听服务、Git Tooling State、Terminal Application、Shell Installation 与总览界面已实现。
 
 ## 目标
 
@@ -88,12 +88,13 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - MySQL 与 MariaDB Database Installation 扩展：`schemaVersion = 10`
 - MongoDB 与 Redis Database Installation 完整扩展：`schemaVersion = 11`
 - Python 与 Node Local Service Attribution 扩展：`schemaVersion = 12`
+- Terminal Application 与 Shell Installation 扩展：`schemaVersion = 13`
 - 写入方式：原子替换
 - 启动读取到损坏或不支持版本的文件时忽略该文件，不尝试迁移
 
-Local Service Attribution 扩展启用后，V1–V11 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
+Terminal Application 与 Shell Installation 扩展启用后，V1–V12 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
 
-只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
+只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Terminal Application、Shell Installation、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
 
 ## 触发与界面
 
@@ -105,7 +106,7 @@ Local Service Attribution 扩展启用后，V1–V11 快照视为不支持版本
 - 标题下方首先展示一个圆角总览面板，面板内按双列划分系统信息与扫描汇总；每列由图标标题和独立内层卡片组成，两张内层卡片始终以内容较高的一侧为准保持可见背景等高，不使用固定高度。其后依次展示 Runtime、本地服务和环境配置，不在正文中重复系统信息或单独展示 Scan Notice 模块。
 - 摘要展示已发现 Runtime 类别数、Runtime Installation 总数和本地服务组数，不给出 Scan Notice 数量、环境健康评分或“正常/异常”的整体判断。
 - 系统信息卡使用大号系统 Apple 标志，集中展示 macOS 版本、Build、架构，并以图标指标展示主机名和内存；系统卷使用线性进度条显示已用容量占总容量的比例，并同时标注已用、可用和总容量。扫描汇总的三个指标分别使用带图标底板和细描边的独立圆角行，数值右对齐突出显示。
-- Runtime 与“环境配置”都使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git 与 PATH 合并到“环境配置”圆角模块内并作为同级卡片展示：Homebrew 摘要展示版本与安装状态，Git 摘要展示当前生效 CLI，PATH 摘要展示目录总数与真实的 Runtime PATH 版本冲突数；三张卡片均使用分隔线将底部状态胶囊与主信息分开。Homebrew、Git 与非空 PATH 复用 Runtime 的展开策略：点击卡片摘要后，选中卡片移动到模块首位并占满整行，其余卡片重排到下方，同一时间只展开一张；Homebrew 展开态使用版本与安装状态概览，并在独立面板展示可执行路径或读取错误；Git 展开后展示 Git LFS、User Git Configuration、GitHub CLI 的 `git_protocol` 与本地/进程级认证来源事实；PATH 展开态使用目录与 Runtime 冲突概览，默认展示带顺序和最高优先级标记的前 3 个目录，并可继续展开全部。
+- Runtime 与“环境配置”都使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git、PATH、Terminal 与 Shell 合并到“环境配置”圆角模块内并作为同级卡片展示。Terminal 摘要展示已发现应用数量，展开后按支持清单顺序展示名称、版本和应用路径；Shell 摘要展示 Default Login Shell 与已发现数量，展开后将默认项置顶并展示名称、路径、默认标记和可用状态。五张卡片复用同一时间只展开一张、选中卡片置顶并占满整行的交互。
 
 ### 扫描状态
 
@@ -170,6 +171,20 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - Effective Runtime Installation 始终排第一；其余 `PATH` 安装保持 PATH 优先级顺序；Provider-only 安装最后按版本倒序、路径作为同版本稳定次序。
 - Runtime Conflict 在扫描提示中集中展示，并在对应 Runtime 行旁显示“PATH 版本冲突”。
 - 扫描提示保留版本读取失败、可执行文件不可用和 Provider 失败。
+
+## Terminal Application 与 Shell Installation 扩展
+
+### Terminal Application
+
+- 固定支持 Terminal.app、iTerm2、Warp、Ghostty、Alacritty、kitty 与 WezTerm，并按该顺序通过 Bundle ID 使用 Launch Services 查询；不遍历应用目录或按名称猜测。
+- 每项只保存名称、版本、Bundle ID 和应用路径；不推断 Default Terminal Application 或启动 DevEnv 的 Terminal Session。
+- 未发现受支持应用与版本缺失均为中性状态，不产生 Scan Notice。
+
+### Shell Installation
+
+- 只读取 `/etc/shells` 的非空、非注释绝对路径，并补充 POSIX 当前账户记录中的 Default Login Shell；不遍历 `PATH`、常见安装目录或 Shell 配置文件。
+- 规范化路径并去重，Default Login Shell 置顶，其余保持 `/etc/shells` 原始顺序。每项保存名称、路径、默认标记和可用状态，不启动 Shell 读取版本。
+- 无法读取 `/etc/shells` 或当前账户 Default Login Shell 时产生独立 Scan Notice；默认路径未注册、已不存在或不可执行时仍保留为不可用项并产生 Scan Notice。Shell 数量不构成健康判断。
 
 ## Git Tooling State 扩展
 
@@ -295,6 +310,10 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - MySQL 与 MariaDB Database Installation 扩展读取 V1–V9 快照：忽略旧快照并执行扫描，成功后写入 V10 快照。
 - MongoDB 与 Redis Database Installation 扩展读取 V1–V10 快照：忽略旧快照并执行扫描，成功后写入 V11 快照。
 - Local Service Attribution 扩展读取 V1–V11 快照：忽略旧快照并执行扫描，成功后写入 V12 快照。
+- 受支持 Terminal Application 未安装：Terminal 卡片显示“未发现”，不产生 Scan Notice；已发现应用按固定支持清单展示名称、版本和路径。
+- Default Login Shell 未注册或不可执行：Shell 卡片仍将其置顶并标记“不可用”，同时产生 Scan Notice；其他可用项保持 `/etc/shells` 顺序。
+- `/etc/shells` 或 POSIX 账户记录读取失败：保留另一来源可建立的 Shell 结果，并分别产生一条 Scan Notice。
+- Terminal Application 与 Shell Installation 扩展读取 V1–V12 快照：忽略旧快照并执行扫描，成功后写入 V13 快照。
 
 ## 相关决策
 

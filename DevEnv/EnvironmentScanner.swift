@@ -1,8 +1,9 @@
+import AppKit
 import Darwin
 import Foundation
 
 struct MachineSnapshot: Codable, Sendable {
-    static let currentSchemaVersion = 12
+    static let currentSchemaVersion = 13
     static let localServiceTimeoutNotice = "本地服务：命令超时"
     static let localServiceFailureNotice = "本地服务：读取失败"
 
@@ -14,6 +15,8 @@ struct MachineSnapshot: Codable, Sendable {
     let runtimes: [RuntimeSnapshot]
     let databaseInstallationOverviews: [DatabaseInstallationOverview]
     let homebrew: HomebrewSnapshot
+    let terminalApplications: [TerminalApplicationSnapshot]
+    let shellInstallations: [ShellInstallationSnapshot]
     let gitCLI: GitCLISnapshot
     let gitLFS: GitLFSSnapshot?
     let userGitConfiguration: UserGitConfigurationSnapshot?
@@ -219,6 +222,24 @@ struct HomebrewSnapshot: Codable, Sendable {
     let error: String?
 }
 
+struct TerminalApplicationSnapshot: Codable, Identifiable, Sendable {
+    var id: String { bundleIdentifier }
+
+    let name: String
+    let version: String?
+    let bundleIdentifier: String
+    let path: String
+}
+
+struct ShellInstallationSnapshot: Codable, Identifiable, Sendable {
+    var id: String { path }
+
+    let name: String
+    let path: String
+    let isDefault: Bool
+    let isAvailable: Bool
+}
+
 enum GitCLIState: String, Codable, Sendable {
     case available
     case unavailable
@@ -293,10 +314,17 @@ struct DiskSpace: Sendable {
     let freeBytes: UInt64?
 }
 
+struct InstalledApplication: Sendable {
+    let name: String
+    let version: String?
+    let path: String
+}
+
 protocol MachineAccess: Sendable {
     var environment: [String: String] { get }
     var hostName: String { get }
     var currentDirectoryPath: String { get }
+    var defaultLoginShellPath: String? { get }
     func diskSpace() -> DiskSpace
     func isExecutableFile(atPath path: String) -> Bool
     func fileExists(atPath path: String) -> Bool
@@ -305,6 +333,7 @@ protocol MachineAccess: Sendable {
     func resolvingSymlinksInPath(_ path: String) -> String
     func executablePath(forPID pid: Int32) throws -> String
     func workingDirectoryPath(forPID pid: Int32) throws -> String
+    func application(bundleIdentifier: String) -> InstalledApplication?
     func command(executable: String, arguments: [String]) -> MachineCommandResult
 }
 
@@ -312,6 +341,10 @@ struct LiveMachineAccess: MachineAccess {
     var environment: [String: String] { ProcessInfo.processInfo.environment }
     var hostName: String { ProcessInfo.processInfo.hostName }
     var currentDirectoryPath: String { FileManager.default.currentDirectoryPath }
+    var defaultLoginShellPath: String? {
+        guard let shell = getpwuid(getuid())?.pointee.pw_shell else { return nil }
+        return String(cString: shell)
+    }
 
     func diskSpace() -> DiskSpace {
         let attributes = (try? FileManager.default.attributesOfFileSystem(forPath: "/")) ?? [:]
@@ -360,6 +393,19 @@ struct LiveMachineAccess: MachineAccess {
         }
     }
 
+    func application(bundleIdentifier: String) -> InstalledApplication? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier),
+              let bundle = Bundle(url: url) else { return nil }
+        let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+            ?? url.deletingPathExtension().lastPathComponent
+        return InstalledApplication(
+            name: name,
+            version: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            path: url.standardizedFileURL.path
+        )
+    }
+
     func command(executable: String, arguments: [String]) -> MachineCommandResult {
         let process = Process()
         let pipe = Pipe()
@@ -402,6 +448,11 @@ struct EnvironmentScanner: Sendable {
         let executable: String
         let arguments: [String]
         let homebrewFormula: String
+    }
+
+    private struct TerminalDefinition: Sendable {
+        let name: String
+        let bundleIdentifier: String
     }
 
     private struct RuntimeProviderInstallation: Sendable {
@@ -484,6 +535,16 @@ struct EnvironmentScanner: Sendable {
         RuntimeDefinition(id: "lua", name: "Lua", executable: "lua", arguments: ["-v"], homebrewFormula: "lua"),
     ]
 
+    private let terminalDefinitions = [
+        TerminalDefinition(name: "Terminal", bundleIdentifier: "com.apple.Terminal"),
+        TerminalDefinition(name: "iTerm2", bundleIdentifier: "com.googlecode.iterm2"),
+        TerminalDefinition(name: "Warp", bundleIdentifier: "dev.warp.Warp-Stable"),
+        TerminalDefinition(name: "Ghostty", bundleIdentifier: "com.mitchellh.ghostty"),
+        TerminalDefinition(name: "Alacritty", bundleIdentifier: "org.alacritty"),
+        TerminalDefinition(name: "kitty", bundleIdentifier: "net.kovidgoyal.kitty"),
+        TerminalDefinition(name: "WezTerm", bundleIdentifier: "com.github.wez.wezterm"),
+    ]
+
     private let machine: any MachineAccess
 
     init(machine: any MachineAccess = LiveMachineAccess()) {
@@ -513,6 +574,8 @@ struct EnvironmentScanner: Sendable {
         let localServiceScan = scanLocalServices(issues: &issues)
 
         let homebrew = scanHomebrew(path: path, issues: &issues)
+        let terminalApplications = scanTerminalApplications()
+        let shellInstallations = scanShellInstallations(notices: &issues)
         let gitCLI = scanGitCLI(path: path, notices: &issues)
         let gitAvailable = gitCLI.state == .available
         let gitLFS = gitAvailable ? scanGitLFS(path: path, notices: &issues) : nil
@@ -575,6 +638,8 @@ struct EnvironmentScanner: Sendable {
             runtimes: runtimes,
             databaseInstallationOverviews: databaseInstallationOverviews,
             homebrew: homebrew,
+            terminalApplications: terminalApplications,
+            shellInstallations: shellInstallations,
             gitCLI: gitCLI,
             gitLFS: gitLFS,
             userGitConfiguration: userGitConfiguration,
@@ -587,6 +652,65 @@ struct EnvironmentScanner: Sendable {
             snapshot: snapshot,
             canPersist: system.macOSVersion != nil && system.architecture != nil
         )
+    }
+
+    private func scanTerminalApplications() -> [TerminalApplicationSnapshot] {
+        terminalDefinitions.compactMap { definition in
+            machine.application(bundleIdentifier: definition.bundleIdentifier).map {
+                TerminalApplicationSnapshot(
+                    name: $0.name.isEmpty ? definition.name : $0.name,
+                    version: $0.version,
+                    bundleIdentifier: definition.bundleIdentifier,
+                    path: standardizedPath($0.path)
+                )
+            }
+        }
+    }
+
+    private func scanShellInstallations(notices: inout [String]) -> [ShellInstallationSnapshot] {
+        let defaultPath = machine.defaultLoginShellPath
+            .flatMap { $0.isEmpty ? nil : $0 }
+            .map(standardizedPath)
+        if defaultPath == nil {
+            notices.append("Default Login Shell：读取失败")
+        }
+
+        var registeredPaths: [String] = []
+        var registryWasRead = false
+        do {
+            guard let contents = String(data: try machine.fileData(atPath: "/etc/shells"), encoding: .utf8) else {
+                throw CocoaError(.fileReadInapplicableStringEncoding)
+            }
+            registeredPaths = contents.split(whereSeparator: \.isNewline).compactMap { line in
+                let path = line.trimmingCharacters(in: .whitespaces)
+                guard path.hasPrefix("/"), !path.hasPrefix("#") else { return nil }
+                return standardizedPath(path)
+            }
+            registryWasRead = true
+        } catch {
+            notices.append("Shell Installation：读取失败")
+        }
+
+        let registeredPathSet = Set(registeredPaths)
+        var seen = Set<String>()
+        let orderedPaths = ([defaultPath].compactMap { $0 } + registeredPaths).filter { seen.insert($0).inserted }
+        let installations = orderedPaths.compactMap { path -> ShellInstallationSnapshot? in
+            let isDefault = path == defaultPath
+            let isExecutable = machine.isExecutableFile(atPath: path)
+            let isAvailable = isExecutable && (!isDefault || !registryWasRead || registeredPathSet.contains(path))
+            guard isDefault || isAvailable else { return nil }
+            return ShellInstallationSnapshot(
+                name: URL(fileURLWithPath: path).lastPathComponent,
+                path: path,
+                isDefault: isDefault,
+                isAvailable: isAvailable
+            )
+        }
+        if let defaultPath,
+           !machine.isExecutableFile(atPath: defaultPath) || (registryWasRead && !registeredPathSet.contains(defaultPath)) {
+            notices.append("Default Login Shell：不可用")
+        }
+        return installations
     }
 
     private func scanGitCLI(path: [String], notices: inout [String]) -> GitCLISnapshot {
