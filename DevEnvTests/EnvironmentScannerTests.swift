@@ -386,7 +386,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 8)
+        XCTAssertEqual(snapshot.schemaVersion, 9)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -1010,6 +1010,172 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Ruby：") })
     }
 
+    func testPostgreSQLDeduplicatesThreeSourcesAndMatchesOnlyTheExactListeningVersion() throws {
+        let postgres16 = "/opt/postgresql/16/bin/postgres"
+        let postgres15 = "/opt/homebrew/Cellar/postgresql@15/15.8/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/usr/local/bin"],
+            executables: [
+                "/usr/local/bin/postgres",
+                "/opt/homebrew/bin/brew",
+                "/opt/homebrew/Cellar/postgresql@16/16.3/bin/postgres",
+                postgres15,
+            ],
+            resolvedPaths: [
+                "/usr/local/bin/postgres": postgres16,
+                "/opt/homebrew/Cellar/postgresql@16/16.3/bin/postgres": postgres16,
+            ],
+            commandOutputs: [
+                "/usr/local/bin/postgres --version": "postgres (PostgreSQL) 16.3\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "postgresql@15 15.8\npostgresql@16 16.3\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpostgres\nf7\ntIPv4\nn127.0.0.1:5432\n",
+            ],
+            processExecutablePaths: [42: postgres16]
+        )).scan().snapshot
+
+        let postgres = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "postgresql" })
+        XCTAssertEqual(postgres.discoveryState, .discovered)
+        XCTAssertEqual(postgres.listeningState, .listening)
+        XCTAssertEqual(postgres.installations.map(\.id), [postgres16, postgres15])
+        XCTAssertEqual(postgres.installations.map(\.version), ["16.3", "15.8"])
+        XCTAssertEqual(postgres.installations.map(\.listeningState), [.listening, .notListening])
+        XCTAssertEqual(postgres.installations[0].executable, "/usr/local/bin/postgres")
+        XCTAssertEqual(postgres.installations[0].actualExecutable, postgres16)
+        XCTAssertEqual(postgres.installations[0].sources, [.path, .homebrew, .localService])
+        XCTAssertEqual(snapshot.localServices.first?.processName, "postgres")
+    }
+
+    func testPostgreSQLProviderFailuresPreserveResultsAndUseUnknownWhenNothingWasFound() throws {
+        let postgres = "/bin/postgres"
+        let lsof = "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn"
+        let brewList = "/opt/homebrew/bin/brew list --formula --versions"
+        let withPathResult = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: [postgres, "/opt/homebrew/bin/brew"],
+            commandOutputs: [
+                "\(postgres) --version": "postgres (PostgreSQL) 17.1\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+            ],
+            commandStatuses: [lsof: -1],
+            commandTimeouts: [brewList]
+        )).scan().snapshot
+
+        let discovered = try XCTUnwrap(withPathResult.databaseInstallationOverviews.first)
+        XCTAssertEqual(discovered.discoveryState, .discovered)
+        XCTAssertEqual(discovered.listeningState, .unknown)
+        XCTAssertEqual(discovered.installations.first?.listeningState, .unknown)
+        XCTAssertTrue(withPathResult.issues.contains("PostgreSQL Database Provider：Homebrew 命令超时"))
+        XCTAssertTrue(withPathResult.issues.contains(MachineSnapshot.localServiceFailureNotice))
+
+        let withoutResults = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew"],
+            commandOutputs: ["/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n"],
+            commandStatuses: [lsof: -1],
+            commandTimeouts: [brewList]
+        )).scan().snapshot
+
+        XCTAssertEqual(withoutResults.databaseInstallationOverviews.first?.discoveryState, .unknown)
+        XCTAssertEqual(withoutResults.databaseInstallationOverviews.first?.listeningState, .unknown)
+        XCTAssertTrue(withoutResults.databaseInstallationOverviews.first?.installations.isEmpty == true)
+    }
+
+    func testPostgreSQLVersionFailureKeepsExactListeningState() throws {
+        let postgres = "/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: [postgres],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpostgres\nf7\ntIPv4\nn127.0.0.1:5432\n",
+            ],
+            commandStatuses: ["\(postgres) --version": -1],
+            processExecutablePaths: [42: postgres]
+        )).scan().snapshot
+
+        let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first)
+        let installation = try XCTUnwrap(database.installations.first)
+        XCTAssertEqual(database.discoveryState, .discovered)
+        XCTAssertEqual(database.listeningState, .listening)
+        XCTAssertNil(installation.version)
+        XCTAssertEqual(installation.error, "版本读取失败")
+        XCTAssertEqual(installation.listeningState, .listening)
+        XCTAssertTrue(snapshot.issues.contains("PostgreSQL：版本读取失败（/bin/postgres）"))
+    }
+
+    func testPostgreSQLRelevantProcessPathFailureMakesListeningUnknown() throws {
+        let postgres = "/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: [postgres],
+            commandOutputs: [
+                "\(postgres) --version": "postgres (PostgreSQL) 17.1\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpostgres\nf7\ntIPv4\nn127.0.0.1:5432\n",
+            ],
+            processExecutableFailures: [42]
+        )).scan().snapshot
+
+        let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first)
+        XCTAssertEqual(database.discoveryState, .discovered)
+        XCTAssertEqual(database.listeningState, .unknown)
+        XCTAssertEqual(database.installations.first?.listeningState, .unknown)
+        XCTAssertTrue(snapshot.issues.contains("PostgreSQL：进程路径读取失败（PID 42）"))
+    }
+
+    func testHomebrewPostgreSQLWithoutListenerIsNeutral() throws {
+        let postgres = "/opt/homebrew/Cellar/postgresql/17.2/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew", postgres],
+            commandOutputs: [
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "postgresql 17.2\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+            ]
+        )).scan().snapshot
+
+        let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first)
+        XCTAssertEqual(database.discoveryState, .discovered)
+        XCTAssertEqual(database.listeningState, .notListening)
+        XCTAssertEqual(database.installations.first?.listeningState, .notListening)
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("PostgreSQL") })
+    }
+
+    func testUnrelatedHomebrewCellarFailureDoesNotMakePostgreSQLDiscoveryUnknown() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew"],
+            commandOutputs: [
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "node 22.0.0\n",
+            ],
+            commandTimeouts: ["/opt/homebrew/bin/brew --cellar"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.first?.discoveryState, .notFound)
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("PostgreSQL") })
+    }
+
+    func testPostgreSQLLocalServiceOnlyAggregatesMultipleListenersIntoOneInstallation() throws {
+        let postgres = "/Applications/Postgres.app/Contents/Versions/17/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "\(postgres) --version": "postgres (PostgreSQL) 17.2\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p10\ncpostgres\nf7\ntIPv4\nn127.0.0.1:5432\np11\ncpostgres\nf8\ntIPv6\nn[::1]:5433\n",
+            ],
+            processExecutablePaths: [10: postgres, 11: postgres]
+        )).scan().snapshot
+
+        let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first)
+        XCTAssertEqual(database.installations.count, 1)
+        XCTAssertEqual(database.listeningCount, 1)
+        XCTAssertEqual(database.installations.first?.version, "17.2")
+        XCTAssertEqual(database.installations.first?.sources, [.localService])
+        XCTAssertEqual(snapshot.localServices.count, 2)
+    }
+
     func testAggregatesAndSortsVisibleTCPListeners() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
@@ -1250,7 +1416,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV8SnapshotRoundTripsSourcesAndV7IsRejected() throws {
+    func testV9SnapshotRoundTripsDatabasesAndV8IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -1278,7 +1444,7 @@ final class EnvironmentScannerTests: XCTestCase {
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 8)
+        XCTAssertEqual(store.load()?.schemaVersion, 9)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
@@ -1294,6 +1460,8 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.ghTokenExists == true)
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
         XCTAssertEqual(store.load()?.runtimes.first { $0.id == "node" }?.installations.first?.sources, [.system])
+        XCTAssertEqual(store.load()?.databaseInstallationOverviews.first?.id, "postgresql")
+        XCTAssertEqual(store.load()?.databaseInstallationOverviews.first?.discoveryState, .notFound)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
         var runtimes = try XCTUnwrap(json["runtimes"] as? [[String: Any]])
@@ -1308,7 +1476,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 7
+        json["schemaVersion"] = 8
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
@@ -1326,6 +1494,8 @@ private struct StubMachine: MachineAccess {
     let directoryContents: [String: [String]]
     let directoryFailures: Set<String>
     let existingFiles: Set<String>
+    let processExecutablePaths: [Int32: String]
+    let processExecutableFailures: Set<Int32>
 
     init(
         path: [String],
@@ -1338,7 +1508,9 @@ private struct StubMachine: MachineAccess {
         directoryContents: [String: [String]] = [:],
         directoryFailures: Set<String> = [],
         existingFiles: Set<String> = [],
-        fileContents: [String: String] = [:]
+        fileContents: [String: String] = [:],
+        processExecutablePaths: [Int32: String] = [:],
+        processExecutableFailures: Set<Int32> = []
     ) {
         self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
         self.executables = executables
@@ -1349,6 +1521,8 @@ private struct StubMachine: MachineAccess {
         self.directoryContents = directoryContents
         self.directoryFailures = directoryFailures
         self.existingFiles = existingFiles.union(fileContents.keys)
+        self.processExecutablePaths = processExecutablePaths
+        self.processExecutableFailures = processExecutableFailures
     }
 
     func diskSpace() -> DiskSpace { DiskSpace(totalBytes: 1, freeBytes: 1) }
@@ -1364,6 +1538,12 @@ private struct StubMachine: MachineAccess {
     }
 
     func resolvingSymlinksInPath(_ path: String) -> String { resolvedPaths[path, default: path] }
+
+    func executablePath(forPID pid: Int32) throws -> String {
+        if processExecutableFailures.contains(pid) { throw CocoaError(.fileReadNoPermission) }
+        guard let path = processExecutablePaths[pid] else { throw CocoaError(.fileNoSuchFile) }
+        return path
+    }
 
     func command(executable: String, arguments: [String]) -> MachineCommandResult {
         let key = ([executable] + arguments).joined(separator: " ")

@@ -176,6 +176,8 @@ struct ContentView: View {
     @State private var hoveredPath: String?
     @State private var expandedRuntimeID: String?
     @State private var fullyShownRuntimeID: String?
+    @State private var expandedDatabaseID: String?
+    @State private var fullyShownDatabaseID: String?
     @State private var expandedEnvironmentCard: EnvironmentCard?
     @State private var showsAllPathEntries = false
     @State private var isShowingNotifications = false
@@ -244,6 +246,7 @@ struct ContentView: View {
                 }
                 topOverviewSection(snapshot)
                 runtimesSection(snapshot.runtimes)
+                databaseInstallationsSection(snapshot.databaseInstallationOverviews)
                 localServicesSection(snapshot)
                 environmentSection(snapshot)
             }
@@ -465,6 +468,375 @@ struct ContentView: View {
         }
     }
 
+    private func databaseInstallationsSection(_ overviews: [DatabaseInstallationOverview]) -> some View {
+        let shouldCollapseExpanded = expandedDatabaseID.map { id in
+            overviews.first(where: { $0.id == id })?.installations.isEmpty ?? true
+        } ?? false
+
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(.blue)
+                    Image(systemName: "cylinder.split.1x2.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 30, height: 30)
+
+                Text("Database Installation")
+                    .font(.title2.bold())
+            }
+
+            if let expandedDatabaseID,
+               let expanded = overviews.first(where: { $0.id == expandedDatabaseID }) {
+                databaseCard(expanded)
+                databaseGrid(overviews.filter { $0.id != expandedDatabaseID })
+            } else {
+                databaseGrid(overviews)
+            }
+        }
+        .padding(16)
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.primary.opacity(0.018))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08))
+                }
+        }
+        .onChange(of: shouldCollapseExpanded) { _, shouldCollapse in
+            if shouldCollapse {
+                expandedDatabaseID = nil
+                fullyShownDatabaseID = nil
+            }
+        }
+    }
+
+    private func databaseGrid(_ overviews: [DatabaseInstallationOverview]) -> some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 180, maximum: 260), spacing: 14, alignment: .top)],
+            alignment: .leading,
+            spacing: 14
+        ) {
+            ForEach(overviews) { database in
+                databaseCard(database)
+            }
+        }
+    }
+
+    private func databaseCard(_ database: DatabaseInstallationOverview) -> some View {
+        let isExpanded = expandedDatabaseID == database.id
+        let tint = databaseTint(database)
+        let showsAllInstallations = fullyShownDatabaseID == database.id
+        let installations = showsAllInstallations
+            ? database.installations
+            : Array(database.installations.prefix(3))
+
+        return Group {
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 16) {
+                    Button {
+                        toggleCard(database.id, expandedID: $expandedDatabaseID, fullyShownID: $fullyShownDatabaseID)
+                    } label: {
+                        databaseExpandedSummary(database)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue("已展开")
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(installations) { installation in
+                            databaseInstallationRow(installation)
+                        }
+                        if database.installations.count > 3 {
+                            Button {
+                                toggleInstallationLimit(database.id, fullyShownID: $fullyShownDatabaseID)
+                            } label: {
+                                Label(
+                                    showsAllInstallations
+                                        ? "收起至 3 个安装路径"
+                                        : "展开其余 \(database.installations.count - 3) 个安装路径",
+                                    systemImage: showsAllInstallations ? "chevron.up" : "chevron.down"
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(Color.primary.opacity(0.09))
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            } else if database.installations.isEmpty {
+                databaseSummary(database)
+            } else {
+                Button {
+                    toggleCard(database.id, expandedID: $expandedDatabaseID, fullyShownID: $fullyShownDatabaseID)
+                } label: {
+                    databaseSummary(database)
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue("已折叠")
+            }
+        }
+        .padding(isExpanded ? 16 : 14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background {
+            RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                .fill(tint.opacity(isExpanded ? 0.08 : 0.035))
+                .overlay {
+                    RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                        .stroke(tint.opacity(isExpanded ? 0.55 : 0.25))
+                }
+        }
+        .shadow(color: tint.opacity(isExpanded ? 0.10 : 0.025), radius: isExpanded ? 14 : 8, y: 3)
+    }
+
+    private func databaseExpandedSummary(_ database: DatabaseInstallationOverview) -> some View {
+        let discovery = databaseDiscoveryStyle(database.discoveryState)
+        let listening = databaseListeningStyle(database.listeningState)
+
+        return HStack(alignment: .center, spacing: 18) {
+            databaseLogo(size: 64, padding: 11)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(database.name)
+                    .font(.title3.bold())
+                Text(databaseVersion(database))
+                    .font(.title2.bold())
+                    .monospacedDigit()
+                    .foregroundStyle(database.installations.contains { $0.error != nil } ? .orange : .primary)
+                Label("\(database.installations.count) 个安装", systemImage: "square.stack.3d.up.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Label(listening.title, systemImage: listening.symbol)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(listening.color)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(listening.color.opacity(0.10), in: Capsule())
+            }
+            .frame(width: 150, alignment: .leading)
+
+            HStack(spacing: 10) {
+                environmentMetric(
+                    title: "Database Discovery State",
+                    value: discovery.title,
+                    systemImage: discovery.symbol,
+                    tint: discovery.color
+                )
+                environmentMetric(
+                    title: "Database Listening State",
+                    value: listening.title,
+                    systemImage: listening.symbol,
+                    tint: listening.color
+                )
+                environmentMetric(
+                    title: "正在监听",
+                    value: "\(database.listeningCount)",
+                    systemImage: "network",
+                    tint: database.listeningCount > 0 ? .green : .secondary
+                )
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func databaseSummary(_ database: DatabaseInstallationOverview) -> some View {
+        let tint = databaseTint(database)
+        let discovery = databaseDiscoveryStyle(database.discoveryState)
+        let listening = databaseListeningStyle(database.listeningState)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                databaseLogo(size: 46, padding: 8)
+                Spacer(minLength: 0)
+                ZStack {
+                    Circle().fill(tint.opacity(0.13))
+                    Image(systemName: listening.symbol)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(tint)
+                }
+                .frame(width: 32, height: 32)
+                .accessibilityHidden(true)
+            }
+
+            Text(database.name)
+                .font(.headline)
+            Text(databaseVersion(database))
+                .font(.title2.bold())
+                .monospacedDigit()
+                .foregroundStyle(database.installations.contains { $0.error != nil } ? .orange : .primary)
+            Label(
+                database.installations.isEmpty
+                    ? "未发现 Database Installation"
+                    : "\(database.installations.count) 个安装 · \(database.listeningCount) 个正在监听",
+                systemImage: "square.stack.3d.up.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 7) {
+                databaseStatePill(
+                    discovery.title,
+                    symbol: discovery.symbol,
+                    color: discovery.color
+                )
+                databaseStatePill(
+                    listening.title,
+                    symbol: listening.symbol,
+                    color: listening.color
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .contentShape(Rectangle())
+    }
+
+    private func databaseLogo(size: CGFloat, padding: CGFloat) -> some View {
+        let color = Color(red: 0.20, green: 0.45, blue: 0.64)
+        return ZStack {
+            RoundedRectangle(cornerRadius: size > 50 ? 14 : 11, style: .continuous)
+                .fill(color.opacity(0.10))
+            Image("ServicePostgreSQLLogo")
+                .resizable()
+                .scaledToFit()
+                .padding(padding)
+        }
+        .frame(width: size, height: size)
+        .overlay {
+            RoundedRectangle(cornerRadius: size > 50 ? 14 : 11, style: .continuous)
+                .stroke(color.opacity(0.16))
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func databaseStatePill(_ title: String, symbol: String, color: Color) -> some View {
+        Label(title, systemImage: symbol)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(color.opacity(0.10), in: Capsule())
+    }
+
+    private func databaseInstallationRow(_ installation: DatabaseInstallation) -> some View {
+        let listening = databaseListeningStyle(installation.listeningState)
+        let tint: Color = installation.error == nil
+            ? listening.color
+            : .orange
+
+        return HStack(alignment: .center, spacing: 14) {
+            Image(systemName: installation.error == nil
+                ? listening.symbol
+                : "exclamationmark.circle.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 24)
+
+            Text(installation.version ?? "读取失败")
+                .font(.title3.weight(.semibold))
+                .monospacedDigit()
+                .frame(width: 90, alignment: .leading)
+
+            HStack(spacing: 5) {
+                ForEach(installation.sources, id: \.self) { source in
+                    Text(source.displayName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                }
+                Text(listening.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                copyablePath(installation.executable)
+                if let actual = installation.actualExecutable {
+                    copyablePath(actual, prefix: "实际路径")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if installation.error != nil {
+                helpIcon("该 Database Installation 已被发现，但版本读取失败或可执行文件不可用；可独立确定的 TCP 监听状态不受影响。")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(tint.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(tint.opacity(0.22))
+        }
+    }
+
+    private func databaseVersion(_ database: DatabaseInstallationOverview) -> String {
+        database.installations.first?.version
+            ?? database.installations.first?.error
+            ?? databaseDiscoveryStyle(database.discoveryState).title
+    }
+
+    private func databaseDiscoveryStyle(_ state: DatabaseDiscoveryState) -> (title: String, symbol: String, color: Color) {
+        switch state {
+        case .discovered: ("已发现", "checkmark.circle.fill", .green)
+        case .notFound: ("未发现", "circle.fill", .secondary)
+        case .unknown: ("发现状态未知", "exclamationmark.circle.fill", .orange)
+        }
+    }
+
+    private func databaseListeningStyle(_ state: DatabaseListeningState) -> (title: String, symbol: String, color: Color) {
+        switch state {
+        case .listening: ("正在监听", "checkmark.circle.fill", .green)
+        case .notListening: ("未监听", "circle.fill", .secondary)
+        case .unknown: ("监听状态未知", "exclamationmark.circle.fill", .orange)
+        }
+    }
+
+    private func databaseTint(_ database: DatabaseInstallationOverview) -> Color {
+        if database.installations.contains(where: { $0.error != nil }) { return .orange }
+        if database.discoveryState == .unknown || database.listeningState == .unknown { return .orange }
+        return database.listeningState == .listening ? .green : .secondary
+    }
+
+    private func toggleCard(_ id: String, expandedID: Binding<String?>, fullyShownID: Binding<String?>) {
+        let nextID = expandedID.wrappedValue == id ? nil : id
+        if reduceMotion {
+            expandedID.wrappedValue = nextID
+            fullyShownID.wrappedValue = nil
+        } else {
+            withAnimation(.smooth(duration: 0.32)) {
+                expandedID.wrappedValue = nextID
+                fullyShownID.wrappedValue = nil
+            }
+        }
+    }
+
+    private func toggleInstallationLimit(_ id: String, fullyShownID: Binding<String?>) {
+        let nextID = fullyShownID.wrappedValue == id ? nil : id
+        if reduceMotion {
+            fullyShownID.wrappedValue = nextID
+        } else {
+            withAnimation(.snappy(duration: 0.25, extraBounce: 0.02)) {
+                fullyShownID.wrappedValue = nextID
+            }
+        }
+    }
+
     private func localServicesSection(_ snapshot: MachineSnapshot) -> some View {
         let groups = groupLocalServicesForDisplay(snapshot.localServices)
         let portCount = groups.reduce(0) { $0 + Set($1.bindings.map(\.port)).count }
@@ -644,7 +1016,7 @@ struct ContentView: View {
             if isExpanded {
                 VStack(alignment: .leading, spacing: 16) {
                     Button {
-                        toggleRuntime(runtime.id)
+                        toggleCard(runtime.id, expandedID: $expandedRuntimeID, fullyShownID: $fullyShownRuntimeID)
                     } label: {
                         runtimeExpandedSummary(runtime)
                     }
@@ -657,7 +1029,7 @@ struct ContentView: View {
                         }
                         if runtime.installations.count > 3 {
                             Button {
-                                toggleInstallationLimit(runtime.id)
+                                toggleInstallationLimit(runtime.id, fullyShownID: $fullyShownRuntimeID)
                             } label: {
                                 Label(
                                     showsAllInstallations
@@ -685,7 +1057,7 @@ struct ContentView: View {
                         runtimeSummary(runtime)
                     } else {
                         Button {
-                            toggleRuntime(runtime.id)
+                            toggleCard(runtime.id, expandedID: $expandedRuntimeID, fullyShownID: $fullyShownRuntimeID)
                         } label: {
                             runtimeSummary(runtime)
                         }
@@ -915,30 +1287,6 @@ struct ContentView: View {
         case "Ruby": ("RuntimeRubyLogo", Color(red: 0.80, green: 0.20, blue: 0.18))
         case "Lua": ("RuntimeLuaLogo", Color(red: 0.17, green: 0.18, blue: 0.45))
         default: ("RuntimeNodeLogo", .secondary)
-        }
-    }
-
-    private func toggleRuntime(_ id: String) {
-        let nextID = expandedRuntimeID == id ? nil : id
-        if reduceMotion {
-            expandedRuntimeID = nextID
-            fullyShownRuntimeID = nil
-        } else {
-            withAnimation(.smooth(duration: 0.32)) {
-                expandedRuntimeID = nextID
-                fullyShownRuntimeID = nil
-            }
-        }
-    }
-
-    private func toggleInstallationLimit(_ id: String) {
-        let nextID = fullyShownRuntimeID == id ? nil : id
-        if reduceMotion {
-            fullyShownRuntimeID = nextID
-        } else {
-            withAnimation(.snappy(duration: 0.25, extraBounce: 0.02)) {
-                fullyShownRuntimeID = nextID
-            }
         }
     }
 
