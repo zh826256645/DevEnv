@@ -21,7 +21,8 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 - 已完成受支持 Terminal Application 与注册 Shell Installation、Default Login Shell 的只读扫描。
 - 已完成总览、Runtime、数据库和本地服务侧边栏页面，以及按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
-- v0.1 与 v0.2 的只读扫描范围已交付；Git Tooling State 已交付 Git CLI、Git LFS、脱敏后的 User Git Configuration 与 GitHub Authentication Configuration。
+- v0.1 与 v0.2 的只读扫描范围已交付；v0.2 功能已完成，当前暂不创建版本 Tag 或 GitHub Release。
+- Git Tooling State 已交付 Git CLI、Git LFS、脱敏后的 User Git Configuration 与 GitHub Authentication Configuration。
 
 Docker、服务管理、端口管理、环境修改和诊断仍属于后续规划；现有 Environment Scan 保持只读。
 
@@ -591,9 +592,9 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 ---
 
-### v0.2
+### v0.2（功能已完成，暂未发布）
 
-**Services & Ports**
+**Services & Ports（已完成）**
 
 以只读方式展示：
 
