@@ -1,6 +1,9 @@
+import AppKit
+import Darwin
 import Foundation
 
 struct MachineSnapshot: Codable, Sendable {
+    static let currentSchemaVersion = 13
     static let localServiceTimeoutNotice = "本地服务：命令超时"
     static let localServiceFailureNotice = "本地服务：读取失败"
 
@@ -10,7 +13,10 @@ struct MachineSnapshot: Codable, Sendable {
     let localServices: [LocalServiceSnapshot]
     let path: [String]
     let runtimes: [RuntimeSnapshot]
+    let databaseInstallationOverviews: [DatabaseInstallationOverview]
     let homebrew: HomebrewSnapshot
+    let terminalApplications: [TerminalApplicationSnapshot]
+    let shellInstallations: [ShellInstallationSnapshot]
     let gitCLI: GitCLISnapshot
     let gitLFS: GitLFSSnapshot?
     let userGitConfiguration: UserGitConfigurationSnapshot?
@@ -39,12 +45,36 @@ struct ListenerBinding: Codable, Hashable, Sendable {
     }
 }
 
+enum LocalServiceAttributionKind: String, Codable, Sendable {
+    case project
+    case application
+}
+
+struct LocalServiceAttribution: Codable, Hashable, Sendable {
+    let kind: LocalServiceAttributionKind
+    let name: String
+    let path: String
+}
+
 struct LocalServiceSnapshot: Codable, Identifiable, Sendable {
     var id: Int32 { pid }
 
     let processName: String
     let pid: Int32
     let bindings: [ListenerBinding]
+    let attribution: LocalServiceAttribution?
+
+    init(
+        processName: String,
+        pid: Int32,
+        bindings: [ListenerBinding],
+        attribution: LocalServiceAttribution? = nil
+    ) {
+        self.processName = processName
+        self.pid = pid
+        self.bindings = bindings
+        self.attribution = attribution
+    }
 }
 
 struct SystemSnapshot: Codable, Sendable {
@@ -137,11 +167,77 @@ struct RuntimeSnapshot: Codable, Identifiable, Sendable {
     }
 }
 
+enum DatabaseDiscoveryState: String, Codable, Sendable {
+    case discovered
+    case notFound
+    case unknown
+}
+
+enum DatabaseListeningState: String, Codable, Sendable {
+    case listening
+    case notListening
+    case unknown
+}
+
+enum DatabaseInstallationSource: String, Codable, CaseIterable, Hashable, Sendable {
+    case path
+    case homebrew
+    case localService
+
+    var displayName: String {
+        switch self {
+        case .path: "PATH"
+        case .homebrew: "Homebrew"
+        case .localService: "本地服务"
+        }
+    }
+}
+
+struct DatabaseInstallation: Codable, Identifiable, Sendable {
+    let id: String
+    let executable: String
+    let actualExecutable: String?
+    let version: String?
+    let error: String?
+    let sources: [DatabaseInstallationSource]
+    let listeningState: DatabaseListeningState
+}
+
+struct DatabaseInstallationOverview: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let installations: [DatabaseInstallation]
+    let discoveryState: DatabaseDiscoveryState
+    let listeningState: DatabaseListeningState
+
+    var listeningCount: Int {
+        installations.filter { $0.listeningState == .listening }.count
+    }
+}
+
 struct HomebrewSnapshot: Codable, Sendable {
     let executable: String?
     let version: String?
     let available: Bool
     let error: String?
+}
+
+struct TerminalApplicationSnapshot: Codable, Identifiable, Sendable {
+    var id: String { bundleIdentifier }
+
+    let name: String
+    let version: String?
+    let bundleIdentifier: String
+    let path: String
+}
+
+struct ShellInstallationSnapshot: Codable, Identifiable, Sendable {
+    var id: String { path }
+
+    let name: String
+    let path: String
+    let isDefault: Bool
+    let isAvailable: Bool
 }
 
 enum GitCLIState: String, Codable, Sendable {
@@ -218,15 +314,26 @@ struct DiskSpace: Sendable {
     let freeBytes: UInt64?
 }
 
+struct InstalledApplication: Sendable {
+    let name: String
+    let version: String?
+    let path: String
+}
+
 protocol MachineAccess: Sendable {
     var environment: [String: String] { get }
     var hostName: String { get }
     var currentDirectoryPath: String { get }
+    var defaultLoginShellPath: String? { get }
     func diskSpace() -> DiskSpace
     func isExecutableFile(atPath path: String) -> Bool
     func fileExists(atPath path: String) -> Bool
     func directoryEntries(atPath path: String) throws -> [String]
+    func fileData(atPath path: String) throws -> Data
     func resolvingSymlinksInPath(_ path: String) -> String
+    func executablePath(forPID pid: Int32) throws -> String
+    func workingDirectoryPath(forPID pid: Int32) throws -> String
+    func application(bundleIdentifier: String) -> InstalledApplication?
     func command(executable: String, arguments: [String]) -> MachineCommandResult
 }
 
@@ -234,6 +341,10 @@ struct LiveMachineAccess: MachineAccess {
     var environment: [String: String] { ProcessInfo.processInfo.environment }
     var hostName: String { ProcessInfo.processInfo.hostName }
     var currentDirectoryPath: String { FileManager.default.currentDirectoryPath }
+    var defaultLoginShellPath: String? {
+        guard let shell = getpwuid(getuid())?.pointee.pw_shell else { return nil }
+        return String(cString: shell)
+    }
 
     func diskSpace() -> DiskSpace {
         let attributes = (try? FileManager.default.attributesOfFileSystem(forPath: "/")) ?? [:]
@@ -255,8 +366,44 @@ struct LiveMachineAccess: MachineAccess {
         try FileManager.default.contentsOfDirectory(atPath: path)
     }
 
+    func fileData(atPath path: String) throws -> Data {
+        try Data(contentsOf: URL(fileURLWithPath: path))
+    }
+
     func resolvingSymlinksInPath(_ path: String) -> String {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
+
+    func executablePath(forPID pid: Int32) throws -> String {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    func workingDirectoryPath(forPID pid: Int32) throws -> String {
+        var info = proc_vnodepathinfo()
+        let size = MemoryLayout<proc_vnodepathinfo>.stride
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, Int32(size)) == size else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return withUnsafePointer(to: &info.pvi_cdir.vip_path) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+        }
+    }
+
+    func application(bundleIdentifier: String) -> InstalledApplication? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier),
+              let bundle = Bundle(url: url) else { return nil }
+        let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+            ?? url.deletingPathExtension().lastPathComponent
+        return InstalledApplication(
+            name: name,
+            version: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            path: url.standardizedFileURL.path
+        )
     }
 
     func command(executable: String, arguments: [String]) -> MachineCommandResult {
@@ -303,11 +450,64 @@ struct EnvironmentScanner: Sendable {
         let homebrewFormula: String
     }
 
+    private struct TerminalDefinition: Sendable {
+        let name: String
+        let bundleIdentifier: String
+    }
+
     private struct RuntimeProviderInstallation: Sendable {
         let runtimeID: String
         let version: String
         let executable: String
         let source: RuntimeInstallationSource
+    }
+
+    private struct LocalServiceScan {
+        let services: [LocalServiceSnapshot]
+        let executablePaths: [Int32: String]
+        let executablePathFailures: Set<Int32>
+        let complete: Bool
+    }
+
+    private struct HomebrewFormulaInstallation {
+        let formula: String
+        let versions: [String]
+    }
+
+    private struct HomebrewInventory {
+        let formulas: [HomebrewFormulaInstallation]
+        let cellar: String?
+        let failureReason: String?
+
+        static let empty = HomebrewInventory(formulas: [], cellar: nil, failureReason: nil)
+    }
+
+    private struct DatabaseCandidate {
+        let executable: String
+        let actualExecutable: String
+        var version: String?
+        var sources: [DatabaseInstallationSource]
+        var error: String?
+    }
+
+    private enum MySQLFamilyDatabase: CaseIterable {
+        case mysql
+        case mariadb
+
+        var id: String { self == .mysql ? "mysql" : "mariadb" }
+        var name: String { self == .mysql ? "MySQL" : "MariaDB" }
+        var formula: String { self == .mysql ? "mysql" : "mariadb" }
+        var executableNames: [String] { self == .mysql ? ["mysqld"] : ["mariadbd", "mysqld"] }
+    }
+
+    private enum MongoDBOrRedis: CaseIterable {
+        case mongodb
+        case redis
+
+        var id: String { self == .mongodb ? "mongodb" : "redis" }
+        var name: String { self == .mongodb ? "MongoDB" : "Redis" }
+        var executable: String { self == .mongodb ? "mongod" : "redis-server" }
+        var formula: String { self == .mongodb ? "mongodb-community" : "redis" }
     }
 
     private struct MiseInstallation: Decodable {
@@ -333,6 +533,16 @@ struct EnvironmentScanner: Sendable {
         RuntimeDefinition(id: "rust", name: "Rust", executable: "rustc", arguments: ["--version"], homebrewFormula: "rust"),
         RuntimeDefinition(id: "ruby", name: "Ruby", executable: "ruby", arguments: ["--version"], homebrewFormula: "ruby"),
         RuntimeDefinition(id: "lua", name: "Lua", executable: "lua", arguments: ["-v"], homebrewFormula: "lua"),
+    ]
+
+    private let terminalDefinitions = [
+        TerminalDefinition(name: "Terminal", bundleIdentifier: "com.apple.Terminal"),
+        TerminalDefinition(name: "iTerm2", bundleIdentifier: "com.googlecode.iterm2"),
+        TerminalDefinition(name: "Warp", bundleIdentifier: "dev.warp.Warp-Stable"),
+        TerminalDefinition(name: "Ghostty", bundleIdentifier: "com.mitchellh.ghostty"),
+        TerminalDefinition(name: "Alacritty", bundleIdentifier: "org.alacritty"),
+        TerminalDefinition(name: "kitty", bundleIdentifier: "net.kovidgoyal.kitty"),
+        TerminalDefinition(name: "WezTerm", bundleIdentifier: "com.github.wez.wezterm"),
     ]
 
     private let machine: any MachineAccess
@@ -361,9 +571,11 @@ struct EnvironmentScanner: Sendable {
             diskTotalBytes: disk.totalBytes,
             diskFreeBytes: disk.freeBytes
         )
-        let localServices = scanLocalServices(issues: &issues)
+        let localServiceScan = scanLocalServices(issues: &issues)
 
         let homebrew = scanHomebrew(path: path, issues: &issues)
+        let terminalApplications = scanTerminalApplications()
+        let shellInstallations = scanShellInstallations(notices: &issues)
         let gitCLI = scanGitCLI(path: path, notices: &issues)
         let gitAvailable = gitCLI.state == .available
         let gitLFS = gitAvailable ? scanGitLFS(path: path, notices: &issues) : nil
@@ -377,9 +589,10 @@ struct EnvironmentScanner: Sendable {
             scanGitCredentialHelpers(executable: $0, notices: &issues)
         } : nil
         let githubAuthenticationConfiguration = scanGitHubAuthenticationConfiguration(path: path, notices: &issues)
-        let homebrewInstallations = homebrew.available ? homebrew.executable.map {
-            scanHomebrewRuntimes(executable: $0, issues: &issues)
-        } ?? [] : []
+        let homebrewInventory = homebrew.available ? homebrew.executable.map {
+            scanHomebrewInventory(executable: $0, issues: &issues)
+        } ?? .empty : .empty
+        let homebrewInstallations = scanHomebrewRuntimes(inventory: homebrewInventory)
         let miseInstallations = scanMiseRuntimes(path: path, issues: &issues)
         let nvmInstallations = scanNVMInstallations(issues: &issues)
         let uvInstallations = scanUVInstallations(path: path, issues: &issues)
@@ -397,14 +610,36 @@ struct EnvironmentScanner: Sendable {
                 issues: &issues
             )
         }
+        let databaseInstallationOverviews = [scanPostgreSQL(
+            path: path,
+            homebrew: homebrewInventory,
+            homebrewAvailabilityFailed: homebrew.error != nil,
+            localServices: localServiceScan,
+            issues: &issues
+        )] + scanMySQLFamily(
+            path: path,
+            homebrew: homebrewInventory,
+            homebrewAvailabilityFailed: homebrew.error != nil,
+            localServices: localServiceScan,
+            issues: &issues
+        ) + scanMongoDBAndRedis(
+            path: path,
+            homebrew: homebrewInventory,
+            homebrewAvailabilityFailed: homebrew.error != nil,
+            localServices: localServiceScan,
+            notices: &issues
+        )
         let snapshot = MachineSnapshot(
-            schemaVersion: 8,
+            schemaVersion: MachineSnapshot.currentSchemaVersion,
             scannedAt: Date(),
             system: system,
-            localServices: localServices,
+            localServices: localServiceScan.services,
             path: path,
             runtimes: runtimes,
+            databaseInstallationOverviews: databaseInstallationOverviews,
             homebrew: homebrew,
+            terminalApplications: terminalApplications,
+            shellInstallations: shellInstallations,
             gitCLI: gitCLI,
             gitLFS: gitLFS,
             userGitConfiguration: userGitConfiguration,
@@ -417,6 +652,65 @@ struct EnvironmentScanner: Sendable {
             snapshot: snapshot,
             canPersist: system.macOSVersion != nil && system.architecture != nil
         )
+    }
+
+    private func scanTerminalApplications() -> [TerminalApplicationSnapshot] {
+        terminalDefinitions.compactMap { definition in
+            machine.application(bundleIdentifier: definition.bundleIdentifier).map {
+                TerminalApplicationSnapshot(
+                    name: $0.name.isEmpty ? definition.name : $0.name,
+                    version: $0.version,
+                    bundleIdentifier: definition.bundleIdentifier,
+                    path: standardizedPath($0.path)
+                )
+            }
+        }
+    }
+
+    private func scanShellInstallations(notices: inout [String]) -> [ShellInstallationSnapshot] {
+        let defaultPath = machine.defaultLoginShellPath
+            .flatMap { $0.isEmpty ? nil : $0 }
+            .map(standardizedPath)
+        if defaultPath == nil {
+            notices.append("Default Login Shell：读取失败")
+        }
+
+        var registeredPaths: [String] = []
+        var registryWasRead = false
+        do {
+            guard let contents = String(data: try machine.fileData(atPath: "/etc/shells"), encoding: .utf8) else {
+                throw CocoaError(.fileReadInapplicableStringEncoding)
+            }
+            registeredPaths = contents.split(whereSeparator: \.isNewline).compactMap { line in
+                let path = line.trimmingCharacters(in: .whitespaces)
+                guard path.hasPrefix("/"), !path.hasPrefix("#") else { return nil }
+                return standardizedPath(path)
+            }
+            registryWasRead = true
+        } catch {
+            notices.append("Shell Installation：读取失败")
+        }
+
+        let registeredPathSet = Set(registeredPaths)
+        var seen = Set<String>()
+        let orderedPaths = ([defaultPath].compactMap { $0 } + registeredPaths).filter { seen.insert($0).inserted }
+        let installations = orderedPaths.compactMap { path -> ShellInstallationSnapshot? in
+            let isDefault = path == defaultPath
+            let isExecutable = machine.isExecutableFile(atPath: path)
+            let isAvailable = isExecutable && (!isDefault || !registryWasRead || registeredPathSet.contains(path))
+            guard isDefault || isAvailable else { return nil }
+            return ShellInstallationSnapshot(
+                name: URL(fileURLWithPath: path).lastPathComponent,
+                path: path,
+                isDefault: isDefault,
+                isAvailable: isAvailable
+            )
+        }
+        if let defaultPath,
+           !machine.isExecutableFile(atPath: defaultPath) || (registryWasRead && !registeredPathSet.contains(defaultPath)) {
+            notices.append("Default Login Shell：不可用")
+        }
+        return installations
     }
 
     private func scanGitCLI(path: [String], notices: inout [String]) -> GitCLISnapshot {
@@ -678,19 +972,19 @@ struct EnvironmentScanner: Sendable {
         return version
     }
 
-    private func scanLocalServices(issues: inout [String]) -> [LocalServiceSnapshot] {
+    private func scanLocalServices(issues: inout [String]) -> LocalServiceScan {
         let result = machine.command(
             executable: "/usr/sbin/lsof",
             arguments: ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcftn"]
         )
         if result.timedOut {
             issues.append(MachineSnapshot.localServiceTimeoutNotice)
-            return []
+            return LocalServiceScan(services: [], executablePaths: [:], executablePathFailures: [], complete: false)
         }
         let hasNoMatches = result.status == 1 && result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard result.status == 0 || hasNoMatches else {
             issues.append(MachineSnapshot.localServiceFailureNotice)
-            return []
+            return LocalServiceScan(services: [], executablePaths: [:], executablePathFailures: [], complete: false)
         }
 
         var services: [Int32: LocalServiceAccumulator] = [:]
@@ -716,7 +1010,7 @@ struct EnvironmentScanner: Sendable {
             }
         }
 
-        return services.compactMap { pid, service -> LocalServiceSnapshot? in
+        var snapshots = services.compactMap { pid, service -> LocalServiceSnapshot? in
             guard !service.processName.isEmpty, !service.bindings.isEmpty else { return nil }
             let bindings = service.bindings.sorted {
                 if $0.port != $1.port { return $0.port < $1.port }
@@ -729,6 +1023,32 @@ struct EnvironmentScanner: Sendable {
             if $0.processName != $1.processName { return $0.processName < $1.processName }
             return $0.pid < $1.pid
         }
+        var executablePaths: [Int32: String] = [:]
+        var executablePathFailures: Set<Int32> = []
+        for service in snapshots {
+            do {
+                executablePaths[service.pid] = standardizedPath(try machine.executablePath(forPID: service.pid))
+            } catch {
+                executablePathFailures.insert(service.pid)
+            }
+        }
+        snapshots = snapshots.map { service in
+            LocalServiceSnapshot(
+                processName: service.processName,
+                pid: service.pid,
+                bindings: service.bindings,
+                attribution: localServiceAttribution(
+                    for: service,
+                    executablePath: executablePaths[service.pid]
+                )
+            )
+        }
+        return LocalServiceScan(
+            services: snapshots,
+            executablePaths: executablePaths,
+            executablePathFailures: executablePathFailures,
+            complete: true
+        )
     }
 
     private func listenerBinding(from name: String, family: ListenerAddressFamily) -> ListenerBinding? {
@@ -739,6 +1059,699 @@ struct EnvironmentScanner: Sendable {
         if address.first == "[", address.last == "]" { address = String(address.dropFirst().dropLast()) }
         guard !address.isEmpty else { return nil }
         return ListenerBinding(address: address, port: port, family: family)
+    }
+
+    private func localServiceAttribution(
+        for service: LocalServiceSnapshot,
+        executablePath: String?
+    ) -> LocalServiceAttribution? {
+        let processName = service.processName.lowercased()
+        guard processName.hasPrefix("python") || processName == "node" || processName == "nodejs" else { return nil }
+        if let workingDirectory = try? machine.workingDirectoryPath(forPID: service.pid),
+           let projectRoots = projectRoots(startingAt: workingDirectory, processName: processName) {
+            return LocalServiceAttribution(
+                kind: .project,
+                name: projectName(at: projectRoots.nameRoot, processName: processName),
+                path: projectRoots.serviceRoot
+            )
+        }
+        guard let executablePath, let applicationPath = containingApplicationPath(for: executablePath) else { return nil }
+        return LocalServiceAttribution(
+            kind: .application,
+            name: URL(fileURLWithPath: applicationPath).deletingPathExtension().lastPathComponent,
+            path: applicationPath
+        )
+    }
+
+    private func containingApplicationPath(for executablePath: String) -> String? {
+        var candidate = URL(fileURLWithPath: executablePath)
+        while candidate.path != "/" {
+            if candidate.pathExtension.caseInsensitiveCompare("app") == .orderedSame { return candidate.path }
+            candidate.deleteLastPathComponent()
+        }
+        return nil
+    }
+
+    private func projectRoots(startingAt path: String, processName: String) -> (nameRoot: String, serviceRoot: String)? {
+        var directory = standardizedPath(path)
+        var nearestRoot: String?
+        let prefersGitRoot = processName == "node" || processName == "nodejs"
+        while directory != "/" {
+            let hasGitRoot = machine.fileExists(atPath: directory + "/.git")
+            let hasPackageRoot = machine.fileExists(atPath: directory + "/package.json")
+            if prefersGitRoot {
+                if hasPackageRoot { nearestRoot = nearestRoot ?? directory }
+                if hasGitRoot { return (directory, nearestRoot ?? directory) }
+            } else if hasGitRoot
+                || machine.fileExists(atPath: directory + "/pyproject.toml")
+                || hasPackageRoot {
+                return (directory, directory)
+            }
+            let parent = URL(fileURLWithPath: directory).deletingLastPathComponent().path
+            guard parent != directory else { return nearestRoot.map { ($0, $0) } }
+            directory = parent
+        }
+        return nearestRoot.map { ($0, $0) }
+    }
+
+    private func projectName(at root: String, processName: String) -> String {
+        if !processName.hasPrefix("python"), machine.fileExists(atPath: root + "/.git") {
+            return URL(fileURLWithPath: root).lastPathComponent
+        }
+        let manifest = processName.hasPrefix("python") ? root + "/pyproject.toml" : root + "/package.json"
+        if let data = try? machine.fileData(atPath: manifest) {
+            if processName.hasPrefix("python"), let name = pep621ProjectName(from: data) { return name }
+            if !processName.hasPrefix("python"),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let name = object["name"] as? String,
+               !name.isEmpty {
+                return name
+            }
+        }
+        return URL(fileURLWithPath: root).lastPathComponent
+    }
+
+    private func pep621ProjectName(from data: Data) -> String? {
+        guard let contents = String(data: data, encoding: .utf8) else { return nil }
+        var isTopLevel = true
+        var isProjectSection = false
+        for rawLine in contents.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            let header = line.split(separator: "#", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces) ?? ""
+            if header.hasPrefix("["), header.hasSuffix("]") {
+                isTopLevel = false
+                isProjectSection = header == "[project]"
+                continue
+            }
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].filter { !$0.isWhitespace }
+            guard (isProjectSection && key == "name") || (isTopLevel && key == "project.name") else { continue }
+            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            guard let quote = value.first, quote == "\"" || quote == "'",
+                  let end = value.dropFirst().firstIndex(of: quote) else { return nil }
+            let name = String(value[value.index(after: value.startIndex)..<end])
+            return name.isEmpty ? nil : name
+        }
+        return nil
+    }
+
+    private func scanPostgreSQL(
+        path: [String],
+        homebrew: HomebrewInventory,
+        homebrewAvailabilityFailed: Bool,
+        localServices: LocalServiceScan,
+        issues: inout [String]
+    ) -> DatabaseInstallationOverview {
+        var candidates: [DatabaseCandidate] = []
+
+        func addCandidate(
+            executable: String,
+            actualExecutable: String,
+            version: String?,
+            source: DatabaseInstallationSource,
+            error: String?
+        ) {
+            mergeDatabaseCandidate(DatabaseCandidate(
+                executable: executable,
+                actualExecutable: actualExecutable,
+                version: version,
+                sources: [source],
+                error: error
+            ), into: &candidates)
+        }
+
+        func readVersion(executable: String) -> (String?, String?) {
+            let result = machine.command(executable: executable, arguments: ["--version"])
+            guard result.status == 0, !result.timedOut, let version = postgreSQLVersion(from: result.output) else {
+                return (nil, "版本读取失败")
+            }
+            return (version, nil)
+        }
+
+        for directory in path {
+            let executable = absoluteExecutable("postgres", directory: directory)
+            guard machine.isExecutableFile(atPath: executable) else { continue }
+            let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+            guard !candidates.contains(where: { $0.actualExecutable == actual }) else { continue }
+            let (version, error) = readVersion(executable: executable)
+            if let error { issues.append("PostgreSQL：\(error)（\(executable)）") }
+            addCandidate(executable: executable, actualExecutable: actual, version: version, source: .path, error: error)
+        }
+
+        if let cellar = homebrew.cellar {
+            for formula in homebrew.formulas where formula.formula == "postgresql" || formula.formula.hasPrefix("postgresql@") {
+                for version in formula.versions {
+                    let executable = URL(fileURLWithPath: cellar, isDirectory: true)
+                        .appendingPathComponent(formula.formula, isDirectory: true)
+                        .appendingPathComponent(version, isDirectory: true)
+                        .appendingPathComponent("bin", isDirectory: true)
+                        .appendingPathComponent("postgres")
+                        .path
+                    let available = machine.isExecutableFile(atPath: executable)
+                    let actual = available
+                        ? standardizedPath(machine.resolvingSymlinksInPath(executable))
+                        : standardizedPath(executable)
+                    let error = available ? nil : "可执行文件不可用"
+                    if let error { issues.append("PostgreSQL：\(error)（\(executable)）") }
+                    addCandidate(
+                        executable: executable,
+                        actualExecutable: actual,
+                        version: version,
+                        source: .homebrew,
+                        error: error
+                    )
+                }
+            }
+        }
+
+        let hasPostgreSQLFormula = homebrew.formulas.contains {
+            $0.formula == "postgresql" || $0.formula.hasPrefix("postgresql@")
+        }
+        let homebrewProviderFailed = homebrewAvailabilityFailed
+            || (homebrew.failureReason != nil && (homebrew.formulas.isEmpty || hasPostgreSQLFormula))
+        if homebrewProviderFailed, let failure = homebrew.failureReason {
+            issues.append("PostgreSQL Database Provider：Homebrew \(failure)")
+        } else if homebrewProviderFailed {
+            issues.append("PostgreSQL Database Provider：Homebrew 读取失败")
+        }
+
+        var listeningPaths: Set<String> = []
+        var relevantPathFailure = false
+        for service in localServices.services {
+            if let executable = localServices.executablePaths[service.pid] {
+                let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+                guard URL(fileURLWithPath: actual).lastPathComponent == "postgres" else { continue }
+                listeningPaths.insert(actual)
+                if !candidates.contains(where: { $0.actualExecutable == actual }) {
+                    let (version, error) = readVersion(executable: actual)
+                    if let error { issues.append("PostgreSQL：\(error)（\(actual)）") }
+                    addCandidate(
+                        executable: actual,
+                        actualExecutable: actual,
+                        version: version,
+                        source: .localService,
+                        error: error
+                    )
+                } else {
+                    addCandidate(
+                        executable: actual,
+                        actualExecutable: actual,
+                        version: nil,
+                        source: .localService,
+                        error: nil
+                    )
+                }
+            } else if service.processName.caseInsensitiveCompare("postgres") == .orderedSame,
+                      localServices.executablePathFailures.contains(service.pid) {
+                relevantPathFailure = true
+                issues.append("PostgreSQL：进程路径读取失败（PID \(service.pid)）")
+            }
+        }
+
+        let installations = candidates.map { candidate in
+            let listeningState: DatabaseListeningState = if listeningPaths.contains(candidate.actualExecutable) {
+                .listening
+            } else if !localServices.complete || relevantPathFailure {
+                .unknown
+            } else {
+                .notListening
+            }
+            return DatabaseInstallation(
+                id: candidate.actualExecutable,
+                executable: candidate.executable,
+                actualExecutable: candidate.executable == candidate.actualExecutable ? nil : candidate.actualExecutable,
+                version: candidate.version,
+                error: candidate.error,
+                sources: candidate.sources,
+                listeningState: listeningState
+            )
+        }
+        let providerFailed = homebrewProviderFailed || !localServices.complete || relevantPathFailure
+        let discoveryState: DatabaseDiscoveryState = if !installations.isEmpty {
+            .discovered
+        } else if providerFailed {
+            .unknown
+        } else {
+            .notFound
+        }
+        let listeningState: DatabaseListeningState = if installations.contains(where: { $0.listeningState == .listening }) {
+            .listening
+        } else if installations.contains(where: { $0.listeningState == .unknown }) || providerFailed {
+            .unknown
+        } else {
+            .notListening
+        }
+        return DatabaseInstallationOverview(
+            id: "postgresql",
+            name: "PostgreSQL",
+            installations: installations,
+            discoveryState: discoveryState,
+            listeningState: listeningState
+        )
+    }
+
+    private func postgreSQLVersion(from output: String) -> String? {
+        guard let value = normalizedVersion(output) else { return nil }
+        let prefix = "postgres (PostgreSQL) "
+        return value.hasPrefix(prefix) ? String(value.dropFirst(prefix.count)) : nil
+    }
+
+    private func mergeDatabaseCandidate(
+        _ candidate: DatabaseCandidate,
+        into candidates: inout [DatabaseCandidate]
+    ) {
+        guard let index = candidates.firstIndex(where: { $0.actualExecutable == candidate.actualExecutable }) else {
+            candidates.append(candidate)
+            return
+        }
+        candidates[index].version = candidates[index].version ?? candidate.version
+        candidates[index].error = candidates[index].version == nil
+            ? candidates[index].error ?? candidate.error
+            : nil
+        let sources = candidates[index].sources + candidate.sources
+        candidates[index].sources = DatabaseInstallationSource.allCases.filter(Set(sources).contains)
+    }
+
+    private func scanMongoDBAndRedis(
+        path: [String],
+        homebrew: HomebrewInventory,
+        homebrewAvailabilityFailed: Bool,
+        localServices: LocalServiceScan,
+        notices: inout [String]
+    ) -> [DatabaseInstallationOverview] {
+        MongoDBOrRedis.allCases.map { database in
+            var candidates: [DatabaseCandidate] = []
+
+            func addCandidate(
+                executable: String,
+                actualExecutable: String,
+                version: String?,
+                source: DatabaseInstallationSource,
+                notice: String?
+            ) {
+                mergeDatabaseCandidate(DatabaseCandidate(
+                    executable: executable,
+                    actualExecutable: actualExecutable,
+                    version: version,
+                    sources: [source],
+                    error: notice
+                ), into: &candidates)
+            }
+
+            func readVersion(executable: String) -> (String?, String?) {
+                let result = machine.command(executable: executable, arguments: ["--version"])
+                let version = mongoDBOrRedisVersion(from: result.output, database: database)
+                return result.status == 0 && !result.timedOut && version != nil
+                    ? (version, nil)
+                    : (nil, "版本读取失败")
+            }
+
+            for directory in path {
+                let executable = absoluteExecutable(database.executable, directory: directory)
+                guard machine.isExecutableFile(atPath: executable) else { continue }
+                let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+                guard !candidates.contains(where: { $0.actualExecutable == actual }) else { continue }
+                let (version, notice) = readVersion(executable: executable)
+                if let notice { notices.append("\(database.name)：\(notice)（\(executable)）") }
+                addCandidate(
+                    executable: executable,
+                    actualExecutable: actual,
+                    version: version,
+                    source: .path,
+                    notice: notice
+                )
+            }
+
+            if let cellar = homebrew.cellar {
+                for formula in homebrew.formulas where formula.formula == database.formula
+                    || formula.formula.hasPrefix("\(database.formula)@") {
+                    for version in formula.versions {
+                        let executable = URL(fileURLWithPath: cellar, isDirectory: true)
+                            .appendingPathComponent(formula.formula, isDirectory: true)
+                            .appendingPathComponent(version, isDirectory: true)
+                            .appendingPathComponent("bin", isDirectory: true)
+                            .appendingPathComponent(database.executable)
+                            .path
+                        let available = machine.isExecutableFile(atPath: executable)
+                        let actual = available
+                            ? standardizedPath(machine.resolvingSymlinksInPath(executable))
+                            : standardizedPath(executable)
+                        let notice = available ? nil : "可执行文件不可用"
+                        if let notice { notices.append("\(database.name)：\(notice)（\(executable)）") }
+                        addCandidate(
+                            executable: executable,
+                            actualExecutable: actual,
+                            version: version,
+                            source: .homebrew,
+                            notice: notice
+                        )
+                    }
+                }
+            }
+
+            let hasFormula = homebrew.formulas.contains {
+                $0.formula == database.formula || $0.formula.hasPrefix("\(database.formula)@")
+            }
+            let homebrewProviderFailed = homebrewAvailabilityFailed
+                || (homebrew.failureReason != nil && (homebrew.formulas.isEmpty || hasFormula))
+            if homebrewProviderFailed, let failure = homebrew.failureReason {
+                notices.append("\(database.name) Database Provider：Homebrew \(failure)")
+            } else if homebrewProviderFailed {
+                notices.append("\(database.name) Database Provider：Homebrew 读取失败")
+            }
+
+            var listeningPaths: Set<String> = []
+            var relevantPathFailure = false
+            for service in localServices.services {
+                guard let executable = localServices.executablePaths[service.pid] else {
+                    if service.processName.caseInsensitiveCompare(database.executable) == .orderedSame,
+                       localServices.executablePathFailures.contains(service.pid) {
+                        relevantPathFailure = true
+                        notices.append("\(database.name)：进程路径读取失败（PID \(service.pid)）")
+                    }
+                    continue
+                }
+                let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+                guard URL(fileURLWithPath: actual).lastPathComponent.caseInsensitiveCompare(database.executable) == .orderedSame else {
+                    continue
+                }
+                listeningPaths.insert(actual)
+                if candidates.contains(where: { $0.actualExecutable == actual }) {
+                    addCandidate(
+                        executable: actual,
+                        actualExecutable: actual,
+                        version: nil,
+                        source: .localService,
+                        notice: nil
+                    )
+                } else {
+                    let (version, notice) = readVersion(executable: actual)
+                    if let notice { notices.append("\(database.name)：\(notice)（\(actual)）") }
+                    addCandidate(
+                        executable: actual,
+                        actualExecutable: actual,
+                        version: version,
+                        source: .localService,
+                        notice: notice
+                    )
+                }
+            }
+
+            let installations = candidates.map { candidate in
+                let listeningState: DatabaseListeningState = if listeningPaths.contains(candidate.actualExecutable) {
+                    .listening
+                } else if !localServices.complete || relevantPathFailure {
+                    .unknown
+                } else {
+                    .notListening
+                }
+                return DatabaseInstallation(
+                    id: candidate.actualExecutable,
+                    executable: candidate.executable,
+                    actualExecutable: candidate.executable == candidate.actualExecutable ? nil : candidate.actualExecutable,
+                    version: candidate.version,
+                    error: candidate.error,
+                    sources: candidate.sources,
+                    listeningState: listeningState
+                )
+            }
+            let providerFailed = homebrewProviderFailed || !localServices.complete || relevantPathFailure
+            let discoveryState: DatabaseDiscoveryState = if !installations.isEmpty {
+                .discovered
+            } else if providerFailed {
+                .unknown
+            } else {
+                .notFound
+            }
+            let listeningState: DatabaseListeningState = if installations.contains(where: { $0.listeningState == .listening }) {
+                .listening
+            } else if installations.contains(where: { $0.listeningState == .unknown }) || providerFailed {
+                .unknown
+            } else {
+                .notListening
+            }
+            return DatabaseInstallationOverview(
+                id: database.id,
+                name: database.name,
+                installations: installations,
+                discoveryState: discoveryState,
+                listeningState: listeningState
+            )
+        }
+    }
+
+    private func mongoDBOrRedisVersion(from output: String, database: MongoDBOrRedis) -> String? {
+        guard let value = normalizedVersion(output) else { return nil }
+        switch database {
+        case .mongodb:
+            let prefix = "db version v"
+            guard value.hasPrefix(prefix) else { return nil }
+            return value.dropFirst(prefix.count).split(whereSeparator: \.isWhitespace).first.map(String.init)
+        case .redis:
+            return value.split(whereSeparator: \.isWhitespace)
+                .first { $0.hasPrefix("v=") }
+                .map { String($0.dropFirst(2)) }
+        }
+    }
+
+    private func scanMySQLFamily(
+        path: [String],
+        homebrew: HomebrewInventory,
+        homebrewAvailabilityFailed: Bool,
+        localServices: LocalServiceScan,
+        issues: inout [String]
+    ) -> [DatabaseInstallationOverview] {
+        var candidates: [MySQLFamilyDatabase: [DatabaseCandidate]] = [:]
+        var listeningPaths: [MySQLFamilyDatabase: Set<String>] = [:]
+        var relevantPathFailures: Set<MySQLFamilyDatabase> = []
+        var classificationFailures: Set<MySQLFamilyDatabase> = []
+        var reportedAmbiguousPaths: Set<String> = []
+
+        func addCandidate(
+            database: MySQLFamilyDatabase,
+            executable: String,
+            actualExecutable: String,
+            version: String?,
+            source: DatabaseInstallationSource,
+            error: String?
+        ) {
+            var databaseCandidates = candidates[database, default: []]
+            mergeDatabaseCandidate(DatabaseCandidate(
+                executable: executable,
+                actualExecutable: actualExecutable,
+                version: version,
+                sources: [source],
+                error: error
+            ), into: &databaseCandidates)
+            candidates[database] = databaseCandidates
+        }
+
+        for directory in path {
+            for executableName in ["mysqld", "mariadbd"] {
+                let executable = absoluteExecutable(executableName, directory: directory)
+                guard machine.isExecutableFile(atPath: executable) else { continue }
+                let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+                let knownDatabase: MySQLFamilyDatabase? = URL(fileURLWithPath: actual).lastPathComponent == "mariadbd"
+                    ? .mariadb
+                    : nil
+                let result = machine.command(executable: executable, arguments: ["--version"])
+                let details = mysqlFamilyVersion(from: result, knownDatabase: knownDatabase)
+                guard let database = details.database else {
+                    classificationFailures.formUnion(MySQLFamilyDatabase.allCases)
+                    if reportedAmbiguousPaths.insert(actual).inserted {
+                        issues.append("MySQL/MariaDB：无法分类 mysqld（\(executable)）")
+                    }
+                    continue
+                }
+                if let error = details.error { issues.append("\(database.name)：\(error)（\(executable)）") }
+                addCandidate(
+                    database: database,
+                    executable: executable,
+                    actualExecutable: actual,
+                    version: details.version,
+                    source: .path,
+                    error: details.error
+                )
+            }
+        }
+
+        if let cellar = homebrew.cellar {
+            for database in MySQLFamilyDatabase.allCases {
+                for formula in homebrew.formulas where formula.formula == database.formula
+                    || formula.formula.hasPrefix("\(database.formula)@") {
+                    for version in formula.versions {
+                        let directory = URL(fileURLWithPath: cellar, isDirectory: true)
+                            .appendingPathComponent(formula.formula, isDirectory: true)
+                            .appendingPathComponent(version, isDirectory: true)
+                            .appendingPathComponent("bin", isDirectory: true)
+                        let executablePaths = database.executableNames.map {
+                            directory.appendingPathComponent($0).path
+                        }
+                        let executable = executablePaths.first(where: { machine.isExecutableFile(atPath: $0) })
+                            ?? executablePaths[0]
+                        let available = machine.isExecutableFile(atPath: executable)
+                        let actual = available
+                            ? standardizedPath(machine.resolvingSymlinksInPath(executable))
+                            : standardizedPath(executable)
+                        let error = available ? nil : "可执行文件不可用"
+                        if let error { issues.append("\(database.name)：\(error)（\(executable)）") }
+                        addCandidate(
+                            database: database,
+                            executable: executable,
+                            actualExecutable: actual,
+                            version: version,
+                            source: .homebrew,
+                            error: error
+                        )
+                    }
+                }
+            }
+        }
+
+        var homebrewProviderFailures: Set<MySQLFamilyDatabase> = []
+        for database in MySQLFamilyDatabase.allCases {
+            let hasFormula = homebrew.formulas.contains {
+                $0.formula == database.formula || $0.formula.hasPrefix("\(database.formula)@")
+            }
+            let providerFailed = homebrewAvailabilityFailed
+                || (homebrew.failureReason != nil && (homebrew.formulas.isEmpty || hasFormula))
+            guard providerFailed else { continue }
+            homebrewProviderFailures.insert(database)
+            if let failure = homebrew.failureReason {
+                issues.append("\(database.name) Database Provider：Homebrew \(failure)")
+            } else {
+                issues.append("\(database.name) Database Provider：Homebrew 读取失败")
+            }
+        }
+
+        for service in localServices.services {
+            guard let executable = localServices.executablePaths[service.pid] else {
+                guard localServices.executablePathFailures.contains(service.pid) else { continue }
+                switch service.processName.lowercased() {
+                case "mariadbd":
+                    relevantPathFailures.insert(.mariadb)
+                    issues.append("MariaDB：进程路径读取失败（PID \(service.pid)）")
+                case "mysqld":
+                    relevantPathFailures.formUnion(MySQLFamilyDatabase.allCases)
+                    issues.append("MySQL/MariaDB：进程路径读取失败（PID \(service.pid)）")
+                default:
+                    continue
+                }
+                continue
+            }
+
+            let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+            let executableName = URL(fileURLWithPath: actual).lastPathComponent.lowercased()
+            guard executableName == "mysqld" || executableName == "mariadbd" else { continue }
+            let existingDatabase = MySQLFamilyDatabase.allCases.first {
+                candidates[$0, default: []].contains { $0.actualExecutable == actual }
+            }
+            let details: (database: MySQLFamilyDatabase?, version: String?, error: String?)
+            if let existingDatabase {
+                details = (existingDatabase, nil, nil)
+            } else {
+                let knownDatabase: MySQLFamilyDatabase? = executableName == "mariadbd" ? .mariadb : nil
+                details = mysqlFamilyVersion(
+                    from: machine.command(executable: actual, arguments: ["--version"]),
+                    knownDatabase: knownDatabase
+                )
+            }
+            guard let database = details.database else {
+                classificationFailures.formUnion(MySQLFamilyDatabase.allCases)
+                if reportedAmbiguousPaths.insert(actual).inserted {
+                    issues.append("MySQL/MariaDB：无法分类 mysqld（\(actual)）")
+                }
+                continue
+            }
+            listeningPaths[database, default: []].insert(actual)
+            if let error = details.error { issues.append("\(database.name)：\(error)（\(actual)）") }
+            addCandidate(
+                database: database,
+                executable: actual,
+                actualExecutable: actual,
+                version: details.version,
+                source: .localService,
+                error: details.error
+            )
+        }
+
+        return MySQLFamilyDatabase.allCases.map { database in
+            let installations = candidates[database, default: []].map { candidate in
+                let listeningState: DatabaseListeningState = if listeningPaths[database, default: []]
+                    .contains(candidate.actualExecutable) {
+                    .listening
+                } else if !localServices.complete || relevantPathFailures.contains(database) {
+                    .unknown
+                } else {
+                    .notListening
+                }
+                return DatabaseInstallation(
+                    id: candidate.actualExecutable,
+                    executable: candidate.executable,
+                    actualExecutable: candidate.executable == candidate.actualExecutable ? nil : candidate.actualExecutable,
+                    version: candidate.version,
+                    error: candidate.error,
+                    sources: candidate.sources,
+                    listeningState: listeningState
+                )
+            }
+            let providerFailed = homebrewProviderFailures.contains(database)
+                || !localServices.complete
+                || relevantPathFailures.contains(database)
+                || classificationFailures.contains(database)
+            let discoveryState: DatabaseDiscoveryState = if !installations.isEmpty {
+                .discovered
+            } else if providerFailed {
+                .unknown
+            } else {
+                .notFound
+            }
+            let listeningState: DatabaseListeningState = if installations.contains(where: { $0.listeningState == .listening }) {
+                .listening
+            } else if installations.contains(where: { $0.listeningState == .unknown })
+                || !localServices.complete
+                || relevantPathFailures.contains(database)
+                || homebrewProviderFailures.contains(database)
+                || (installations.isEmpty && classificationFailures.contains(database)) {
+                .unknown
+            } else {
+                .notListening
+            }
+            return DatabaseInstallationOverview(
+                id: database.id,
+                name: database.name,
+                installations: installations,
+                discoveryState: discoveryState,
+                listeningState: listeningState
+            )
+        }
+    }
+
+    private func mysqlFamilyVersion(
+        from result: MachineCommandResult,
+        knownDatabase: MySQLFamilyDatabase?
+    ) -> (database: MySQLFamilyDatabase?, version: String?, error: String?) {
+        guard result.status == 0, !result.timedOut, let value = normalizedVersion(result.output) else {
+            return (knownDatabase, nil, knownDatabase == nil ? nil : "版本读取失败")
+        }
+        let fields = value.split(whereSeparator: \.isWhitespace)
+        guard let marker = fields.firstIndex(where: { $0.caseInsensitiveCompare("Ver") == .orderedSame }),
+              fields.indices.contains(marker + 1) else {
+            return (knownDatabase, nil, knownDatabase == nil ? nil : "版本读取失败")
+        }
+        let productDetails = fields[(marker + 1)...].joined(separator: " ").lowercased()
+        let mentionsMySQL = productDetails.range(of: #"\bmysql\b"#, options: .regularExpression) != nil
+        let database = knownDatabase
+            ?? (productDetails.contains("mariadb") ? .mariadb : mentionsMySQL ? .mysql : nil)
+        guard let database else { return (nil, nil, nil) }
+        let versionIndex = fields.indices.contains(marker + 3)
+            && fields[marker + 2].caseInsensitiveCompare("Distrib") == .orderedSame
+            ? marker + 3
+            : marker + 1
+        let version = fields[versionIndex].split(separator: "-").first.map(String.init)
+        guard let version, version.first?.isNumber == true else { return (database, nil, "版本读取失败") }
+        return (database, version, nil)
     }
 
     private func scanRuntime(
@@ -1023,40 +2036,51 @@ struct EnvironmentScanner: Sendable {
         return HomebrewSnapshot(executable: executable, version: version, available: true, error: nil)
     }
 
-    private func scanHomebrewRuntimes(
-        executable: String,
-        issues: inout [String]
-    ) -> [RuntimeProviderInstallation] {
+    private func scanHomebrewInventory(executable: String, issues: inout [String]) -> HomebrewInventory {
         let versionsResult = machine.command(executable: executable, arguments: ["list", "--formula", "--versions"])
         guard versionsResult.status == 0, !versionsResult.timedOut else {
-            issues.append("Homebrew Runtime Provider：\(versionsResult.timedOut ? "命令超时" : "读取失败")")
-            return []
+            let failure = versionsResult.timedOut ? "命令超时" : "读取失败"
+            issues.append("Homebrew Runtime Provider：\(failure)")
+            return HomebrewInventory(formulas: [], cellar: nil, failureReason: failure)
         }
 
-        let formulaVersions = versionsResult.output.split(whereSeparator: \.isNewline).compactMap { line -> (RuntimeDefinition, String, [String])? in
+        let formulas = versionsResult.output.split(whereSeparator: \.isNewline).compactMap { line -> HomebrewFormulaInstallation? in
             let fields = line.split(whereSeparator: \.isWhitespace).map(String.init)
-            guard fields.count > 1,
-                  let formula = fields.first,
-                  let definition = runtimeDefinitions.first(where: {
-                      formula == $0.homebrewFormula || formula.hasPrefix("\($0.homebrewFormula)@")
-                  }) else { return nil }
-            return (definition, formula, Array(fields.dropFirst()))
+            guard fields.count > 1, let formula = fields.first else { return nil }
+            let isRuntime = runtimeDefinitions.contains {
+                formula == $0.homebrewFormula || formula.hasPrefix("\($0.homebrewFormula)@")
+            }
+            let isDatabase = ["postgresql", "mysql", "mariadb", "mongodb-community", "redis"].contains {
+                formula == $0 || formula.hasPrefix("\($0)@")
+            }
+            guard isRuntime || isDatabase else { return nil }
+            return HomebrewFormulaInstallation(formula: formula, versions: Array(fields.dropFirst()))
         }
-        guard !formulaVersions.isEmpty else { return [] }
+        guard !formulas.isEmpty else { return .empty }
 
         let cellarResult = machine.command(executable: executable, arguments: ["--cellar"])
         guard cellarResult.status == 0,
               !cellarResult.timedOut,
               let cellar = normalizedVersion(cellarResult.output) else {
-            issues.append("Homebrew Runtime Provider：\(cellarResult.timedOut ? "命令超时" : "读取失败")")
-            return []
+            let failure = cellarResult.timedOut ? "命令超时" : "读取失败"
+            issues.append("Homebrew Runtime Provider：\(failure)")
+            return HomebrewInventory(formulas: formulas, cellar: nil, failureReason: failure)
         }
 
-        return formulaVersions.flatMap { definition, formula, versions in
+        return HomebrewInventory(formulas: formulas, cellar: cellar, failureReason: nil)
+    }
+
+    private func scanHomebrewRuntimes(inventory: HomebrewInventory) -> [RuntimeProviderInstallation] {
+        guard let cellar = inventory.cellar else { return [] }
+        return inventory.formulas.flatMap { installation -> [RuntimeProviderInstallation] in
+            guard let definition = runtimeDefinitions.first(where: {
+                installation.formula == $0.homebrewFormula || installation.formula.hasPrefix("\($0.homebrewFormula)@")
+            }) else { return [] }
+            let formula = installation.formula
             let runtimeExecutable = definition.id == "python" && formula.hasPrefix("python@")
                 ? "python\(formula.dropFirst("python@".count))"
                 : definition.executable
-            return versions.map { version in
+            return installation.versions.map { version in
                 RuntimeProviderInstallation(
                     runtimeID: definition.id,
                     version: version,
@@ -1214,7 +2238,9 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 8 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == MachineSnapshot.currentSchemaVersion else {
+            return nil
+        }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

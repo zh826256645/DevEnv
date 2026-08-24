@@ -1,6 +1,6 @@
 # macOS 系统环境扫描
 
-状态：v0.1 范围已冻结；Runtime 多版本发现、TCP 监听服务、Git Tooling State 与总览界面已实现。
+状态：v0.1 范围已冻结；Runtime 多版本发现、TCP 监听服务、Git Tooling State、Terminal Application、Shell Installation 与总览界面已实现。
 
 ## 目标
 
@@ -84,12 +84,17 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - Git LFS、签名与 Credential Helper Chain 扩展版本：`schemaVersion = 6`
 - GitHub Authentication Configuration 扩展版本：`schemaVersion = 7`
 - Runtime Installation 来源扩展版本：`schemaVersion = 8`
+- PostgreSQL Database Installation 纵向基线：`schemaVersion = 9`
+- MySQL 与 MariaDB Database Installation 扩展：`schemaVersion = 10`
+- MongoDB 与 Redis Database Installation 完整扩展：`schemaVersion = 11`
+- Python 与 Node Local Service Attribution 扩展：`schemaVersion = 12`
+- Terminal Application 与 Shell Installation 扩展：`schemaVersion = 13`
 - 写入方式：原子替换
 - 启动读取到损坏或不支持版本的文件时忽略该文件，不尝试迁移
 
-Runtime Installation 来源扩展启用后，V1–V7 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
+Terminal Application 与 Shell Installation 扩展启用后，V1–V12 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
 
-只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
+只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Terminal Application、Shell Installation、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
 
 ## 触发与界面
 
@@ -101,7 +106,7 @@ Runtime Installation 来源扩展启用后，V1–V7 快照视为不支持版本
 - 标题下方首先展示一个圆角总览面板，面板内按双列划分系统信息与扫描汇总；每列由图标标题和独立内层卡片组成，两张内层卡片始终以内容较高的一侧为准保持可见背景等高，不使用固定高度。其后依次展示 Runtime、本地服务和环境配置，不在正文中重复系统信息或单独展示 Scan Notice 模块。
 - 摘要展示已发现 Runtime 类别数、Runtime Installation 总数和本地服务组数，不给出 Scan Notice 数量、环境健康评分或“正常/异常”的整体判断。
 - 系统信息卡使用大号系统 Apple 标志，集中展示 macOS 版本、Build、架构，并以图标指标展示主机名和内存；系统卷使用线性进度条显示已用容量占总容量的比例，并同时标注已用、可用和总容量。扫描汇总的三个指标分别使用带图标底板和细描边的独立圆角行，数值右对齐突出显示。
-- Runtime 与“环境配置”都使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git 与 PATH 合并到“环境配置”圆角模块内并作为同级卡片展示：Homebrew 摘要展示版本与安装状态，Git 摘要展示当前生效 CLI，PATH 摘要展示目录总数与真实的 Runtime PATH 版本冲突数；三张卡片均使用分隔线将底部状态胶囊与主信息分开。Homebrew、Git 与非空 PATH 复用 Runtime 的展开策略：点击卡片摘要后，选中卡片移动到模块首位并占满整行，其余卡片重排到下方，同一时间只展开一张；Homebrew 展开态使用版本与安装状态概览，并在独立面板展示可执行路径或读取错误；Git 展开后展示 Git LFS、User Git Configuration、GitHub CLI 的 `git_protocol` 与本地/进程级认证来源事实；PATH 展开态使用目录与 Runtime 冲突概览，默认展示带顺序和最高优先级标记的前 3 个目录，并可继续展开全部。
+- Runtime 与“环境配置”都使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git、PATH、Terminal 与 Shell 合并到“环境配置”圆角模块内并作为同级卡片展示。Terminal 摘要展示已发现应用数量，展开后按支持清单顺序展示名称、版本和应用路径；Shell 摘要展示 Default Login Shell 与已发现数量，展开后将默认项置顶并展示名称、路径、默认标记和可用状态。五张卡片复用同一时间只展开一张、选中卡片置顶并占满整行的交互。
 
 ### 扫描状态
 
@@ -167,6 +172,20 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - Runtime Conflict 在扫描提示中集中展示，并在对应 Runtime 行旁显示“PATH 版本冲突”。
 - 扫描提示保留版本读取失败、可执行文件不可用和 Provider 失败。
 
+## Terminal Application 与 Shell Installation 扩展
+
+### Terminal Application
+
+- 固定支持 Terminal.app、iTerm2、Warp、Ghostty、Alacritty、kitty 与 WezTerm，并按该顺序通过 Bundle ID 使用 Launch Services 查询；不遍历应用目录或按名称猜测。
+- 每项只保存名称、版本、Bundle ID 和应用路径；不推断 Default Terminal Application 或启动 DevEnv 的 Terminal Session。
+- 未发现受支持应用与版本缺失均为中性状态，不产生 Scan Notice。
+
+### Shell Installation
+
+- 只读取 `/etc/shells` 的非空、非注释绝对路径，并补充 POSIX 当前账户记录中的 Default Login Shell；不遍历 `PATH`、常见安装目录或 Shell 配置文件。
+- 规范化路径并去重，Default Login Shell 置顶，其余保持 `/etc/shells` 原始顺序。每项保存名称、路径、默认标记和可用状态，不启动 Shell 读取版本。
+- 无法读取 `/etc/shells` 或当前账户 Default Login Shell 时产生独立 Scan Notice；默认路径未注册、已不存在或不可执行时仍保留为不可用项并产生 Scan Notice。Shell 数量不构成健康判断。
+
 ## Git Tooling State 扩展
 
 - 按当前 `PATH` 顺序只取第一个可执行 `git`，记录规范化的绝对调用路径，不枚举其他安装来源或软链接目标。
@@ -188,7 +207,7 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 
 ## Database Installation 扩展
 
-状态：已确认，待实现。首批固定覆盖 PostgreSQL、MySQL、MariaDB、MongoDB 和 Redis，只读展示 Database Installation 及其 TCP 监听状态，不连接或查询数据库。
+状态：PostgreSQL、MySQL、MariaDB、MongoDB 与 Redis 已完整实现。只读展示 Database Installation 及其 TCP 监听状态，不连接或查询数据库。
 
 ### 发现与匹配
 
@@ -200,29 +219,41 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 
 Database Discovery State 为“已发现”“未发现”或“发现状态未知”。任一适用 Database Provider 失败时保留已有结果并产生 Scan Notice；没有结果时显示“发现状态未知”，不声称“未安装”。
 
-Database Listening State 为“正在监听”“未监听”或“监听状态未知”。Local Service 扫描失败或已识别数据库进程的真实路径不可读时不猜测匹配；同一 Database Installation 的多个监听进程聚合为一个“正在监听”状态，不建立数据库实例模型。
+Database Listening State 为“正在监听”“未监听”或“监听状态未知”。适用 Database Provider 失败且没有精确监听匹配、Local Service 扫描失败或已识别数据库进程的真实路径不可读时不猜测完整状态；已发现 Database Installation 自身可精确确定的监听状态不受影响。同一 Database Installation 的多个监听进程聚合为一个“正在监听”状态，不建立数据库实例模型。
 
 该扩展只观察 TCP Listener Binding，不覆盖仅使用 Unix Socket 或容器内的数据库。如需覆盖，由后续显式 Database Provider 扩展。完整取舍见 [ADR-0005](../adr/0005-map-database-listeners-by-installation-path.md)。
 
 ### 展示
 
 - 总览顺序为 Runtime、数据库、本地服务、环境配置；顶部扫描汇总暂不增加数据库指标。
-- 按 PostgreSQL、MySQL、MariaDB、MongoDB、Redis 的固定顺序展示五张卡片，摘要显示安装数和正在监听数。
+- 固定按 PostgreSQL、MySQL、MariaDB、MongoDB、Redis 顺序展示五张卡片，摘要显示安装数和正在监听数。
 - 卡片复用 Runtime 的折叠与展开交互：同时只展开一张，默认最多展示前 3 个 Database Installation，存在更多安装时才提供“查看全部”。
 - “正在监听”使用绿色；“未发现”和“未监听”是中性灰色，不产生 Scan Notice；发现或监听状态未知以及读取失败使用橙色并产生 Scan Notice。
 - 数据库监听进程仍保留在完整的“本地服务”区域；进程真实路径只用于 Database Installation 发现与匹配，不增加到 Local Service 行。
 - 数据库结果只随应用启动扫描和手动“重新扫描”更新，不增加轮询或独立刷新入口。
-- 实现时将 Machine Snapshot 升级为 `schemaVersion = 9`；V1–V8 快照直接忽略并重新扫描，不增加快照迁移。
+- MongoDB 与 Redis Database Installation 扩展引入时使用 `schemaVersion = 11`；V1–V10 快照直接忽略并重新扫描，不增加快照迁移。
 
 ## TCP 监听服务扩展
 
 - Environment Scan 固定执行 `/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn`，不调用 Shell、不接收用户参数、不请求管理员权限。
-- 扫描只保留进程名、PID、监听地址、端口和 IPv4/IPv6 地址族；同一 PID 聚合为一个 Local Service，完全相同的 Listener Binding 去重。
+- 扫描保留进程名、PID、监听地址、端口和 IPv4/IPv6 地址族；同一 PID 聚合为一个 Local Service，完全相同的 Listener Binding 去重。Python 与 Node Local Service 还可保存 Local Service Attribution。
 - loopback Listener Binding 不显示额外提示；wildcard 与非 loopback 绑定显示黄底感叹号，悬停时说明“可能可被局域网访问”。该范围只描述监听地址，不表示已验证防火墙或其他设备的实际可达性。
 - Listener Binding 按端口、地址族、地址排序；Local Service 按最低端口、进程名、PID 排序。
 - Machine Snapshot 编码并恢复全部 Local Service；应用启动和手动重新扫描沿用整份快照刷新，不增加轮询或独立刷新入口。
 - 监听命令失败或超时时，本次 Local Service 结果为空并产生一条 Scan Notice；系统、Homebrew Availability、PATH、Runtime Installation 和可用的部分快照不受影响。
 - 总览的“本地服务”区域展示服务数、端口数和全部 Listener Binding，并区分“当前没有可见监听项”和“监听读取失败”；扫描汇总增加本地服务组数，可能可被局域网访问的绑定按服务组加入现有通知入口，扫描时间和重新扫描操作保持不变。
+
+### Python 与 Node 服务归属
+
+- 只为进程名匹配 Python 或 Node 的 Local Service 识别归属，其他进程沿用既有展示。
+- Python 从进程工作目录向上寻找最近的 `.git`、`pyproject.toml` 或 `package.json` 项目根。Node 同时识别包含当前工作目录的 Git 项目根和最近的 `package.json` 包根；没有 Git 项目时使用最近的包根。
+- Python 项目名称优先读取项目根 `pyproject.toml` 的 PEP 621 `[project].name`。Node 的 Git 项目使用 Git 根目录名作为标题、最近的包根作为运行目录，例如标题 `personal-os`、目录 `~/Projects/personal-os/frontend`；没有 Git 项目时读取 `package.json.name` 并展示包根。名称缺失或不可读时使用对应根目录名。
+- 没有项目证据时，若进程可执行文件位于 `.app` 包内，则以该 App 名称和包路径作为归属；否则保留 Python 或 Node 的通用运行时名称。
+- 显示优先级为“项目 → App → 运行时”。项目卡片保留 Python 或 Node 图标并展示缩写项目根路径，App 卡片使用 App 图标；归属不同的 Local Service 不合并为同一展示组。
+- 归属扫描不读取或保存完整命令行，不遍历父进程，不按 API、端口或参数猜测。工作目录、项目文件或可执行路径读取失败时静默回退，不产生新的 Scan Notice。
+- Machine Snapshot 使用 `schemaVersion = 12` 编码 Local Service Attribution；V1–V11 快照直接忽略并重新扫描。
+
+完整取舍见 [ADR-0006](../adr/0006-attribute-runtime-services-by-working-directory-and-app-path.md)。
 
 2026-08-23 普通权限真机验收：Debug App 快照记录 11 个 Local Service、24 个 Listener Binding，与紧接着执行的同一固定 `lsof` 命令逐项一致，未发现普通权限造成的重要监听项缺失；未使用管理员重扫。
 
@@ -257,14 +288,32 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - Provider 返回的可执行文件不可用：保留版本和预期绝对路径并显示错误。
 - 同一 PostgreSQL 可执行文件经 `PATH`、Homebrew 和 Local Service 重复发现：合并为一个 Database Installation 并显示“正在监听”。
 - 安装两个 PostgreSQL 版本且只有一个实际路径正在监听：只标记该 Database Installation，不连带标记另一个版本。
+- MySQL 与 MariaDB 的普通或带版本后缀 Homebrew formula 经三个来源重复发现：分别按真实可执行文件目标去重并精确匹配监听版本。
+- MongoDB Community 与 Redis 的普通或带版本后缀 Homebrew formula 经三个来源重复发现：分别按 `mongod` 与 `redis-server` 的真实可执行文件目标去重并精确匹配监听版本。
+- 只由 Local Service 发现的 `mysqld` 无法通过版本输出区分 MySQL 与 MariaDB：不创建 Database Installation，保留 Local Service 并产生 Scan Notice。
+- `mariadbd` 版本读取失败：保留已确定为 MariaDB 的 Database Installation 和精确监听状态，并产生 Scan Notice。
 - 发现 Homebrew 数据库但没有匹配 Local Service：显示“未监听”，不产生 Scan Notice。
 - Homebrew Database Provider 失败且没有其他发现结果：显示“发现状态未知”并产生 Scan Notice，不显示“未安装”。
 - Local Service 扫描失败或已识别数据库进程的真实路径不可读：相关 Database Listening State 显示“监听状态未知”。
+- Python 服务工作目录位于带 PEP 621 名称的项目内：卡片显示项目名、Python 项目服务和缩写项目根路径。
+- Node 服务工作目录位于 Git 项目的子目录包内：卡片显示 Git 根目录名、Node.js 项目服务和缩写 Git 根路径；例如 `personal-os/frontend` 显示 `personal-os`。
+- Node 服务不位于 Git 项目但工作目录位于带 `package.json.name` 的项目内：卡片显示该包名和缩写项目根路径。
+- Python 或 Node 服务同时具有项目工作目录和 `.app` 内可执行文件：优先显示项目归属。
+- Python 服务没有项目证据但可执行文件位于 `oMLX.app`：卡片显示 `oMLX` 并使用 App 图标。
+- 归属所需路径或项目文件不可读：不显示归属、不增加 Scan Notice，继续显示通用 Python 或 Node 服务。
+- 非 Python/Node Local Service：不识别项目或 App 归属，保持既有名称、图标和分组规则。
 - 只启用 Unix Socket 或位于容器内的 PostgreSQL：不标记为 Listening Database Installation；容器端口代理仍可作为 Local Service 展示。
 - 读取 V1–V4 快照：忽略旧快照并执行扫描，成功后写入 V5 快照。
 - 读取 V1–V5 快照：忽略旧快照并执行扫描，成功后写入 V6 快照。
 - 读取 V1–V6 快照：忽略旧快照并执行扫描，成功后写入 V7 快照。
-- Database Installation 扩展实现后读取 V1–V7 快照：忽略旧快照并执行扫描，成功后写入 V8 快照。
+- PostgreSQL Database Installation 纵向基线读取 V1–V8 快照：忽略旧快照并执行扫描，成功后写入 V9 快照。
+- MySQL 与 MariaDB Database Installation 扩展读取 V1–V9 快照：忽略旧快照并执行扫描，成功后写入 V10 快照。
+- MongoDB 与 Redis Database Installation 扩展读取 V1–V10 快照：忽略旧快照并执行扫描，成功后写入 V11 快照。
+- Local Service Attribution 扩展读取 V1–V11 快照：忽略旧快照并执行扫描，成功后写入 V12 快照。
+- 受支持 Terminal Application 未安装：Terminal 卡片显示“未发现”，不产生 Scan Notice；已发现应用按固定支持清单展示名称、版本和路径。
+- Default Login Shell 未注册或不可执行：Shell 卡片仍将其置顶并标记“不可用”，同时产生 Scan Notice；其他可用项保持 `/etc/shells` 顺序。
+- `/etc/shells` 或 POSIX 账户记录读取失败：保留另一来源可建立的 Shell 结果，并分别产生一条 Scan Notice。
+- Terminal Application 与 Shell Installation 扩展读取 V1–V12 快照：忽略旧快照并执行扫描，成功后写入 V13 快照。
 
 ## 相关决策
 
@@ -273,3 +322,4 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - [ADR-0003：按 PATH 与 Provider 分层发现 Runtime](../adr/0003-source-aware-runtime-discovery.md)
 - [ADR-0004：Environment Scan 保持本地观察](../adr/0004-keep-environment-scan-local.md)
 - [ADR-0005：按安装路径映射数据库 TCP 监听状态](../adr/0005-map-database-listeners-by-installation-path.md)
+- [ADR-0006：按工作目录与 App 路径识别运行时服务归属](../adr/0006-attribute-runtime-services-by-working-directory-and-app-path.md)

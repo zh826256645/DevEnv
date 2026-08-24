@@ -3,6 +3,54 @@ import XCTest
 @testable import DevEnv
 
 final class EnvironmentScannerTests: XCTestCase {
+    func testScansTerminalApplicationsAndRegisteredShellsInStableOrder() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: [],
+            defaultLoginShellPath: "/opt/homebrew/bin/fish",
+            registeredShells: """
+            # Login shells
+            /bin/../bin/zsh
+            /bin/bash
+            /bin/zsh
+            """,
+            executables: ["/bin/zsh", "/bin/bash", "/opt/homebrew/bin/fish"],
+            applications: [
+                "com.github.wez.wezterm": InstalledApplication(
+                    name: "WezTerm", version: nil, path: "/Applications/WezTerm.app"
+                ),
+                "com.apple.Terminal": InstalledApplication(
+                    name: "Terminal", version: "2.15", path: "/System/Applications/Utilities/Terminal.app"
+                ),
+                "com.mitchellh.ghostty": InstalledApplication(
+                    name: "Ghostty", version: "1.2.0", path: "/Applications/Ghostty.app"
+                ),
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.schemaVersion, 13)
+        XCTAssertEqual(snapshot.terminalApplications.map(\.name), ["Terminal", "Ghostty", "WezTerm"])
+        XCTAssertEqual(snapshot.terminalApplications.map(\.version), ["2.15", "1.2.0", nil])
+        XCTAssertEqual(snapshot.shellInstallations.map(\.path), ["/opt/homebrew/bin/fish", "/bin/zsh", "/bin/bash"])
+        XCTAssertEqual(snapshot.shellInstallations.map(\.isDefault), [true, false, false])
+        XCTAssertEqual(snapshot.shellInstallations.map(\.isAvailable), [false, true, true])
+        XCTAssertEqual(snapshot.issues.filter { $0.hasPrefix("Default Login Shell：") }, ["Default Login Shell：不可用"])
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Shell Installation：") })
+    }
+
+    func testShellDiscoveryFailuresAreIsolatedAndMissingTerminalApplicationsAreNeutral() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: [],
+            defaultLoginShellPath: nil,
+            registeredShells: nil
+        )).scan().snapshot
+
+        XCTAssertTrue(snapshot.terminalApplications.isEmpty)
+        XCTAssertTrue(snapshot.shellInstallations.isEmpty)
+        XCTAssertEqual(snapshot.issues.filter {
+            $0.hasPrefix("Default Login Shell：") || $0.hasPrefix("Shell Installation：")
+        }, ["Default Login Shell：读取失败", "Shell Installation：读取失败"])
+    }
+
     func testGitCLIUsesFirstExecutableInPath() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["tools/../first/bin", "/second/bin"],
@@ -386,7 +434,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 8)
+        XCTAssertEqual(snapshot.schemaVersion, 13)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -1010,6 +1058,444 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Ruby：") })
     }
 
+    func testDiscoversMongoDBAndRedisFromPathInDatabaseDisplayOrder() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/mongod", "/bin/redis-server"],
+            commandOutputs: [
+                "/bin/mongod --version": "db version v8.0.12\nBuild Info: {}\n",
+                "/bin/redis-server --version": "Redis server v=8.2.1 sha=00000000:0 malloc=libc bits=64 build=0\n",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.id), [
+            "postgresql", "mysql", "mariadb", "mongodb", "redis",
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.name), [
+            "PostgreSQL", "MySQL", "MariaDB", "MongoDB", "Redis",
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.discoveryState), [
+            .notFound, .notFound, .notFound, .discovered, .discovered,
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.listeningState), [
+            .notListening, .notListening, .notListening, .notListening, .notListening,
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map { $0.installations.count }, [0, 0, 0, 1, 1])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.listeningCount), [0, 0, 0, 0, 0])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews[3].installations.first?.version, "8.0.12")
+        XCTAssertEqual(snapshot.databaseInstallationOverviews[4].installations.first?.version, "8.2.1")
+    }
+
+    func testMongoDBAndRedisDeduplicateProvidersAndMatchExactListeningVersions() throws {
+        let mongodb8 = "/opt/mongodb/8/bin/mongod"
+        let mongodb7 = "/opt/homebrew/Cellar/mongodb-community@7.0/7.0.22/bin/mongod"
+        let redis8 = "/opt/redis/8/bin/redis-server"
+        let redis7 = "/opt/homebrew/Cellar/redis@7.2/7.2.10/bin/redis-server"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/usr/local/bin"],
+            executables: [
+                "/usr/local/bin/mongod",
+                "/usr/local/bin/redis-server",
+                "/opt/homebrew/bin/brew",
+                "/opt/homebrew/Cellar/mongodb-community/8.0.12/bin/mongod",
+                mongodb7,
+                "/opt/homebrew/Cellar/redis/8.2.1/bin/redis-server",
+                redis7,
+            ],
+            resolvedPaths: [
+                "/usr/local/bin/mongod": mongodb8,
+                "/opt/homebrew/Cellar/mongodb-community/8.0.12/bin/mongod": mongodb8,
+                "/usr/local/bin/redis-server": redis8,
+                "/opt/homebrew/Cellar/redis/8.2.1/bin/redis-server": redis8,
+            ],
+            commandOutputs: [
+                "/usr/local/bin/mongod --version": "db version v8.0.12\nBuild Info: {}\n",
+                "/usr/local/bin/redis-server --version": "Redis server v=8.2.1 sha=00000000:0 malloc=libc bits=64 build=0\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.6.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "mongodb-community 8.0.12\nmongodb-community@7.0 7.0.22\nredis 8.2.1\nredis@7.2 7.2.10\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmongod\nf7\ntIPv4\nn127.0.0.1:27017\np43\ncredis-server\nf8\ntIPv4\nn127.0.0.1:6379\np44\nccom.docker.backend\nf9\ntIPv4\nn127.0.0.1:65000\n",
+            ],
+            processExecutablePaths: [
+                42: mongodb8,
+                43: redis7,
+                44: "/Applications/Docker.app/Contents/MacOS/com.docker.backend",
+            ]
+        )).scan().snapshot
+
+        let mongodb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mongodb" })
+        XCTAssertEqual(mongodb.installations.map(\.id), [mongodb8, mongodb7])
+        XCTAssertEqual(mongodb.installations.map(\.listeningState), [.listening, .notListening])
+        XCTAssertEqual(mongodb.installations[0].sources, [.path, .homebrew, .localService])
+        XCTAssertEqual(mongodb.listeningState, .listening)
+        XCTAssertEqual(mongodb.listeningCount, 1)
+
+        let redis = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "redis" })
+        XCTAssertEqual(redis.installations.map(\.id), [redis8, redis7])
+        XCTAssertEqual(redis.installations.map(\.listeningState), [.notListening, .listening])
+        XCTAssertEqual(redis.installations[1].sources, [.homebrew, .localService])
+        XCTAssertEqual(redis.listeningState, .listening)
+        XCTAssertEqual(redis.listeningCount, 1)
+        XCTAssertEqual(snapshot.localServices.map(\.processName), ["redis-server", "mongod", "com.docker.backend"])
+    }
+
+    func testMongoDBAndRedisFailuresUseUnknownStatesWithoutCrossContamination() throws {
+        let mongod = "/Applications/MongoDB/bin/mongod"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmongod\nf7\ntIPv4\nn127.0.0.1:27017\np43\ncredis-server\nf8\ntIPv4\nn127.0.0.1:6379\n",
+            ],
+            commandStatuses: ["\(mongod) --version": -1],
+            processExecutablePaths: [42: mongod],
+            processExecutableFailures: [43]
+        )).scan().snapshot
+
+        let mongodb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mongodb" })
+        XCTAssertEqual(mongodb.discoveryState, .discovered)
+        XCTAssertEqual(mongodb.listeningState, .listening)
+        XCTAssertEqual(mongodb.installations.first?.error, "版本读取失败")
+        XCTAssertTrue(snapshot.issues.contains("MongoDB：版本读取失败（\(mongod)）"))
+
+        let redis = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "redis" })
+        XCTAssertEqual(redis.discoveryState, .unknown)
+        XCTAssertEqual(redis.listeningState, .unknown)
+        XCTAssertTrue(redis.installations.isEmpty)
+        XCTAssertTrue(snapshot.issues.contains("Redis：进程路径读取失败（PID 43）"))
+    }
+
+    func testMongoDBAndRedisHomebrewFailureUsesUnknownStates() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew"],
+            commandOutputs: ["/opt/homebrew/bin/brew --version": "Homebrew 4.6.0\n"],
+            commandTimeouts: ["/opt/homebrew/bin/brew list --formula --versions"]
+        )).scan().snapshot
+
+        for name in ["MongoDB", "Redis"] {
+            let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.name == name })
+            XCTAssertEqual(database.discoveryState, .unknown)
+            XCTAssertEqual(database.listeningState, .unknown)
+            XCTAssertTrue(database.installations.isEmpty)
+            XCTAssertTrue(snapshot.issues.contains("\(name) Database Provider：Homebrew 命令超时"))
+        }
+    }
+
+    func testDiscoversMySQLAndMariaDBFromPathInDatabaseDisplayOrder() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/mysqld", "/bin/mariadbd"],
+            commandOutputs: [
+                "/bin/mysqld --version": "/bin/mysqld  Ver 8.4.3 for macos14.7 on arm64 (MySQL Community Server - GPL)\n",
+                "/bin/mariadbd --version": "/bin/mariadbd  Ver 15.1 Distrib 11.4.5-MariaDB for osx10.19 on arm64 (Homebrew)\n",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.id), [
+            "postgresql", "mysql", "mariadb", "mongodb", "redis",
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.map(\.name), [
+            "PostgreSQL", "MySQL", "MariaDB", "MongoDB", "Redis",
+        ])
+        XCTAssertEqual(snapshot.databaseInstallationOverviews[1].installations.first?.version, "8.4.3")
+        XCTAssertEqual(snapshot.databaseInstallationOverviews[2].installations.first?.version, "11.4.5")
+    }
+
+    func testMySQLAndMariaDBDeduplicateProvidersAndMatchExactListeningVersions() throws {
+        let mysql84 = "/opt/mysql/8.4/bin/mysqld"
+        let mysql80 = "/opt/homebrew/Cellar/mysql@8.0/8.0.40/bin/mysqld"
+        let mariadb114 = "/opt/homebrew/Cellar/mariadb/11.4.5/bin/mariadbd"
+        let mariadb1011 = "/opt/homebrew/Cellar/mariadb@10.11/10.11.10/bin/mariadbd"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/usr/local/bin"],
+            executables: [
+                "/usr/local/bin/mysqld",
+                "/opt/homebrew/bin/brew",
+                "/opt/homebrew/Cellar/mysql/8.4.3/bin/mysqld",
+                mysql80,
+                mariadb114,
+                mariadb1011,
+            ],
+            resolvedPaths: [
+                "/usr/local/bin/mysqld": mysql84,
+                "/opt/homebrew/Cellar/mysql/8.4.3/bin/mysqld": mysql84,
+            ],
+            commandOutputs: [
+                "/usr/local/bin/mysqld --version": "mysqld Ver 8.4.3 for macos (MySQL Community Server - GPL)\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "mysql 8.4.3\nmysql@8.0 8.0.40\nmariadb 11.4.5\nmariadb@10.11 10.11.10\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmysqld\nf7\ntIPv4\nn127.0.0.1:3306\np43\ncmariadbd\nf8\ntIPv4\nn127.0.0.1:3307\n",
+            ],
+            processExecutablePaths: [42: mysql84, 43: mariadb1011]
+        )).scan().snapshot
+
+        let mysql = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mysql" })
+        XCTAssertEqual(mysql.installations.map(\.id), [mysql84, mysql80])
+        XCTAssertEqual(mysql.installations.map(\.version), ["8.4.3", "8.0.40"])
+        XCTAssertEqual(mysql.installations.map(\.listeningState), [.listening, .notListening])
+        XCTAssertEqual(mysql.installations[0].executable, "/usr/local/bin/mysqld")
+        XCTAssertEqual(mysql.installations[0].actualExecutable, mysql84)
+        XCTAssertEqual(mysql.installations[0].sources, [.path, .homebrew, .localService])
+
+        let mariadb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mariadb" })
+        XCTAssertEqual(mariadb.installations.map(\.id), [mariadb114, mariadb1011])
+        XCTAssertEqual(mariadb.installations.map(\.listeningState), [.notListening, .listening])
+        XCTAssertEqual(mariadb.installations[1].sources, [.homebrew, .localService])
+        XCTAssertEqual(snapshot.localServices.map(\.processName), ["mysqld", "mariadbd"])
+    }
+
+    func testMySQLAndMariaDBProviderFailureUsesUnknownStates() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew"],
+            commandOutputs: ["/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n"],
+            commandTimeouts: ["/opt/homebrew/bin/brew list --formula --versions"]
+        )).scan().snapshot
+
+        for id in ["mysql", "mariadb"] {
+            let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == id })
+            XCTAssertEqual(database.discoveryState, .unknown)
+            XCTAssertEqual(database.listeningState, .unknown)
+            XCTAssertTrue(database.installations.isEmpty)
+        }
+        XCTAssertTrue(snapshot.issues.contains("MySQL Database Provider：Homebrew 命令超时"))
+        XCTAssertTrue(snapshot.issues.contains("MariaDB Database Provider：Homebrew 命令超时"))
+    }
+
+    func testAmbiguousLocalServiceMysqldStaysUnclassifiedAndProducesNotice() throws {
+        let mysqld = "/opt/mysql/bin/mysqld"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "\(mysqld) --version": "\(mysqld) Ver 8.0.0 for macos on arm64\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmysqld\nf7\ntIPv4\nn127.0.0.1:3306\n",
+            ],
+            processExecutablePaths: [42: mysqld]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.map(\.processName), ["mysqld"])
+        XCTAssertTrue(snapshot.databaseInstallationOverviews
+            .filter { $0.id == "mysql" || $0.id == "mariadb" }
+            .allSatisfy { $0.installations.isEmpty && $0.discoveryState == .unknown })
+        XCTAssertTrue(snapshot.issues.contains("MySQL/MariaDB：无法分类 mysqld（\(mysqld)）"))
+
+        let descriptor = localServiceDescriptor(for: "mysqld")
+        XCTAssertEqual(descriptor.displayName, "mysqld")
+        XCTAssertNil(descriptor.assetName)
+    }
+
+    func testLocalServiceOnlyMySQLAndMariaDBKeepKnownTypeWhenVersionFails() throws {
+        let mysqld = "/usr/local/mysql/bin/mysqld"
+        let mariadbd = "/Applications/MariaDB/bin/mariadbd"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "\(mysqld) --version": "mysqld Ver 8.4.3 for macos (MySQL Community Server - GPL)\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncmysqld\nf7\ntIPv4\nn127.0.0.1:3306\np43\ncmariadbd\nf8\ntIPv4\nn127.0.0.1:3307\n",
+            ],
+            commandStatuses: ["\(mariadbd) --version": -1],
+            processExecutablePaths: [42: mysqld, 43: mariadbd]
+        )).scan().snapshot
+
+        let mysql = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mysql" })
+        XCTAssertEqual(mysql.installations.first?.version, "8.4.3")
+        XCTAssertEqual(mysql.installations.first?.sources, [.localService])
+        XCTAssertEqual(mysql.listeningState, .listening)
+
+        let mariadb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mariadb" })
+        XCTAssertNil(mariadb.installations.first?.version)
+        XCTAssertEqual(mariadb.installations.first?.error, "版本读取失败")
+        XCTAssertEqual(mariadb.listeningState, .listening)
+        XCTAssertTrue(snapshot.issues.contains("MariaDB：版本读取失败（\(mariadbd)）"))
+    }
+
+    func testMariaDBProcessPathFailureDoesNotChangeMySQLListeningState() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/bin/mysqld"],
+            commandOutputs: [
+                "/bin/mysqld --version": "mysqld Ver 8.4.3 for macos (MySQL Community Server - GPL)\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p43\ncmariadbd\nf8\ntIPv4\nn127.0.0.1:3307\n",
+            ],
+            processExecutableFailures: [43]
+        )).scan().snapshot
+
+        let mysql = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mysql" })
+        XCTAssertEqual(mysql.discoveryState, .discovered)
+        XCTAssertEqual(mysql.listeningState, .notListening)
+        XCTAssertEqual(mysql.installations.first?.listeningState, .notListening)
+
+        let mariadb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mariadb" })
+        XCTAssertEqual(mariadb.discoveryState, .unknown)
+        XCTAssertEqual(mariadb.listeningState, .unknown)
+        XCTAssertTrue(snapshot.issues.contains("MariaDB：进程路径读取失败（PID 43）"))
+    }
+
+    func testPostgreSQLDeduplicatesThreeSourcesAndMatchesOnlyTheExactListeningVersion() throws {
+        let postgres16 = "/opt/postgresql/16/bin/postgres"
+        let postgres15 = "/opt/homebrew/Cellar/postgresql@15/15.8/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/usr/local/bin"],
+            executables: [
+                "/usr/local/bin/postgres",
+                "/opt/homebrew/bin/brew",
+                "/opt/homebrew/Cellar/postgresql@16/16.3/bin/postgres",
+                postgres15,
+            ],
+            resolvedPaths: [
+                "/usr/local/bin/postgres": postgres16,
+                "/opt/homebrew/Cellar/postgresql@16/16.3/bin/postgres": postgres16,
+            ],
+            commandOutputs: [
+                "/usr/local/bin/postgres --version": "postgres (PostgreSQL) 16.3\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "postgresql@15 15.8\npostgresql@16 16.3\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpostgres\nf7\ntIPv4\nn127.0.0.1:5432\n",
+            ],
+            processExecutablePaths: [42: postgres16]
+        )).scan().snapshot
+
+        let postgres = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "postgresql" })
+        XCTAssertEqual(postgres.discoveryState, .discovered)
+        XCTAssertEqual(postgres.listeningState, .listening)
+        XCTAssertEqual(postgres.installations.map(\.id), [postgres16, postgres15])
+        XCTAssertEqual(postgres.installations.map(\.version), ["16.3", "15.8"])
+        XCTAssertEqual(postgres.installations.map(\.listeningState), [.listening, .notListening])
+        XCTAssertEqual(postgres.installations[0].executable, "/usr/local/bin/postgres")
+        XCTAssertEqual(postgres.installations[0].actualExecutable, postgres16)
+        XCTAssertEqual(postgres.installations[0].sources, [.path, .homebrew, .localService])
+        XCTAssertEqual(snapshot.localServices.first?.processName, "postgres")
+    }
+
+    func testPostgreSQLProviderFailuresPreserveResultsAndUseUnknownWhenNothingWasFound() throws {
+        let postgres = "/bin/postgres"
+        let lsof = "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn"
+        let brewList = "/opt/homebrew/bin/brew list --formula --versions"
+        let withPathResult = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: [postgres, "/opt/homebrew/bin/brew"],
+            commandOutputs: [
+                "\(postgres) --version": "postgres (PostgreSQL) 17.1\n",
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+            ],
+            commandTimeouts: [brewList]
+        )).scan().snapshot
+
+        let discovered = try XCTUnwrap(withPathResult.databaseInstallationOverviews.first)
+        XCTAssertEqual(discovered.discoveryState, .discovered)
+        XCTAssertEqual(discovered.listeningState, .unknown)
+        XCTAssertEqual(discovered.installations.first?.listeningState, .notListening)
+        XCTAssertTrue(withPathResult.issues.contains("PostgreSQL Database Provider：Homebrew 命令超时"))
+
+        let withoutResults = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew"],
+            commandOutputs: ["/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n"],
+            commandStatuses: [lsof: -1],
+            commandTimeouts: [brewList]
+        )).scan().snapshot
+
+        XCTAssertEqual(withoutResults.databaseInstallationOverviews.first?.discoveryState, .unknown)
+        XCTAssertEqual(withoutResults.databaseInstallationOverviews.first?.listeningState, .unknown)
+        XCTAssertTrue(withoutResults.databaseInstallationOverviews.first?.installations.isEmpty == true)
+    }
+
+    func testPostgreSQLVersionFailureKeepsExactListeningState() throws {
+        let postgres = "/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: [postgres],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpostgres\nf7\ntIPv4\nn127.0.0.1:5432\n",
+            ],
+            commandStatuses: ["\(postgres) --version": -1],
+            processExecutablePaths: [42: postgres]
+        )).scan().snapshot
+
+        let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first)
+        let installation = try XCTUnwrap(database.installations.first)
+        XCTAssertEqual(database.discoveryState, .discovered)
+        XCTAssertEqual(database.listeningState, .listening)
+        XCTAssertNil(installation.version)
+        XCTAssertEqual(installation.error, "版本读取失败")
+        XCTAssertEqual(installation.listeningState, .listening)
+        XCTAssertTrue(snapshot.issues.contains("PostgreSQL：版本读取失败（/bin/postgres）"))
+    }
+
+    func testPostgreSQLRelevantProcessPathFailureMakesListeningUnknown() throws {
+        let postgres = "/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: [postgres],
+            commandOutputs: [
+                "\(postgres) --version": "postgres (PostgreSQL) 17.1\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpostgres\nf7\ntIPv4\nn127.0.0.1:5432\n",
+            ],
+            processExecutableFailures: [42]
+        )).scan().snapshot
+
+        let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first)
+        XCTAssertEqual(database.discoveryState, .discovered)
+        XCTAssertEqual(database.listeningState, .unknown)
+        XCTAssertEqual(database.installations.first?.listeningState, .unknown)
+        XCTAssertTrue(snapshot.issues.contains("PostgreSQL：进程路径读取失败（PID 42）"))
+    }
+
+    func testHomebrewPostgreSQLWithoutListenerIsNeutral() throws {
+        let postgres = "/opt/homebrew/Cellar/postgresql/17.2/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew", postgres],
+            commandOutputs: [
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "postgresql 17.2\n",
+                "/opt/homebrew/bin/brew --cellar": "/opt/homebrew/Cellar\n",
+            ]
+        )).scan().snapshot
+
+        let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first)
+        XCTAssertEqual(database.discoveryState, .discovered)
+        XCTAssertEqual(database.listeningState, .notListening)
+        XCTAssertEqual(database.installations.first?.listeningState, .notListening)
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("PostgreSQL") })
+    }
+
+    func testUnrelatedHomebrewCellarFailureDoesNotMakePostgreSQLDiscoveryUnknown() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: ["/opt/homebrew/bin/brew"],
+            commandOutputs: [
+                "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
+                "/opt/homebrew/bin/brew list --formula --versions": "node 22.0.0\n",
+            ],
+            commandTimeouts: ["/opt/homebrew/bin/brew --cellar"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.databaseInstallationOverviews.first?.discoveryState, .notFound)
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("PostgreSQL") })
+    }
+
+    func testPostgreSQLLocalServiceOnlyAggregatesMultipleListenersIntoOneInstallation() throws {
+        let postgres = "/Applications/Postgres.app/Contents/Versions/17/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "\(postgres) --version": "postgres (PostgreSQL) 17.2\n",
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p10\ncpostgres\nf7\ntIPv4\nn127.0.0.1:5432\np11\ncpostgres\nf8\ntIPv6\nn[::1]:5433\n",
+            ],
+            processExecutablePaths: [10: postgres, 11: postgres]
+        )).scan().snapshot
+
+        let database = try XCTUnwrap(snapshot.databaseInstallationOverviews.first)
+        XCTAssertEqual(database.installations.count, 1)
+        XCTAssertEqual(database.listeningCount, 1)
+        XCTAssertEqual(database.installations.first?.version, "17.2")
+        XCTAssertEqual(database.installations.first?.sources, [.localService])
+        XCTAssertEqual(snapshot.localServices.count, 2)
+    }
+
     func testAggregatesAndSortsVisibleTCPListeners() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
@@ -1053,6 +1539,124 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.localServices[1].bindings, [
             ListenerBinding(address: "*", port: 3000, family: .ipv4),
         ])
+    }
+
+    func testAttributesPythonListenerToWorkingDirectoryProject() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpython3.13\nf7\ntIPv4\nn127.0.0.1:8000\n",
+            ],
+            fileContents: [
+                "/Users/test/Projects/example-api/pyproject.toml": "[project] # PEP 621 metadata\nname = \"example-api\"\n",
+            ],
+            processExecutablePaths: [42: "/opt/homebrew/bin/python3.13"],
+            processWorkingDirectoryPaths: [42: "/Users/test/Projects/example-api/Sources"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "example-api")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Users/test/Projects/example-api")
+    }
+
+    func testAttributesPythonListenerUsingDottedPEP621ProjectName() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpython3.13\nf7\ntIPv4\nn127.0.0.1:8000\n",
+            ],
+            fileContents: [
+                "/Users/test/Projects/backend/pyproject.toml": "project.name = \"example-api\"\n",
+            ],
+            processWorkingDirectoryPaths: [42: "/Users/test/Projects/backend/Sources"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "example-api")
+    }
+
+    func testAttributesNodeListenerToWorkingDirectoryProject() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p43\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
+            ],
+            fileContents: [
+                "/Users/test/Projects/web/package.json": "{\"name\":\"web-console\"}",
+            ],
+            processExecutablePaths: [43: "/opt/homebrew/bin/node"],
+            processWorkingDirectoryPaths: [43: "/Users/test/Projects/web/src"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "web-console")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Users/test/Projects/web")
+    }
+
+    func testAttributesNodeListenerToContainingGitProject() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p43\ncnode\nf7\ntIPv4\nn127.0.0.1:5173\n",
+            ],
+            existingFiles: ["/Users/test/Projects/personal-os/.git"],
+            fileContents: [
+                "/Users/test/Projects/personal-os/frontend/package.json": "{\"name\":\"frontend\"}",
+            ],
+            processWorkingDirectoryPaths: [43: "/Users/test/Projects/personal-os/frontend/src"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "personal-os")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Users/test/Projects/personal-os/frontend")
+    }
+
+    func testAttributesPythonListenerToContainingApplication() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p1925\ncpython3.11\nf7\ntIPv4\nn127.0.0.1:9898\n",
+            ],
+            processExecutablePaths: [
+                1925: "/Applications/oMLX.app/Contents/Resources/Python/cpython-3.11/bin/python3.11",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .application)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "oMLX")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Applications/oMLX.app")
+    }
+
+    func testPrefersWorkingDirectoryProjectOverContainingApplication() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p1925\ncpython3.11\nf7\ntIPv4\nn127.0.0.1:9898\n",
+            ],
+            fileContents: [
+                "/Users/test/Projects/client-api/pyproject.toml": "[project]\nname = \"client-api\"\n",
+            ],
+            processExecutablePaths: [
+                1925: "/Applications/oMLX.app/Contents/Resources/Python/bin/python3.11",
+            ],
+            processWorkingDirectoryPaths: [1925: "/Users/test/Projects/client-api/src"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "client-api")
+    }
+
+    func testAttributionReadFailureFallsBackWithoutNotice() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpython3.13\nf7\ntIPv4\nn127.0.0.1:8000\n",
+            ],
+            processExecutableFailures: [42],
+            processWorkingDirectoryFailures: [42]
+        )).scan().snapshot
+
+        XCTAssertNil(snapshot.localServices.first?.attribution)
+        XCTAssertFalse(snapshot.issues.contains { $0.contains("归属") })
     }
 
     func testClassifiesListenerExposureFromBindingAddress() {
@@ -1133,6 +1737,26 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(groups[2].processName, "node")
     }
 
+    func testKeepsDifferentLocalServiceAttributionsInSeparateDisplayGroups() {
+        let binding = ListenerBinding(address: "127.0.0.1", port: 8000, family: .ipv4)
+        let groups = groupLocalServicesForDisplay([
+            LocalServiceSnapshot(
+                processName: "python3.13",
+                pid: 10,
+                bindings: [binding],
+                attribution: LocalServiceAttribution(kind: .project, name: "api-a", path: "/Projects/api-a")
+            ),
+            LocalServiceSnapshot(
+                processName: "python3.13",
+                pid: 20,
+                bindings: [binding],
+                attribution: LocalServiceAttribution(kind: .project, name: "api-b", path: "/Projects/api-b")
+            ),
+        ])
+
+        XCTAssertEqual(groups.map(\.displayName), ["api-a", "api-b"])
+    }
+
     func testBuildsOneExposureNotificationPerDisplayedLocalServiceGroup() {
         let localBinding = ListenerBinding(address: "127.0.0.1", port: 8000, family: .ipv4)
         let exposedBinding = ListenerBinding(address: "*", port: 8001, family: .ipv4)
@@ -1156,7 +1780,7 @@ final class EnvironmentScannerTests: XCTestCase {
             ("node", "Node.js", "RuntimeNodeLogo"),
             ("postgres", "PostgreSQL", "ServicePostgreSQLLogo"),
             ("mongod", "MongoDB", "ServiceMongoDBLogo"),
-            ("mysqld", "MySQL", "ServiceMySQLLogo"),
+            ("mysqld", "mysqld", nil),
             ("mariadbd", "MariaDB", "ServiceMariaDBLogo"),
             ("redis-server", "Redis", "ServiceRedisLogo"),
             ("adb", "Android Debug Bridge", nil),
@@ -1250,7 +1874,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV8SnapshotRoundTripsSourcesAndV7IsRejected() throws {
+    func testV13SnapshotRoundTripsEnvironmentConfigurationAndV12IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -1274,11 +1898,22 @@ final class EnvironmentScannerTests: XCTestCase {
                 "/bin/node": "v22.0.0\n",
                 "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
             ],
-            existingFiles: ["/Users/test/.config/gh/hosts.yml", "/Users/test/.gitignore"]
+            existingFiles: ["/Users/test/.config/gh/hosts.yml", "/Users/test/.gitignore"],
+            fileContents: ["/Users/test/Projects/web/package.json": "{\"name\":\"web-console\"}"],
+            processExecutablePaths: [42: "/bin/node"],
+            processWorkingDirectoryPaths: [42: "/Users/test/Projects/web/src"],
+            applications: [
+                "com.apple.Terminal": InstalledApplication(
+                    name: "Terminal", version: "2.15", path: "/System/Applications/Utilities/Terminal.app"
+                ),
+            ]
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 8)
+        XCTAssertEqual(store.load()?.schemaVersion, 13)
+        XCTAssertEqual(store.load()?.terminalApplications.first?.name, "Terminal")
+        XCTAssertEqual(store.load()?.shellInstallations.first?.path, "/bin/zsh")
+        XCTAssertTrue(store.load()?.shellInstallations.first?.isDefault == true)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
@@ -1293,7 +1928,14 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.localConfigurationExists == true)
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.ghTokenExists == true)
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
+        XCTAssertEqual(store.load()?.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(store.load()?.localServices.first?.attribution?.name, "web-console")
+        XCTAssertEqual(store.load()?.localServices.first?.attribution?.path, "/Users/test/Projects/web")
         XCTAssertEqual(store.load()?.runtimes.first { $0.id == "node" }?.installations.first?.sources, [.system])
+        XCTAssertEqual(store.load()?.databaseInstallationOverviews.map(\.id), [
+            "postgresql", "mysql", "mariadb", "mongodb", "redis",
+        ])
+        XCTAssertEqual(store.load()?.databaseInstallationOverviews.first?.discoveryState, .notFound)
 
         var json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any])
         var runtimes = try XCTUnwrap(json["runtimes"] as? [[String: Any]])
@@ -1308,7 +1950,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 7
+        json["schemaVersion"] = 12
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
@@ -1318,6 +1960,7 @@ private struct StubMachine: MachineAccess {
     let environment: [String: String]
     let hostName = "test-host"
     let currentDirectoryPath = "/"
+    let defaultLoginShellPath: String?
     let executables: Set<String>
     let resolvedPaths: [String: String]
     let commandOutputs: [String: String]
@@ -1326,10 +1969,18 @@ private struct StubMachine: MachineAccess {
     let directoryContents: [String: [String]]
     let directoryFailures: Set<String>
     let existingFiles: Set<String>
+    let fileContentsByPath: [String: String]
+    let processExecutablePaths: [Int32: String]
+    let processExecutableFailures: Set<Int32>
+    let processWorkingDirectoryPaths: [Int32: String]
+    let processWorkingDirectoryFailures: Set<Int32>
+    let applications: [String: InstalledApplication]
 
     init(
         path: [String],
         environment: [String: String] = [:],
+        defaultLoginShellPath: String? = "/bin/zsh",
+        registeredShells: String? = "/bin/zsh\n",
         executables: Set<String> = [],
         resolvedPaths: [String: String] = [:],
         commandOutputs: [String: String] = [:],
@@ -1338,17 +1989,33 @@ private struct StubMachine: MachineAccess {
         directoryContents: [String: [String]] = [:],
         directoryFailures: Set<String> = [],
         existingFiles: Set<String> = [],
-        fileContents: [String: String] = [:]
+        fileContents: [String: String] = [:],
+        processExecutablePaths: [Int32: String] = [:],
+        processExecutableFailures: Set<Int32> = [],
+        processWorkingDirectoryPaths: [Int32: String] = [:],
+        processWorkingDirectoryFailures: Set<Int32> = [],
+        applications: [String: InstalledApplication] = [:]
     ) {
         self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
-        self.executables = executables
+        self.defaultLoginShellPath = defaultLoginShellPath
+        self.executables = executables.union(["/bin/zsh"])
         self.resolvedPaths = resolvedPaths
         self.commandOutputs = commandOutputs
         self.commandStatuses = commandStatuses
         self.commandTimeouts = commandTimeouts
         self.directoryContents = directoryContents
         self.directoryFailures = directoryFailures
-        self.existingFiles = existingFiles.union(fileContents.keys)
+        var allFileContents = fileContents
+        if allFileContents["/etc/shells"] == nil, let registeredShells {
+            allFileContents["/etc/shells"] = registeredShells
+        }
+        self.existingFiles = existingFiles.union(allFileContents.keys)
+        self.fileContentsByPath = allFileContents
+        self.processExecutablePaths = processExecutablePaths
+        self.processExecutableFailures = processExecutableFailures
+        self.processWorkingDirectoryPaths = processWorkingDirectoryPaths
+        self.processWorkingDirectoryFailures = processWorkingDirectoryFailures
+        self.applications = applications
     }
 
     func diskSpace() -> DiskSpace { DiskSpace(totalBytes: 1, freeBytes: 1) }
@@ -1363,7 +2030,26 @@ private struct StubMachine: MachineAccess {
         return entries
     }
 
+    func fileData(atPath path: String) throws -> Data {
+        guard let contents = fileContentsByPath[path] else { throw CocoaError(.fileReadNoSuchFile) }
+        return Data(contents.utf8)
+    }
+
     func resolvingSymlinksInPath(_ path: String) -> String { resolvedPaths[path, default: path] }
+
+    func executablePath(forPID pid: Int32) throws -> String {
+        if processExecutableFailures.contains(pid) { throw CocoaError(.fileReadNoPermission) }
+        guard let path = processExecutablePaths[pid] else { throw CocoaError(.fileNoSuchFile) }
+        return path
+    }
+
+    func workingDirectoryPath(forPID pid: Int32) throws -> String {
+        if processWorkingDirectoryFailures.contains(pid) { throw CocoaError(.fileReadNoPermission) }
+        guard let path = processWorkingDirectoryPaths[pid] else { throw CocoaError(.fileNoSuchFile) }
+        return path
+    }
+
+    func application(bundleIdentifier: String) -> InstalledApplication? { applications[bundleIdentifier] }
 
     func command(executable: String, arguments: [String]) -> MachineCommandResult {
         let key = ([executable] + arguments).joined(separator: " ")

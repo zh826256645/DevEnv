@@ -28,6 +28,18 @@ _Avoid_: Issue, Error, Health Problem
 一次 Environment Scan 产生的、描述主机基础信息与当前 App 运行用户可见开发工具状态的结果。
 _Avoid_: Environment, System Profile
 
+**Terminal Application**:
+当前 App 运行用户在该 Mac 上可发现的、提供交互式终端界面的已安装应用；不表示启动 DevEnv 的终端会话。
+_Avoid_: Terminal Session, Current Terminal, 终端会话
+
+**Shell Installation**:
+当前 App 运行用户在该 Mac 上可选择为登录 Shell，或已被当前账户配置为 Default Login Shell 的命令解释器实例；配置项可能因未注册或不可执行而不可用。
+_Avoid_: Shell Session, Shell Configuration
+
+**Default Login Shell**:
+当前 App 运行用户的账户记录指定为登录后默认启动的 Shell 路径；该路径可能无法解析为可用的 Shell Installation，也不表示当前存在 Shell 会话。
+_Avoid_: Current Shell, Active Shell
+
 **Runtime Installation**:
 本机可被发现的某个语言运行时实例，包含其版本与来源位置。
 _Avoid_: Runtime, Package
@@ -63,6 +75,10 @@ _Avoid_: Installation Method, Runtime State
 **Local Service**:
 当前 App 运行用户可见、按 PID 聚合且至少具有一个 TCP Listener Binding 的本机进程。
 _Avoid_: Daemon, Background Service
+
+**Local Service Attribution**:
+Environment Scan 对 Python 或 Node Local Service 所属开发项目或宿主 App 的识别结果；没有充分本机证据时为空。
+_Avoid_: API Name, Process Owner, Service Guess
 
 **Listener Binding**:
 Local Service 监听 TCP 连接的地址、端口和地址族组合。

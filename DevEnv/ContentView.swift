@@ -22,10 +22,12 @@ private extension View {
 
 struct LocalServiceDisplayGroup: Identifiable {
     var id: Int32 { pids[0] }
+    var displayName: String { attribution?.name ?? localServiceDescriptor(for: processName).displayName }
 
     let processName: String
     var pids: [Int32]
     let bindings: [ListenerBinding]
+    let attribution: LocalServiceAttribution?
 }
 
 struct LocalServiceDescriptor {
@@ -68,7 +70,9 @@ func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
         return descriptor("PostgreSQL", "PostgreSQL 关系型数据库", "cylinder.fill", .blue, "ServicePostgreSQLLogo")
     case "mongod", "mongos":
         return descriptor("MongoDB", "MongoDB 文档数据库", "leaf.fill", .green, "ServiceMongoDBLogo")
-    case "mysqld", "mysql":
+    case "mysqld":
+        return descriptor("mysqld", "仅凭进程名无法区分 MySQL 与 MariaDB", "cylinder.fill", .secondary)
+    case "mysql":
         return descriptor("MySQL", "MySQL 关系型数据库", "cylinder.fill", Color(red: 0.27, green: 0.47, blue: 0.63), "ServiceMySQLLogo")
     case "mariadbd":
         return descriptor("MariaDB", "MariaDB 关系型数据库", "cylinder.fill", Color(red: 0, green: 0.36, blue: 0.43), "ServiceMariaDBLogo")
@@ -95,7 +99,9 @@ func groupLocalServicesForDisplay(
     // ponytail: listener counts are small; use keyed indices if this becomes measurable.
     for service in services {
         if let index = groups.firstIndex(where: {
-            $0.processName == service.processName && $0.bindings == service.bindings
+            $0.processName == service.processName
+                && $0.bindings == service.bindings
+                && $0.attribution == service.attribution
         }) {
             groups[index].pids.append(service.pid)
             groups[index].pids.sort()
@@ -103,7 +109,8 @@ func groupLocalServicesForDisplay(
             groups.append(LocalServiceDisplayGroup(
                 processName: service.processName,
                 pids: [service.pid],
-                bindings: service.bindings
+                bindings: service.bindings,
+                attribution: service.attribution
             ))
         }
     }
@@ -115,7 +122,7 @@ func localServiceNotifications(_ services: [LocalServiceSnapshot]) -> [String] {
     groupLocalServicesForDisplay(services).compactMap { group in
         let exposedCount = group.bindings.count { !$0.isLoopback }
         guard exposedCount > 0 else { return nil }
-        return "\(localServiceDescriptor(for: group.processName).displayName)：\(exposedCount) 个监听项可能可被局域网访问"
+        return "\(group.displayName)：\(exposedCount) 个监听项可能可被局域网访问"
     }
 }
 
@@ -164,18 +171,48 @@ final class EnvironmentViewModel: ObservableObject {
 }
 
 struct ContentView: View {
-    private enum EnvironmentCard {
+    private enum Page: CaseIterable, Hashable {
+        case overview
+        case runtimes
+        case databases
+        case localServices
+
+        var title: String {
+            switch self {
+            case .overview: "总览"
+            case .runtimes: "Runtime"
+            case .databases: "数据库"
+            case .localServices: "本地服务"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .overview: "square.grid.2x2"
+            case .runtimes: "terminal"
+            case .databases: "cylinder"
+            case .localServices: "network"
+            }
+        }
+    }
+
+    private enum EnvironmentCard: CaseIterable {
         case homebrew
         case git
+        case terminal
+        case shell
         case path
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model = EnvironmentViewModel()
+    @State private var selectedPage: Page? = .overview
     @State private var copiedPath: String?
     @State private var hoveredPath: String?
     @State private var expandedRuntimeID: String?
     @State private var fullyShownRuntimeID: String?
+    @State private var expandedDatabaseID: String?
+    @State private var fullyShownDatabaseID: String?
     @State private var expandedEnvironmentCard: EnvironmentCard?
     @State private var showsAllPathEntries = false
     @State private var isShowingNotifications = false
@@ -186,7 +223,7 @@ struct ContentView: View {
     var body: some View {
         Group {
             if let snapshot = model.snapshot {
-                overview(snapshot)
+                navigation(snapshot)
             } else if model.isScanning {
                 loadingView
             } else {
@@ -221,36 +258,88 @@ struct ContentView: View {
 
                 Button(action: model.scan) {
                     if model.isScanning {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.small)
-                            Text("扫描中…")
-                        }
+                        ProgressView().controlSize(.small)
                     } else {
-                        Label("重新扫描", systemImage: "arrow.clockwise")
+                        Image(systemName: "arrow.clockwise")
                     }
                 }
+                .accessibilityLabel(model.isScanning ? "正在扫描" : "重新扫描")
+                .help(model.isScanning ? "正在扫描" : "重新扫描")
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(model.isScanning)
             }
         }
     }
 
-    private func overview(_ snapshot: MachineSnapshot) -> some View {
-        ScrollView {
+    private func navigation(_ snapshot: MachineSnapshot) -> some View {
+        NavigationSplitView {
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(nsImage: NSApplication.shared.applicationIconImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 36, height: 36)
+                    Text("DevEnv")
+                        .font(.title3.bold())
+                    Spacer()
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 18)
+
+                Divider()
+
+                List(selection: $selectedPage) {
+                    ForEach(Page.allCases, id: \.self) { page in
+                        Label(page.title, systemImage: page.systemImage)
+                            .font(.system(size: 15, weight: .medium))
+                            .imageScale(.large)
+                            .padding(.vertical, 8)
+                            .contentShape(Rectangle())
+                            .tag(page)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10))
+                    }
+                }
+                .listStyle(.sidebar)
+                .padding(.top, 14)
+            }
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
+        } detail: {
+            page(snapshot)
+        }
+    }
+
+    private func page(_ snapshot: MachineSnapshot) -> some View {
+        let page = selectedPage ?? .overview
+
+        return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                header(snapshot)
+                header(page.title, snapshot: snapshot)
                 if let scanError = model.scanError {
                     scanErrorBanner(scanError, snapshot: snapshot)
                 }
-                topOverviewSection(snapshot)
-                runtimesSection(snapshot.runtimes)
-                localServicesSection(snapshot)
-                environmentSection(snapshot)
+
+                switch page {
+                case .overview:
+                    overviewMetricsSection(snapshot)
+                    topOverviewSection(snapshot)
+                    environmentSection(snapshot)
+                case .runtimes:
+                    runtimePage(snapshot.runtimes)
+                case .databases:
+                    databasePage(snapshot.databaseInstallationOverviews)
+                case .localServices:
+                    localServicesSection(snapshot)
+                }
             }
-            .frame(maxWidth: 900)
+            .frame(
+                maxWidth: page == .overview || page == .runtimes || page == .databases || page == .localServices
+                    ? 1100
+                    : 900
+            )
             .frame(maxWidth: .infinity)
             .padding(28)
         }
+        .id(page)
     }
 
     private var loadingView: some View {
@@ -281,9 +370,9 @@ struct ContentView: View {
         }
     }
 
-    private func header(_ snapshot: MachineSnapshot) -> some View {
+    private func header(_ title: String, snapshot: MachineSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("开发环境总览")
+            Text(title)
                 .font(.largeTitle.bold())
             HStack(spacing: 10) {
                 Text("最近扫描：\(formatted(snapshot.scannedAt))")
@@ -326,16 +415,79 @@ struct ContentView: View {
             summarySection(snapshot)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func overviewMetricsSection(_ snapshot: MachineSnapshot) -> some View {
+        let discoveredCount = snapshot.runtimes.count { $0.state == .discovered }
+        let databaseCount = snapshot.databaseInstallationOverviews.count { $0.discoveryState == .discovered }
+        let localServiceCount = groupLocalServicesForDisplay(snapshot.localServices).count
+
+        return LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
+            spacing: 12
+        ) {
+            overviewMetricCard(
+                discoveredCount.formatted(),
+                label: "Runtime 类别",
+                systemImage: "square.grid.2x2",
+                tint: .blue
+            )
+            overviewMetricCard(
+                "\(databaseCount) / \(snapshot.databaseInstallationOverviews.count)",
+                label: "数据库",
+                systemImage: "cylinder",
+                tint: .blue
+            )
+            overviewMetricCard(
+                localServiceCount.formatted(),
+                label: "本地服务",
+                systemImage: "network",
+                tint: .purple
+            )
+            overviewMetricCard(
+                EnvironmentCard.allCases.count.formatted(),
+                label: "环境配置项",
+                systemImage: "slider.horizontal.3",
+                tint: .green
+            )
+        }
+    }
+
+    private func overviewMetricCard(
+        _ value: String,
+        label: String,
+        systemImage: String,
+        tint: Color
+    ) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 46, height: 46)
+                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.title2.bold())
+                    .monospacedDigit()
+            }
+        }
         .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
         .background {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.45))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .stroke(Color.primary.opacity(0.08))
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
                 }
         }
-        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
     }
 
     private func topOverviewCard<Content: View>(
@@ -355,45 +507,71 @@ struct ContentView: View {
             .padding(.leading, 4)
 
             content()
-                .padding(18)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.primary.opacity(0.10))
-                        }
-                        .shadow(color: .black.opacity(0.035), radius: 8, y: 3)
-                }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(18)
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.primary.opacity(0.018))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08))
+                }
+        }
     }
 
     private func summarySection(_ snapshot: MachineSnapshot) -> some View {
-        let discoveredCount = snapshot.runtimes.filter { $0.state == .discovered }.count
-        let installationCount = snapshot.runtimes.reduce(0) { $0 + $1.installations.count }
-        let localServiceCount = groupLocalServicesForDisplay(snapshot.localServices).count
+        let pathConflictCount = snapshot.runtimes.count { $0.hasPathVersionConflict }
+        let unavailableRuntimeCount = snapshot.runtimes.count { $0.state == .unavailable }
+        let databaseNotListeningCount = snapshot.databaseInstallationOverviews.count {
+            $0.discoveryState == .discovered && $0.listeningState != .listening
+        }
+        let exposedPortCount = groupLocalServicesForDisplay(snapshot.localServices).reduce(0) {
+            $0 + $1.bindings.count { !$0.isLoopback }
+        }
+        let needsAttention = pathConflictCount + unavailableRuntimeCount + databaseNotListeningCount + exposedPortCount > 0
 
-        return topOverviewCard("扫描汇总", systemImage: "chart.bar.fill") {
-            VStack(spacing: 12) {
-                summaryMetric(discoveredCount, label: "已发现 Runtime 类别", systemImage: "magnifyingglass")
-                summaryMetric(installationCount, label: "Runtime Installation", systemImage: "arrow.down.to.line.compact")
-                summaryMetric(localServiceCount, label: "本地服务", systemImage: "network")
+        return topOverviewCard("环境状态", systemImage: "checkmark.shield") {
+            VStack(spacing: 10) {
+                summaryMetric(pathConflictCount, label: "PATH 冲突", systemImage: "exclamationmark.triangle.fill", tint: .orange)
+                summaryMetric(unavailableRuntimeCount, label: "Runtime 未发现", systemImage: "questionmark.circle.fill", tint: .secondary)
+                summaryMetric(databaseNotListeningCount, label: "数据库未监听", systemImage: "cylinder", tint: .blue)
+                summaryMetric(exposedPortCount, label: "异常监听端口", systemImage: "antenna.radiowaves.left.and.right", tint: .red)
+
+                HStack(spacing: 8) {
+                    Spacer()
+                    Text("环境整体状态：")
+                        .foregroundStyle(.secondary)
+                    Text(needsAttention ? "需关注" : "正常")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(needsAttention ? .orange : .green)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background((needsAttention ? Color.orange : Color.green).opacity(0.10), in: Capsule())
+                    Spacer()
+                }
+                .font(.callout)
+                .padding(.vertical, 10)
+                .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.primary.opacity(0.10))
+                }
             }
         }
     }
 
-    private func summaryMetric(_ value: Int, label: String, systemImage: String) -> some View {
+    private func summaryMetric(_ value: Int, label: String, systemImage: String, tint: Color) -> some View {
         HStack(spacing: 12) {
             ZStack {
                 Circle()
-                    .fill(Color.accentColor.opacity(0.10))
+                    .fill(tint.opacity(0.10))
                 Image(systemName: systemImage)
                     .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(tint)
             }
-            .frame(width: 42, height: 42)
+            .frame(width: 36, height: 36)
             .accessibilityHidden(true)
 
             Text(label)
@@ -402,11 +580,11 @@ struct ContentView: View {
             Text(value.formatted())
                 .font(.title2.bold())
                 .monospacedDigit()
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(tint)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, minHeight: 64)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, minHeight: 54)
         .background {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .fill(Color.primary.opacity(0.012))
@@ -420,19 +598,8 @@ struct ContentView: View {
 
     private func runtimesSection(_ runtimes: [RuntimeSnapshot]) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(.primary)
-                    Image(systemName: "terminal")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color(nsColor: .windowBackgroundColor))
-                }
-                .frame(width: 30, height: 30)
-
-                Text("Runtime")
-                    .font(.title2.bold())
-            }
+            Text("Runtime 列表")
+                .font(.title3.bold())
 
             if let expandedRuntimeID,
                let expandedIndex = runtimes.firstIndex(where: { $0.id == expandedRuntimeID }) {
@@ -442,20 +609,11 @@ struct ContentView: View {
                 runtimeGrid(runtimes)
             }
         }
-        .padding(16)
-        .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.primary.opacity(0.08))
-                }
-        }
     }
 
     private func runtimeGrid(_ runtimes: [RuntimeSnapshot]) -> some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 180, maximum: 260), spacing: 14, alignment: .top)],
+            columns: Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top), count: 2),
             alignment: .leading,
             spacing: 14
         ) {
@@ -465,25 +623,517 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private func runtimePage(_ runtimes: [RuntimeSnapshot]) -> some View {
+        runtimeMetricsSection(runtimes)
+        runtimesSection(runtimes)
+    }
+
+    private func runtimeMetricsSection(_ runtimes: [RuntimeSnapshot]) -> some View {
+        let discoveredCount = runtimes.count { $0.state == .discovered }
+        let installationCount = runtimes.reduce(0) { $0 + $1.installations.count }
+        let conflictCount = runtimes.count { $0.hasPathVersionConflict }
+        let unavailableCount = runtimes.count { $0.state == .unavailable }
+
+        return LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
+            spacing: 12
+        ) {
+            runtimeMetricCard(
+                discoveredCount,
+                title: "Runtime 类别",
+                systemImage: "terminal",
+                tint: .blue
+            )
+            runtimeMetricCard(
+                installationCount,
+                title: "已发现版本",
+                systemImage: "checkmark.circle.fill",
+                tint: .green
+            )
+            runtimeMetricCard(
+                conflictCount,
+                title: "PATH 冲突",
+                systemImage: "exclamationmark.triangle.fill",
+                tint: .orange
+            )
+            runtimeMetricCard(
+                unavailableCount,
+                title: "未发现",
+                systemImage: "questionmark",
+                tint: .secondary
+            )
+        }
+    }
+
+    private func runtimeMetricCard(
+        _ value: Int,
+        title: String,
+        systemImage: String,
+        tint: Color
+    ) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 46, height: 46)
+                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(value.formatted())
+                    .font(.title2.bold())
+                    .monospacedDigit()
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
+                }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func databaseInstallationsSection(_ overviews: [DatabaseInstallationOverview]) -> some View {
+        let shouldCollapseExpanded = expandedDatabaseID.map { id in
+            overviews.first(where: { $0.id == id })?.installations.isEmpty ?? true
+        } ?? false
+
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("Database 列表")
+                .font(.title3.bold())
+
+            if let expandedDatabaseID,
+               let expanded = overviews.first(where: { $0.id == expandedDatabaseID }) {
+                databaseCard(expanded)
+                databaseGrid(overviews.filter { $0.id != expandedDatabaseID })
+            } else {
+                databaseGrid(overviews)
+            }
+        }
+        .onChange(of: shouldCollapseExpanded) { _, shouldCollapse in
+            if shouldCollapse {
+                expandedDatabaseID = nil
+                fullyShownDatabaseID = nil
+            }
+        }
+    }
+
+    private func databaseGrid(_ overviews: [DatabaseInstallationOverview]) -> some View {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top), count: 2),
+            alignment: .leading,
+            spacing: 14
+        ) {
+            ForEach(overviews) { database in
+                databaseCard(database)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func databasePage(_ overviews: [DatabaseInstallationOverview]) -> some View {
+        databaseMetricsSection(overviews)
+        databaseInstallationsSection(overviews)
+    }
+
+    private func databaseMetricsSection(_ overviews: [DatabaseInstallationOverview]) -> some View {
+        let discoveredCount = overviews.count { $0.discoveryState == .discovered }
+        let listeningCount = overviews.count { $0.listeningState == .listening }
+        let unavailableCount = overviews.count { $0.discoveryState == .notFound }
+
+        return LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
+            spacing: 12
+        ) {
+            runtimeMetricCard(
+                overviews.count,
+                title: "数据库类别",
+                systemImage: "cylinder.split.1x2.fill",
+                tint: .blue
+            )
+            runtimeMetricCard(
+                discoveredCount,
+                title: "已发现安装",
+                systemImage: "checkmark.circle.fill",
+                tint: .green
+            )
+            runtimeMetricCard(
+                listeningCount,
+                title: "正在监听",
+                systemImage: "waveform.path.ecg",
+                tint: .green
+            )
+            runtimeMetricCard(
+                unavailableCount,
+                title: "未发现",
+                systemImage: "questionmark",
+                tint: .secondary
+            )
+        }
+    }
+
+    private func databaseCard(_ database: DatabaseInstallationOverview) -> some View {
+        let isExpanded = expandedDatabaseID == database.id
+        let highlightsStatus = database.installations.contains { $0.error != nil }
+            || database.discoveryState == .unknown
+            || database.listeningState == .unknown
+        let showsAllInstallations = fullyShownDatabaseID == database.id
+        let installations = showsAllInstallations
+            ? database.installations
+            : Array(database.installations.prefix(3))
+
+        return Group {
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 16) {
+                    Button {
+                        toggleCard(database.id, expandedID: $expandedDatabaseID, fullyShownID: $fullyShownDatabaseID)
+                    } label: {
+                        databaseExpandedSummary(database)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue("已展开")
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(installations) { installation in
+                            databaseInstallationRow(installation)
+                        }
+                        if database.installations.count > 3 {
+                            Button {
+                                toggleInstallationLimit(database.id, fullyShownID: $fullyShownDatabaseID)
+                            } label: {
+                                Label(
+                                    showsAllInstallations
+                                        ? "收起至 3 个安装路径"
+                                        : "展开其余 \(database.installations.count - 3) 个安装路径",
+                                    systemImage: showsAllInstallations ? "chevron.up" : "chevron.down"
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(Color.primary.opacity(0.09))
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            } else if database.installations.isEmpty {
+                databaseSummary(database)
+            } else {
+                Button {
+                    toggleCard(database.id, expandedID: $expandedDatabaseID, fullyShownID: $fullyShownDatabaseID)
+                } label: {
+                    databaseSummary(database)
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue("已折叠")
+            }
+        }
+        .padding(isExpanded ? 16 : 10)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: isExpanded ? nil : 100,
+            alignment: isExpanded ? .topLeading : .leading
+        )
+        .background {
+            RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                .fill(Color.primary.opacity(0.018))
+                .overlay {
+                    RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                        .stroke(highlightsStatus ? Color.orange.opacity(0.55) : Color.primary.opacity(0.10))
+                }
+        }
+    }
+
+    private func databaseExpandedSummary(_ database: DatabaseInstallationOverview) -> some View {
+        let discovery = databaseDiscoveryStyle(database.discoveryState)
+        let listening = databaseListeningStyle(database.listeningState)
+
+        return HStack(alignment: .center, spacing: 18) {
+            databaseLogo(database, size: 64, padding: 11, usesNeutralBackground: true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(database.name)
+                    .font(.title3.bold())
+                Text(databaseVersion(database))
+                    .font(.title2.bold())
+                    .monospacedDigit()
+                    .foregroundStyle(database.installations.contains { $0.error != nil } ? .orange : .primary)
+                Label("\(database.installations.count) 个安装", systemImage: "square.stack.3d.up.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Label(listening.title, systemImage: listening.symbol)
+                    .font(.caption.weight(.semibold))
+                .foregroundStyle(listening.color)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(0.045), in: Capsule())
+            }
+            .frame(width: 150, alignment: .leading)
+
+            HStack(spacing: 10) {
+                environmentMetric(
+                    title: "Database Discovery State",
+                    value: discovery.title,
+                    systemImage: discovery.symbol,
+                    tint: discovery.color,
+                    usesNeutralBackground: true
+                )
+                environmentMetric(
+                    title: "Database Listening State",
+                    value: listening.title,
+                    systemImage: listening.symbol,
+                    tint: listening.color,
+                    usesNeutralBackground: true
+                )
+                environmentMetric(
+                    title: "正在监听",
+                    value: "\(database.listeningCount)",
+                    systemImage: "network",
+                    tint: database.listeningCount > 0 ? .green : .secondary,
+                    usesNeutralBackground: true
+                )
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func databaseSummary(_ database: DatabaseInstallationOverview) -> some View {
+        let tint = databaseTint(database)
+        let discovery = databaseDiscoveryStyle(database.discoveryState)
+        let listening = databaseListeningStyle(database.listeningState)
+        let statusColor = database.installations.isEmpty ? discovery.color : tint
+        let statusSymbol = database.installations.isEmpty ? "questionmark" : listening.symbol
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 12) {
+                databaseLogo(database, size: 48, padding: 8)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(database.name)
+                        .font(.headline)
+                    Text(databaseVersion(database))
+                        .font(.title3.bold())
+                        .monospacedDigit()
+                        .foregroundStyle(database.installations.contains { $0.error != nil } ? .orange : .primary)
+                }
+
+                Spacer(minLength: 8)
+
+                ZStack {
+                    Circle().fill(statusColor.opacity(0.13))
+                    Image(systemName: statusSymbol)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(statusColor)
+                }
+                .frame(width: 32, height: 32)
+                .accessibilityHidden(true)
+            }
+
+            Text(
+                database.installations.isEmpty
+                    ? "未检测到 Database Installation"
+                    : "\(database.installations.count) 个安装 · \(database.listeningCount) 个正在监听"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.leading, 60)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .contentShape(Rectangle())
+    }
+
+    private func databaseLogo(
+        _ database: DatabaseInstallationOverview,
+        size: CGFloat,
+        padding: CGFloat,
+        usesNeutralBackground: Bool = false
+    ) -> some View {
+        let appearance: (asset: String, color: Color) = switch database.id {
+        case "mysql": ("ServiceMySQLLogo", Color(red: 0.27, green: 0.47, blue: 0.63))
+        case "mariadb": ("ServiceMariaDBLogo", Color(red: 0, green: 0.36, blue: 0.43))
+        case "mongodb": ("ServiceMongoDBLogo", Color(red: 0.29, green: 0.66, blue: 0.34))
+        case "redis": ("ServiceRedisLogo", Color(red: 0.82, green: 0.16, blue: 0.15))
+        default: ("ServicePostgreSQLLogo", Color(red: 0.20, green: 0.45, blue: 0.64))
+        }
+        return ZStack {
+            RoundedRectangle(cornerRadius: size > 50 ? 14 : 11, style: .continuous)
+                .fill(usesNeutralBackground ? Color.primary.opacity(0.045) : appearance.color.opacity(0.10))
+            Image(appearance.asset)
+                .resizable()
+                .scaledToFit()
+                .padding(padding)
+        }
+        .frame(width: size, height: size)
+        .overlay {
+            RoundedRectangle(cornerRadius: size > 50 ? 14 : 11, style: .continuous)
+                .stroke(usesNeutralBackground ? Color.primary.opacity(0.10) : appearance.color.opacity(0.16))
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func databaseInstallationRow(_ installation: DatabaseInstallation) -> some View {
+        let listening = databaseListeningStyle(installation.listeningState)
+        let tint: Color = installation.error == nil
+            ? listening.color
+            : .orange
+
+        return HStack(alignment: .center, spacing: 14) {
+            Image(systemName: installation.error == nil
+                ? listening.symbol
+                : "exclamationmark.circle.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 24)
+
+            Text(installation.version ?? "读取失败")
+                .font(.title3.weight(.semibold))
+                .monospacedDigit()
+                .textSelection(.enabled)
+                .frame(width: 90, alignment: .leading)
+
+            HStack(spacing: 5) {
+                ForEach(installation.sources, id: \.self) { source in
+                    Text(source.displayName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                }
+                Text(listening.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                copyablePath(installation.executable)
+                if let actual = installation.actualExecutable {
+                    copyablePath(actual, prefix: "实际路径")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if installation.error != nil {
+                helpIcon("该 Database Installation 已被发现，但版本读取失败或可执行文件不可用；可独立确定的 TCP 监听状态不受影响。")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(installation.error == nil ? Color.primary.opacity(0.10) : Color.orange.opacity(0.45))
+        }
+    }
+
+    private func databaseVersion(_ database: DatabaseInstallationOverview) -> String {
+        database.installations.first?.version
+            ?? database.installations.first?.error
+            ?? databaseDiscoveryStyle(database.discoveryState).title
+    }
+
+    private func databaseDiscoveryStyle(_ state: DatabaseDiscoveryState) -> (title: String, symbol: String, color: Color) {
+        switch state {
+        case .discovered: ("已发现", "checkmark.circle.fill", .green)
+        case .notFound: ("未发现", "circle.fill", .secondary)
+        case .unknown: ("发现状态未知", "exclamationmark.circle.fill", .orange)
+        }
+    }
+
+    private func databaseListeningStyle(_ state: DatabaseListeningState) -> (title: String, symbol: String, color: Color) {
+        switch state {
+        case .listening: ("正在监听", "checkmark.circle.fill", .green)
+        case .notListening: ("未监听", "circle.fill", .secondary)
+        case .unknown: ("监听状态未知", "exclamationmark.circle.fill", .orange)
+        }
+    }
+
+    private func databaseTint(_ database: DatabaseInstallationOverview) -> Color {
+        if database.installations.contains(where: { $0.error != nil }) { return .orange }
+        if database.discoveryState == .unknown || database.listeningState == .unknown { return .orange }
+        return database.listeningState == .listening ? .green : .secondary
+    }
+
+    private func toggleCard(_ id: String, expandedID: Binding<String?>, fullyShownID: Binding<String?>) {
+        let nextID = expandedID.wrappedValue == id ? nil : id
+        if reduceMotion {
+            expandedID.wrappedValue = nextID
+            fullyShownID.wrappedValue = nil
+        } else {
+            withAnimation(.smooth(duration: 0.32)) {
+                expandedID.wrappedValue = nextID
+                fullyShownID.wrappedValue = nil
+            }
+        }
+    }
+
+    private func toggleInstallationLimit(_ id: String, fullyShownID: Binding<String?>) {
+        let nextID = fullyShownID.wrappedValue == id ? nil : id
+        if reduceMotion {
+            fullyShownID.wrappedValue = nextID
+        } else {
+            withAnimation(.snappy(duration: 0.25, extraBounce: 0.02)) {
+                fullyShownID.wrappedValue = nextID
+            }
+        }
+    }
+
     private func localServicesSection(_ snapshot: MachineSnapshot) -> some View {
         let groups = groupLocalServicesForDisplay(snapshot.localServices)
         let portCount = groups.reduce(0) { $0 + Set($1.bindings.map(\.port)).count }
+        let exposedPortCount = groups.reduce(0) { $0 + $1.bindings.count { !$0.isLoopback } }
 
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Image(systemName: "network")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(Color.accentColor.opacity(0.85), in: Circle())
-                    .shadow(color: Color.accentColor.opacity(0.25), radius: 8, y: 3)
-                Text("本地服务")
-                    .font(.title2.bold())
-                Spacer()
-                Text("\(groups.count) 组服务 · \(portCount) 个端口")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+        return VStack(alignment: .leading, spacing: 18) {
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
+                spacing: 12
+            ) {
+                runtimeMetricCard(
+                    groups.count,
+                    title: "服务类别",
+                    systemImage: "globe",
+                    tint: .blue
+                )
+                runtimeMetricCard(
+                    groups.count,
+                    title: "正在运行",
+                    systemImage: "waveform.path.ecg",
+                    tint: .green
+                )
+                runtimeMetricCard(
+                    portCount,
+                    title: "监听端口",
+                    systemImage: "cable.connector",
+                    tint: .blue
+                )
+                runtimeMetricCard(
+                    exposedPortCount,
+                    title: "异常端口",
+                    systemImage: "exclamationmark.triangle.fill",
+                    tint: .orange
+                )
             }
+
+            Text("Local Service 列表")
+                .font(.title3.bold())
 
             if groups.isEmpty {
                 if let notice = snapshot.localServiceScanNotice {
@@ -498,27 +1148,33 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, minHeight: 110)
                 }
             } else {
-                VStack(spacing: 6) {
+                VStack(spacing: 10) {
                     ForEach(groups) { group in
                         localServiceRow(group)
                     }
                 }
             }
         }
-        .padding(18)
-        .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.primary.opacity(0.025))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Color.primary.opacity(0.10))
-                }
-        }
     }
 
     private func localServiceRow(_ group: LocalServiceDisplayGroup) -> some View {
         let descriptor = localServiceDescriptor(for: group.processName)
-        let applicationIcon = runningApplicationIcon(for: group.pids)
+        let applicationIcon: NSImage? = switch group.attribution?.kind {
+        case .application:
+            group.attribution.map { NSWorkspace.shared.icon(forFile: $0.path) }
+        case .project:
+            nil
+        case nil:
+            runningApplicationIcon(for: group.pids)
+        }
+        let explanation = switch group.attribution?.kind {
+        case .project:
+            "\(descriptor.displayName) 项目服务 · \(group.attribution.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "")"
+        case .application:
+            "\(descriptor.displayName) 运行时服务"
+        case nil:
+            descriptor.explanation
+        }
         let pidText = group.pids.count == 1
             ? "PID \(group.pids[0].formatted())"
             : "\(group.pids.count) 个进程 · PID \(group.pids.map { $0.formatted() }.joined(separator: "、"))"
@@ -558,10 +1214,10 @@ struct ContentView: View {
                         .frame(width: 9, height: 9)
                         .shadow(color: .green.opacity(0.65), radius: 4)
                         .accessibilityHidden(true)
-                    Text(descriptor.displayName)
+                    Text(group.displayName)
                         .font(.title3.bold())
                 }
-                Text(descriptor.explanation)
+                Text(explanation)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Text(processText)
@@ -572,7 +1228,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 150, maximum: 205), spacing: 8)],
+                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2),
                 alignment: .trailing,
                 spacing: 7
             ) {
@@ -580,13 +1236,13 @@ struct ContentView: View {
                     listenerBindingBadge(binding)
                 }
             }
-            .frame(minWidth: 170, maxWidth: 420, alignment: .trailing)
+            .frame(minWidth: 190, maxWidth: 480, alignment: .trailing)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .background {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.58))
+                .fill(Color.primary.opacity(0.018))
                 .overlay {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .stroke(Color.primary.opacity(0.10))
@@ -613,16 +1269,19 @@ struct ContentView: View {
             Text(binding.family.rawValue)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(tint)
+                .fixedSize(horizontal: true, vertical: false)
             Text(listenerBindingText(binding))
-                .font(.callout.monospaced())
+                .font(.caption.monospaced())
                 .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .layoutPriority(1)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
             if !binding.isLoopback {
                 ListenerExposureIcon()
             }
         }
-        .padding(.horizontal, 9)
+        .padding(.horizontal, 7)
         .padding(.vertical, 7)
         .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7))
         .overlay {
@@ -635,6 +1294,7 @@ struct ContentView: View {
     private func runtimeCard(_ runtime: RuntimeSnapshot) -> some View {
         let isExpanded = expandedRuntimeID == runtime.id
         let status = runtimeCardStatus(runtime)
+        let highlightsStatus = runtime.hasPathVersionConflict || runtime.state == .failed
         let showsAllInstallations = fullyShownRuntimeID == runtime.id
         let visibleInstallations = showsAllInstallations
             ? runtime.installations
@@ -644,7 +1304,7 @@ struct ContentView: View {
             if isExpanded {
                 VStack(alignment: .leading, spacing: 16) {
                     Button {
-                        toggleRuntime(runtime.id)
+                        toggleCard(runtime.id, expandedID: $expandedRuntimeID, fullyShownID: $fullyShownRuntimeID)
                     } label: {
                         runtimeExpandedSummary(runtime)
                     }
@@ -657,7 +1317,7 @@ struct ContentView: View {
                         }
                         if runtime.installations.count > 3 {
                             Button {
-                                toggleInstallationLimit(runtime.id)
+                                toggleInstallationLimit(runtime.id, fullyShownID: $fullyShownRuntimeID)
                             } label: {
                                 Label(
                                     showsAllInstallations
@@ -685,7 +1345,7 @@ struct ContentView: View {
                         runtimeSummary(runtime)
                     } else {
                         Button {
-                            toggleRuntime(runtime.id)
+                            toggleCard(runtime.id, expandedID: $expandedRuntimeID, fullyShownID: $fullyShownRuntimeID)
                         } label: {
                             runtimeSummary(runtime)
                         }
@@ -695,17 +1355,24 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(isExpanded ? 16 : 14)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .padding(isExpanded ? 16 : 10)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: isExpanded ? nil : 100,
+            alignment: isExpanded ? .topLeading : .leading
+        )
         .background {
             RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
-                .fill(status.color.opacity(isExpanded ? 0.08 : 0.035))
+                .fill(Color.primary.opacity(0.018))
                 .overlay {
                     RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
-                        .stroke(status.color.opacity(isExpanded ? 0.55 : 0.25))
+                        .stroke(
+                            highlightsStatus
+                                ? status.color.opacity(0.55)
+                                : Color.primary.opacity(0.10)
+                        )
                 }
         }
-        .shadow(color: status.color.opacity(isExpanded ? 0.10 : 0.025), radius: isExpanded ? 14 : 8, y: 3)
     }
 
     private func runtimeExpandedSummary(_ runtime: RuntimeSnapshot) -> some View {
@@ -716,7 +1383,7 @@ struct ContentView: View {
         return HStack(alignment: .center, spacing: 18) {
             ZStack {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(brand.color.opacity(0.10))
+                    .fill(Color.primary.opacity(0.045))
                 Image(brand.assetName)
                     .resizable()
                     .scaledToFit()
@@ -726,7 +1393,7 @@ struct ContentView: View {
             .frame(width: 64, height: 64)
             .overlay {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(brand.color.opacity(0.16))
+                    .stroke(Color.primary.opacity(0.10))
             }
             .accessibilityHidden(true)
 
@@ -749,7 +1416,7 @@ struct ContentView: View {
                 .foregroundStyle(status.color)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
-                .background(status.color.opacity(0.10), in: Capsule())
+                .background(Color.primary.opacity(0.045), in: Capsule())
             }
             .frame(width: 150, alignment: .leading)
 
@@ -758,19 +1425,23 @@ struct ContentView: View {
                     title: "当前生效",
                     value: effectiveVersion(for: runtime),
                     systemImage: "checkmark.circle",
-                    tint: runtime.state == .failed ? .orange : .green
+                    tint: runtime.state == .failed ? .orange : .green,
+                    usesNeutralBackground: true
                 )
                 environmentMetric(
                     title: "PATH 版本",
                     value: "\(pathVersionCount)",
                     systemImage: "exclamationmark.circle",
-                    tint: runtime.hasPathVersionConflict ? .orange : .secondary
+                    tint: runtime.hasPathVersionConflict ? .orange : .secondary,
+                    usesNeutralBackground: true,
+                    emphasizesBorder: runtime.hasPathVersionConflict
                 )
                 environmentMetric(
                     title: "已发现",
                     value: "\(runtime.installations.count)",
                     systemImage: "square.stack.3d.up.fill",
-                    tint: .blue
+                    tint: .blue,
+                    usesNeutralBackground: true
                 )
             }
             .frame(maxWidth: .infinity)
@@ -782,7 +1453,9 @@ struct ContentView: View {
         title: String,
         value: String,
         systemImage: String,
-        tint: Color
+        tint: Color,
+        usesNeutralBackground: Bool = false,
+        emphasizesBorder: Bool = false
     ) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Label(title, systemImage: systemImage)
@@ -797,10 +1470,17 @@ struct ContentView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 11)
         .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
-        .background(tint.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
+        .background(
+            usesNeutralBackground ? Color.primary.opacity(0.025) : tint.opacity(0.07),
+            in: RoundedRectangle(cornerRadius: 11)
+        )
         .overlay {
             RoundedRectangle(cornerRadius: 11)
-                .stroke(tint.opacity(0.25))
+                .stroke(
+                    usesNeutralBackground
+                        ? (emphasizesBorder ? tint.opacity(0.45) : Color.primary.opacity(0.10))
+                        : tint.opacity(0.25)
+                )
         }
     }
 
@@ -808,8 +1488,8 @@ struct ContentView: View {
         let brand = runtimeBrand(runtime)
         let status = runtimeCardStatus(runtime)
 
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top) {
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
                         .fill(brand.color.opacity(0.10))
@@ -819,18 +1499,28 @@ struct ContentView: View {
                         .foregroundStyle(brand.color)
                         .padding(8)
                 }
-                .frame(width: 46, height: 46)
+                .frame(width: 48, height: 48)
                 .overlay {
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
                         .stroke(brand.color.opacity(0.12))
                 }
                 .accessibilityHidden(true)
 
-                Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(runtime.name)
+                        .font(.headline)
+
+                    Text(effectiveVersion(for: runtime))
+                        .font(.title3.bold())
+                        .monospacedDigit()
+                        .foregroundStyle(runtime.state == .failed ? .orange : .primary)
+                }
+
+                Spacer(minLength: 8)
 
                 ZStack {
                     Circle()
-                        .fill(status.color.opacity(0.13))
+                        .fill(status.color.opacity(0.08))
                     Image(systemName: status.badgeSymbol)
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(status.color)
@@ -839,36 +1529,24 @@ struct ContentView: View {
                 .accessibilityHidden(true)
             }
 
-            Text(runtime.name)
-                .font(.headline)
-
-            Text(effectiveVersion(for: runtime))
-                .font(.title2.bold())
-                .monospacedDigit()
-                .foregroundStyle(runtime.state == .failed ? .orange : .primary)
-
-            Label(
-                runtime.installations.isEmpty
-                    ? "未发现 Runtime Installation"
-                    : "\(runtime.installations.count) 个安装",
-                systemImage: "square.stack.3d.up.fill"
-            )
+            HStack(spacing: 8) {
+                Text(
+                    runtime.installations.isEmpty
+                        ? "未检测到 Runtime Installation"
+                        : "\(runtime.installations.count) 个版本"
+                )
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Divider()
-
-            HStack(spacing: 5) {
-                Label(status.title, systemImage: status.pillSymbol)
-                if let explanation = status.explanation {
-                    helpIcon(explanation)
+                if runtime.hasPathVersionConflict || runtime.state == .failed {
+                    Text("·")
+                        .foregroundStyle(.tertiary)
+                    Text(status.title)
+                        .foregroundStyle(status.color)
                 }
             }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(status.color)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(status.color.opacity(0.10), in: Capsule())
+            .font(.caption)
+            .padding(.leading, 60)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .contentShape(Rectangle())
@@ -918,30 +1596,6 @@ struct ContentView: View {
         }
     }
 
-    private func toggleRuntime(_ id: String) {
-        let nextID = expandedRuntimeID == id ? nil : id
-        if reduceMotion {
-            expandedRuntimeID = nextID
-            fullyShownRuntimeID = nil
-        } else {
-            withAnimation(.smooth(duration: 0.32)) {
-                expandedRuntimeID = nextID
-                fullyShownRuntimeID = nil
-            }
-        }
-    }
-
-    private func toggleInstallationLimit(_ id: String) {
-        let nextID = fullyShownRuntimeID == id ? nil : id
-        if reduceMotion {
-            fullyShownRuntimeID = nextID
-        } else {
-            withAnimation(.snappy(duration: 0.25, extraBounce: 0.02)) {
-                fullyShownRuntimeID = nextID
-            }
-        }
-    }
-
     private func runtimeInstallationRow(
         _ installation: RuntimeInstallation,
         hasConflict: Bool
@@ -983,7 +1637,7 @@ struct ContentView: View {
                     .foregroundStyle(installation.isEffective ? .green : .secondary)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
-                    .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
             }
 
             VStack(alignment: .leading, spacing: 5) {
@@ -1002,15 +1656,19 @@ struct ContentView: View {
                     .foregroundStyle(.orange)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
-                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(tint.opacity(installation.isEffective ? 0.07 : 0.025), in: RoundedRectangle(cornerRadius: 11))
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 11))
         .overlay {
             RoundedRectangle(cornerRadius: 11)
-                .stroke(tint.opacity(installation.isEffective || isConflictingPath ? 0.45 : 0.16))
+                .stroke(
+                    installation.state == .failed || isConflictingPath
+                        ? Color.orange.opacity(0.45)
+                        : Color.primary.opacity(0.10)
+                )
         }
     }
 
@@ -1020,8 +1678,6 @@ struct ContentView: View {
     }
 
     private func environmentSection(_ snapshot: MachineSnapshot) -> some View {
-        let pathWarningCount = snapshot.runtimes.filter(\.hasPathVersionConflict).count
-
         return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
                 Image(systemName: "slider.horizontal.3")
@@ -1033,7 +1689,7 @@ struct ContentView: View {
 
             if expandedEnvironmentCard == .homebrew {
                 homebrewCard(snapshot.homebrew)
-                environmentCardGrid(snapshot, excluding: .homebrew, pathWarningCount: pathWarningCount)
+                environmentCardGrid(snapshot, excluding: .homebrew)
             } else if expandedEnvironmentCard == .git {
                 gitCard(
                     snapshot.gitCLI,
@@ -1043,12 +1699,15 @@ struct ContentView: View {
                     credentialHelpers: snapshot.gitCredentialHelpers,
                     github: snapshot.githubAuthenticationConfiguration
                 )
-                environmentCardGrid(snapshot, excluding: .git, pathWarningCount: pathWarningCount)
-            } else if expandedEnvironmentCard == .path {
-                pathCard(snapshot.path, warningCount: pathWarningCount)
-                environmentCardGrid(snapshot, excluding: .path, pathWarningCount: pathWarningCount)
+                environmentCardGrid(snapshot, excluding: .git)
+            } else if expandedEnvironmentCard == .terminal {
+                terminalCard(snapshot.terminalApplications)
+                environmentCardGrid(snapshot, excluding: .terminal)
+            } else if expandedEnvironmentCard == .shell {
+                shellCard(snapshot.shellInstallations)
+                environmentCardGrid(snapshot, excluding: .shell)
             } else {
-                environmentCardGrid(snapshot, pathWarningCount: pathWarningCount)
+                environmentCardGrid(snapshot)
             }
         }
         .padding(16)
@@ -1063,45 +1722,50 @@ struct ContentView: View {
         .onPreferenceChange(EnvironmentCardUpperContentHeightKey.self) {
             environmentCardUpperContentHeight = $0
         }
-        .onChange(of: snapshot.path.isEmpty) { _, isEmpty in
-            if isEmpty, expandedEnvironmentCard == .path {
-                expandedEnvironmentCard = nil
-                showsAllPathEntries = false
-            }
-        }
         .onChange(of: snapshot.homebrew.executable == nil && snapshot.homebrew.error == nil) { _, hasNoDetails in
             if hasNoDetails, expandedEnvironmentCard == .homebrew {
                 expandedEnvironmentCard = nil
             }
         }
+        .onChange(of: snapshot.terminalApplications.isEmpty) { _, isEmpty in
+            if isEmpty, expandedEnvironmentCard == .terminal { expandedEnvironmentCard = nil }
+        }
+        .onChange(of: snapshot.shellInstallations.isEmpty) { _, isEmpty in
+            if isEmpty, expandedEnvironmentCard == .shell { expandedEnvironmentCard = nil }
+        }
     }
 
     private func environmentCardGrid(
         _ snapshot: MachineSnapshot,
-        excluding excludedCard: EnvironmentCard? = nil,
-        pathWarningCount: Int
+        excluding excludedCard: EnvironmentCard? = nil
     ) -> some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 240, maximum: 320), spacing: 14, alignment: .top)],
-            alignment: .leading,
-            spacing: 14
-        ) {
-            if excludedCard != .homebrew {
-                homebrewCard(snapshot.homebrew)
+        VStack(spacing: 14) {
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top), count: 2),
+                alignment: .leading,
+                spacing: 14
+            ) {
+                if excludedCard != .homebrew {
+                    homebrewCard(snapshot.homebrew)
+                }
+                if excludedCard != .git {
+                    gitCard(
+                        snapshot.gitCLI,
+                        lfs: snapshot.gitLFS,
+                        configuration: snapshot.userGitConfiguration,
+                        signing: snapshot.gitSigningConfiguration,
+                        credentialHelpers: snapshot.gitCredentialHelpers,
+                        github: snapshot.githubAuthenticationConfiguration
+                    )
+                }
+                if excludedCard != .terminal {
+                    terminalCard(snapshot.terminalApplications)
+                }
+                if excludedCard != .shell {
+                    shellCard(snapshot.shellInstallations)
+                }
             }
-            if excludedCard != .git {
-                gitCard(
-                    snapshot.gitCLI,
-                    lfs: snapshot.gitLFS,
-                    configuration: snapshot.userGitConfiguration,
-                    signing: snapshot.gitSigningConfiguration,
-                    credentialHelpers: snapshot.gitCredentialHelpers,
-                    github: snapshot.githubAuthenticationConfiguration
-                )
-            }
-            if excludedCard != .path {
-                pathCard(snapshot.path, warningCount: pathWarningCount)
-            }
+
         }
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -1137,47 +1801,35 @@ struct ContentView: View {
                             statusImage: appearance.pill
                         )
                     } else {
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack(alignment: .top, spacing: 12) {
-                                ZStack {
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(Color.orange.opacity(0.09))
-                                    Image("GitLogo")
-                                        .resizable()
-                                        .scaledToFit()
-                                        .foregroundStyle(.orange)
-                                        .padding(11)
-                                }
-                                .frame(width: 54, height: 54)
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .stroke(Color.primary.opacity(0.07))
-                                }
-                                .accessibilityHidden(true)
-
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("Git")
-                                        .font(.headline)
-                                    Text(git.version ?? appearance.status)
-                                        .font(.title2.bold())
-                                        .monospacedDigit()
-                                    Text("当前生效 CLI")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                Spacer(minLength: 8)
-
-                                Image(systemName: appearance.badge)
-                                    .font(.system(size: 18, weight: .bold))
-                                    .foregroundStyle(appearance.color)
-                                    .frame(width: 38, height: 38)
-                                    .background(appearance.color.opacity(0.10), in: Circle())
-                                    .accessibilityHidden(true)
+                        HStack(alignment: .center, spacing: 14) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .fill(Color.orange.opacity(0.09))
+                                Image("GitLogo")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .foregroundStyle(.orange)
+                                    .padding(10)
                             }
-                            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+                            .frame(width: 50, height: 50)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.07))
+                            }
+                            .accessibilityHidden(true)
 
-                            Divider()
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Git")
+                                    .font(.headline)
+                                Text(git.version ?? appearance.status)
+                                    .font(.title3.bold())
+                                    .monospacedDigit()
+                                Text("当前生效 CLI")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer(minLength: 8)
 
                             Label(appearance.status, systemImage: appearance.pill)
                                 .font(.caption.weight(.semibold))
@@ -1185,6 +1837,11 @@ struct ContentView: View {
                                 .padding(.horizontal, 9)
                                 .padding(.vertical, 4)
                                 .background(appearance.color.opacity(0.10), in: Capsule())
+
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .accessibilityHidden(true)
                         }
                     }
                 }
@@ -1524,53 +2181,268 @@ struct ContentView: View {
         }
     }
 
+    private func terminalCard(_ applications: [TerminalApplicationSnapshot]) -> some View {
+        inventoryEnvironmentCard(
+            card: .terminal,
+            title: "Terminal",
+            primaryValue: applications.isEmpty ? "未发现" : "\(applications.count) 个应用",
+            subtitle: "Terminal Application",
+            systemImage: "macwindow.on.rectangle",
+            tint: .cyan,
+            status: applications.isEmpty ? "未发现" : "\(applications.count) 个应用",
+            statusImage: applications.isEmpty ? "circle" : "checkmark.circle.fill",
+            statusColor: applications.isEmpty ? .secondary : .green,
+            hasDetails: !applications.isEmpty
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(applications) { application in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(application.name)
+                                .font(.callout.weight(.semibold))
+                            Spacer()
+                            Text(application.version ?? "版本未知")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        copyablePath(application.path)
+                    }
+                    .padding(12)
+                    .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.primary.opacity(0.09))
+                    }
+                }
+            }
+        }
+    }
+
+    private func shellCard(_ installations: [ShellInstallationSnapshot]) -> some View {
+        let defaultShell = installations.first(where: \.isDefault)
+        let hasWarning = defaultShell == nil || defaultShell?.isAvailable == false
+        let status = if defaultShell == nil {
+            "默认项未读取"
+        } else if hasWarning {
+            "默认项不可用"
+        } else {
+            "\(installations.count) 个 Shell"
+        }
+
+        return inventoryEnvironmentCard(
+            card: .shell,
+            title: "Shell",
+            primaryValue: defaultShell?.name ?? "未读取",
+            subtitle: "\(installations.count) 个 Shell Installation",
+            systemImage: "terminal",
+            tint: .indigo,
+            status: status,
+            statusImage: hasWarning ? "exclamationmark.circle.fill" : "checkmark.circle.fill",
+            statusColor: hasWarning ? .orange : .green,
+            hasDetails: !installations.isEmpty
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(installations) { installation in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Text(installation.name)
+                                .font(.callout.weight(.semibold))
+                            if installation.isDefault {
+                                Text("默认登录 Shell")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color.accentColor)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(Color.accentColor.opacity(0.10), in: Capsule())
+                            }
+                            Spacer()
+                            Label(
+                                installation.isAvailable ? "可用" : "不可用",
+                                systemImage: installation.isAvailable ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+                            )
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(installation.isAvailable ? Color.green : Color.orange)
+                        }
+                        copyablePath(installation.path)
+                    }
+                    .padding(12)
+                    .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.primary.opacity(0.09))
+                    }
+                }
+            }
+        }
+    }
+
+    private func inventoryEnvironmentCard<Details: View>(
+        card: EnvironmentCard,
+        title: String,
+        primaryValue: String,
+        subtitle: String,
+        systemImage: String,
+        tint: Color,
+        status: String,
+        statusImage: String,
+        statusColor: Color,
+        hasDetails: Bool,
+        @ViewBuilder details: () -> Details
+    ) -> some View {
+        let isExpanded = expandedEnvironmentCard == card
+
+        return VStack(alignment: .leading, spacing: 12) {
+            if hasDetails {
+                Button {
+                    toggleEnvironmentCard(card)
+                } label: {
+                    inventoryEnvironmentCardSummary(
+                        title: title,
+                        primaryValue: primaryValue,
+                        subtitle: subtitle,
+                        systemImage: systemImage,
+                        tint: tint,
+                        status: status,
+                        statusImage: statusImage,
+                        statusColor: statusColor,
+                        showsDisclosure: hasDetails
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(isExpanded ? "已展开" : "已折叠")
+            } else {
+                inventoryEnvironmentCardSummary(
+                    title: title,
+                    primaryValue: primaryValue,
+                    subtitle: subtitle,
+                    systemImage: systemImage,
+                    tint: tint,
+                    status: status,
+                    statusImage: statusImage,
+                    statusColor: statusColor,
+                    showsDisclosure: false
+                )
+            }
+
+            if isExpanded {
+                details()
+                    .transition(.opacity)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(0.09))
+                }
+        }
+    }
+
+    private func inventoryEnvironmentCardSummary(
+        title: String,
+        primaryValue: String,
+        subtitle: String,
+        systemImage: String,
+        tint: Color,
+        status: String,
+        statusImage: String,
+        statusColor: Color,
+        showsDisclosure: Bool
+    ) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(tint.opacity(0.09))
+                Image(systemName: systemImage)
+                    .font(.system(size: 21, weight: .medium))
+                    .foregroundStyle(tint)
+            }
+            .frame(width: 50, height: 50)
+            .overlay {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(Color.primary.opacity(0.07))
+            }
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                Text(primaryValue)
+                    .font(.title3.bold())
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            Label(status, systemImage: statusImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(statusColor)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(statusColor.opacity(0.10), in: Capsule())
+
+            if showsDisclosure {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
     private func homebrewCard(_ homebrew: HomebrewSnapshot) -> some View {
         let isExpanded = expandedEnvironmentCard == .homebrew
         let hasDetails = homebrew.executable != nil || homebrew.error != nil
-        let summary = VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.green.opacity(0.09))
-                    Image(systemName: "shippingbox")
-                        .font(.system(size: 23, weight: .medium))
-                }
-                .frame(width: 54, height: 54)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.primary.opacity(0.07))
-                }
-                .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Homebrew")
-                        .font(.headline)
-                    Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
-                        .font(.title2.bold())
-                        .monospacedDigit()
-                    Text("包管理器")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                Image(systemName: homebrew.available ? "checkmark" : "questionmark")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
-                    .frame(width: 38, height: 38)
-                    .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
+        let summary = HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(Color.green.opacity(0.09))
+                Image(systemName: "shippingbox")
+                    .font(.system(size: 21, weight: .medium))
             }
-            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+            .frame(width: 50, height: 50)
+            .overlay {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(Color.primary.opacity(0.07))
+            }
+            .accessibilityHidden(true)
 
-            Divider()
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Homebrew")
+                    .font(.headline)
+                Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
+                    .font(.title3.bold())
+                    .monospacedDigit()
+                Text("包管理器")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
-            Text(homebrew.available ? "已安装" : "未发现")
+            Spacer(minLength: 8)
+
+            Label(
+                homebrew.available ? "已安装" : "未发现",
+                systemImage: homebrew.available ? "checkmark.circle.fill" : "questionmark.circle"
+            )
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 4)
                 .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Capsule())
+
+            if hasDetails {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
