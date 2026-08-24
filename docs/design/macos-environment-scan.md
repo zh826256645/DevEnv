@@ -87,10 +87,11 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - PostgreSQL Database Installation 纵向基线：`schemaVersion = 9`
 - MySQL 与 MariaDB Database Installation 扩展：`schemaVersion = 10`
 - MongoDB 与 Redis Database Installation 完整扩展：`schemaVersion = 11`
+- Python 与 Node Local Service Attribution 扩展：`schemaVersion = 12`
 - 写入方式：原子替换
 - 启动读取到损坏或不支持版本的文件时忽略该文件，不尝试迁移
 
-MongoDB 与 Redis Database Installation 扩展启用后，V1–V10 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
+Local Service Attribution 扩展启用后，V1–V11 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
 
 只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
 
@@ -215,17 +216,29 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - “正在监听”使用绿色；“未发现”和“未监听”是中性灰色，不产生 Scan Notice；发现或监听状态未知以及读取失败使用橙色并产生 Scan Notice。
 - 数据库监听进程仍保留在完整的“本地服务”区域；进程真实路径只用于 Database Installation 发现与匹配，不增加到 Local Service 行。
 - 数据库结果只随应用启动扫描和手动“重新扫描”更新，不增加轮询或独立刷新入口。
-- Machine Snapshot 已升级为 `schemaVersion = 11`；V1–V10 快照直接忽略并重新扫描，不增加快照迁移。
+- MongoDB 与 Redis Database Installation 扩展引入时使用 `schemaVersion = 11`；V1–V10 快照直接忽略并重新扫描，不增加快照迁移。
 
 ## TCP 监听服务扩展
 
 - Environment Scan 固定执行 `/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn`，不调用 Shell、不接收用户参数、不请求管理员权限。
-- 扫描只保留进程名、PID、监听地址、端口和 IPv4/IPv6 地址族；同一 PID 聚合为一个 Local Service，完全相同的 Listener Binding 去重。
+- 扫描保留进程名、PID、监听地址、端口和 IPv4/IPv6 地址族；同一 PID 聚合为一个 Local Service，完全相同的 Listener Binding 去重。Python 与 Node Local Service 还可保存 Local Service Attribution。
 - loopback Listener Binding 不显示额外提示；wildcard 与非 loopback 绑定显示黄底感叹号，悬停时说明“可能可被局域网访问”。该范围只描述监听地址，不表示已验证防火墙或其他设备的实际可达性。
 - Listener Binding 按端口、地址族、地址排序；Local Service 按最低端口、进程名、PID 排序。
 - Machine Snapshot 编码并恢复全部 Local Service；应用启动和手动重新扫描沿用整份快照刷新，不增加轮询或独立刷新入口。
 - 监听命令失败或超时时，本次 Local Service 结果为空并产生一条 Scan Notice；系统、Homebrew Availability、PATH、Runtime Installation 和可用的部分快照不受影响。
 - 总览的“本地服务”区域展示服务数、端口数和全部 Listener Binding，并区分“当前没有可见监听项”和“监听读取失败”；扫描汇总增加本地服务组数，可能可被局域网访问的绑定按服务组加入现有通知入口，扫描时间和重新扫描操作保持不变。
+
+### Python 与 Node 服务归属
+
+- 只为进程名匹配 Python 或 Node 的 Local Service 识别归属，其他进程沿用既有展示。
+- Python 从进程工作目录向上寻找最近的 `.git`、`pyproject.toml` 或 `package.json` 项目根。Node 同时识别包含当前工作目录的 Git 项目根和最近的 `package.json` 包根；没有 Git 项目时使用最近的包根。
+- Python 项目名称优先读取项目根 `pyproject.toml` 的 PEP 621 `[project].name`。Node 的 Git 项目使用 Git 根目录名作为标题、最近的包根作为运行目录，例如标题 `personal-os`、目录 `~/Projects/personal-os/frontend`；没有 Git 项目时读取 `package.json.name` 并展示包根。名称缺失或不可读时使用对应根目录名。
+- 没有项目证据时，若进程可执行文件位于 `.app` 包内，则以该 App 名称和包路径作为归属；否则保留 Python 或 Node 的通用运行时名称。
+- 显示优先级为“项目 → App → 运行时”。项目卡片保留 Python 或 Node 图标并展示缩写项目根路径，App 卡片使用 App 图标；归属不同的 Local Service 不合并为同一展示组。
+- 归属扫描不读取或保存完整命令行，不遍历父进程，不按 API、端口或参数猜测。工作目录、项目文件或可执行路径读取失败时静默回退，不产生新的 Scan Notice。
+- Machine Snapshot 使用 `schemaVersion = 12` 编码 Local Service Attribution；V1–V11 快照直接忽略并重新扫描。
+
+完整取舍见 [ADR-0006](../adr/0006-attribute-runtime-services-by-working-directory-and-app-path.md)。
 
 2026-08-23 普通权限真机验收：Debug App 快照记录 11 个 Local Service、24 个 Listener Binding，与紧接着执行的同一固定 `lsof` 命令逐项一致，未发现普通权限造成的重要监听项缺失；未使用管理员重扫。
 
@@ -267,6 +280,13 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - 发现 Homebrew 数据库但没有匹配 Local Service：显示“未监听”，不产生 Scan Notice。
 - Homebrew Database Provider 失败且没有其他发现结果：显示“发现状态未知”并产生 Scan Notice，不显示“未安装”。
 - Local Service 扫描失败或已识别数据库进程的真实路径不可读：相关 Database Listening State 显示“监听状态未知”。
+- Python 服务工作目录位于带 PEP 621 名称的项目内：卡片显示项目名、Python 项目服务和缩写项目根路径。
+- Node 服务工作目录位于 Git 项目的子目录包内：卡片显示 Git 根目录名、Node.js 项目服务和缩写 Git 根路径；例如 `personal-os/frontend` 显示 `personal-os`。
+- Node 服务不位于 Git 项目但工作目录位于带 `package.json.name` 的项目内：卡片显示该包名和缩写项目根路径。
+- Python 或 Node 服务同时具有项目工作目录和 `.app` 内可执行文件：优先显示项目归属。
+- Python 服务没有项目证据但可执行文件位于 `oMLX.app`：卡片显示 `oMLX` 并使用 App 图标。
+- 归属所需路径或项目文件不可读：不显示归属、不增加 Scan Notice，继续显示通用 Python 或 Node 服务。
+- 非 Python/Node Local Service：不识别项目或 App 归属，保持既有名称、图标和分组规则。
 - 只启用 Unix Socket 或位于容器内的 PostgreSQL：不标记为 Listening Database Installation；容器端口代理仍可作为 Local Service 展示。
 - 读取 V1–V4 快照：忽略旧快照并执行扫描，成功后写入 V5 快照。
 - 读取 V1–V5 快照：忽略旧快照并执行扫描，成功后写入 V6 快照。
@@ -274,6 +294,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - PostgreSQL Database Installation 纵向基线读取 V1–V8 快照：忽略旧快照并执行扫描，成功后写入 V9 快照。
 - MySQL 与 MariaDB Database Installation 扩展读取 V1–V9 快照：忽略旧快照并执行扫描，成功后写入 V10 快照。
 - MongoDB 与 Redis Database Installation 扩展读取 V1–V10 快照：忽略旧快照并执行扫描，成功后写入 V11 快照。
+- Local Service Attribution 扩展读取 V1–V11 快照：忽略旧快照并执行扫描，成功后写入 V12 快照。
 
 ## 相关决策
 
@@ -282,3 +303,4 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - [ADR-0003：按 PATH 与 Provider 分层发现 Runtime](../adr/0003-source-aware-runtime-discovery.md)
 - [ADR-0004：Environment Scan 保持本地观察](../adr/0004-keep-environment-scan-local.md)
 - [ADR-0005：按安装路径映射数据库 TCP 监听状态](../adr/0005-map-database-listeners-by-installation-path.md)
+- [ADR-0006：按工作目录与 App 路径识别运行时服务归属](../adr/0006-attribute-runtime-services-by-working-directory-and-app-path.md)

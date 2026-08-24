@@ -64,6 +64,10 @@ _Avoid_: Installation Method, Runtime State
 当前 App 运行用户可见、按 PID 聚合且至少具有一个 TCP Listener Binding 的本机进程。
 _Avoid_: Daemon, Background Service
 
+**Local Service Attribution**:
+Environment Scan 对 Python 或 Node Local Service 所属开发项目或宿主 App 的识别结果；没有充分本机证据时为空。
+_Avoid_: API Name, Process Owner, Service Guess
+
 **Listener Binding**:
 Local Service 监听 TCP 连接的地址、端口和地址族组合。
 _Avoid_: Port, Endpoint

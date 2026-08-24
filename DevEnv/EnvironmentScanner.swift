@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 struct MachineSnapshot: Codable, Sendable {
+    static let currentSchemaVersion = 12
     static let localServiceTimeoutNotice = "本地服务：命令超时"
     static let localServiceFailureNotice = "本地服务：读取失败"
 
@@ -41,12 +42,36 @@ struct ListenerBinding: Codable, Hashable, Sendable {
     }
 }
 
+enum LocalServiceAttributionKind: String, Codable, Sendable {
+    case project
+    case application
+}
+
+struct LocalServiceAttribution: Codable, Hashable, Sendable {
+    let kind: LocalServiceAttributionKind
+    let name: String
+    let path: String
+}
+
 struct LocalServiceSnapshot: Codable, Identifiable, Sendable {
     var id: Int32 { pid }
 
     let processName: String
     let pid: Int32
     let bindings: [ListenerBinding]
+    let attribution: LocalServiceAttribution?
+
+    init(
+        processName: String,
+        pid: Int32,
+        bindings: [ListenerBinding],
+        attribution: LocalServiceAttribution? = nil
+    ) {
+        self.processName = processName
+        self.pid = pid
+        self.bindings = bindings
+        self.attribution = attribution
+    }
 }
 
 struct SystemSnapshot: Codable, Sendable {
@@ -276,8 +301,10 @@ protocol MachineAccess: Sendable {
     func isExecutableFile(atPath path: String) -> Bool
     func fileExists(atPath path: String) -> Bool
     func directoryEntries(atPath path: String) throws -> [String]
+    func fileData(atPath path: String) throws -> Data
     func resolvingSymlinksInPath(_ path: String) -> String
     func executablePath(forPID pid: Int32) throws -> String
+    func workingDirectoryPath(forPID pid: Int32) throws -> String
     func command(executable: String, arguments: [String]) -> MachineCommandResult
 }
 
@@ -306,6 +333,10 @@ struct LiveMachineAccess: MachineAccess {
         try FileManager.default.contentsOfDirectory(atPath: path)
     }
 
+    func fileData(atPath path: String) throws -> Data {
+        try Data(contentsOf: URL(fileURLWithPath: path))
+    }
+
     func resolvingSymlinksInPath(_ path: String) -> String {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().path
     }
@@ -316,6 +347,17 @@ struct LiveMachineAccess: MachineAccess {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    func workingDirectoryPath(forPID pid: Int32) throws -> String {
+        var info = proc_vnodepathinfo()
+        let size = MemoryLayout<proc_vnodepathinfo>.stride
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, Int32(size)) == size else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return withUnsafePointer(to: &info.pvi_cdir.vip_path) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+        }
     }
 
     func command(executable: String, arguments: [String]) -> MachineCommandResult {
@@ -525,7 +567,7 @@ struct EnvironmentScanner: Sendable {
             notices: &issues
         )
         let snapshot = MachineSnapshot(
-            schemaVersion: 11,
+            schemaVersion: MachineSnapshot.currentSchemaVersion,
             scannedAt: Date(),
             system: system,
             localServices: localServiceScan.services,
@@ -844,7 +886,7 @@ struct EnvironmentScanner: Sendable {
             }
         }
 
-        let snapshots = services.compactMap { pid, service -> LocalServiceSnapshot? in
+        var snapshots = services.compactMap { pid, service -> LocalServiceSnapshot? in
             guard !service.processName.isEmpty, !service.bindings.isEmpty else { return nil }
             let bindings = service.bindings.sorted {
                 if $0.port != $1.port { return $0.port < $1.port }
@@ -866,6 +908,17 @@ struct EnvironmentScanner: Sendable {
                 executablePathFailures.insert(service.pid)
             }
         }
+        snapshots = snapshots.map { service in
+            LocalServiceSnapshot(
+                processName: service.processName,
+                pid: service.pid,
+                bindings: service.bindings,
+                attribution: localServiceAttribution(
+                    for: service,
+                    executablePath: executablePaths[service.pid]
+                )
+            )
+        }
         return LocalServiceScan(
             services: snapshots,
             executablePaths: executablePaths,
@@ -882,6 +935,101 @@ struct EnvironmentScanner: Sendable {
         if address.first == "[", address.last == "]" { address = String(address.dropFirst().dropLast()) }
         guard !address.isEmpty else { return nil }
         return ListenerBinding(address: address, port: port, family: family)
+    }
+
+    private func localServiceAttribution(
+        for service: LocalServiceSnapshot,
+        executablePath: String?
+    ) -> LocalServiceAttribution? {
+        let processName = service.processName.lowercased()
+        guard processName.hasPrefix("python") || processName == "node" || processName == "nodejs" else { return nil }
+        if let workingDirectory = try? machine.workingDirectoryPath(forPID: service.pid),
+           let projectRoots = projectRoots(startingAt: workingDirectory, processName: processName) {
+            return LocalServiceAttribution(
+                kind: .project,
+                name: projectName(at: projectRoots.nameRoot, processName: processName),
+                path: projectRoots.serviceRoot
+            )
+        }
+        guard let executablePath, let applicationPath = containingApplicationPath(for: executablePath) else { return nil }
+        return LocalServiceAttribution(
+            kind: .application,
+            name: URL(fileURLWithPath: applicationPath).deletingPathExtension().lastPathComponent,
+            path: applicationPath
+        )
+    }
+
+    private func containingApplicationPath(for executablePath: String) -> String? {
+        var candidate = URL(fileURLWithPath: executablePath)
+        while candidate.path != "/" {
+            if candidate.pathExtension.caseInsensitiveCompare("app") == .orderedSame { return candidate.path }
+            candidate.deleteLastPathComponent()
+        }
+        return nil
+    }
+
+    private func projectRoots(startingAt path: String, processName: String) -> (nameRoot: String, serviceRoot: String)? {
+        var directory = standardizedPath(path)
+        var nearestRoot: String?
+        let prefersGitRoot = processName == "node" || processName == "nodejs"
+        while directory != "/" {
+            let hasGitRoot = machine.fileExists(atPath: directory + "/.git")
+            let hasPackageRoot = machine.fileExists(atPath: directory + "/package.json")
+            if prefersGitRoot {
+                if hasPackageRoot { nearestRoot = nearestRoot ?? directory }
+                if hasGitRoot { return (directory, nearestRoot ?? directory) }
+            } else if hasGitRoot
+                || machine.fileExists(atPath: directory + "/pyproject.toml")
+                || hasPackageRoot {
+                return (directory, directory)
+            }
+            let parent = URL(fileURLWithPath: directory).deletingLastPathComponent().path
+            guard parent != directory else { return nearestRoot.map { ($0, $0) } }
+            directory = parent
+        }
+        return nearestRoot.map { ($0, $0) }
+    }
+
+    private func projectName(at root: String, processName: String) -> String {
+        if !processName.hasPrefix("python"), machine.fileExists(atPath: root + "/.git") {
+            return URL(fileURLWithPath: root).lastPathComponent
+        }
+        let manifest = processName.hasPrefix("python") ? root + "/pyproject.toml" : root + "/package.json"
+        if let data = try? machine.fileData(atPath: manifest) {
+            if processName.hasPrefix("python"), let name = pep621ProjectName(from: data) { return name }
+            if !processName.hasPrefix("python"),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let name = object["name"] as? String,
+               !name.isEmpty {
+                return name
+            }
+        }
+        return URL(fileURLWithPath: root).lastPathComponent
+    }
+
+    private func pep621ProjectName(from data: Data) -> String? {
+        guard let contents = String(data: data, encoding: .utf8) else { return nil }
+        var isTopLevel = true
+        var isProjectSection = false
+        for rawLine in contents.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            let header = line.split(separator: "#", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces) ?? ""
+            if header.hasPrefix("["), header.hasSuffix("]") {
+                isTopLevel = false
+                isProjectSection = header == "[project]"
+                continue
+            }
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].filter { !$0.isWhitespace }
+            guard (isProjectSection && key == "name") || (isTopLevel && key == "project.name") else { continue }
+            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            guard let quote = value.first, quote == "\"" || quote == "'",
+                  let end = value.dropFirst().firstIndex(of: quote) else { return nil }
+            let name = String(value[value.index(after: value.startIndex)..<end])
+            return name.isEmpty ? nil : name
+        }
+        return nil
     }
 
     private func scanPostgreSQL(
@@ -1966,7 +2114,9 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 11 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == MachineSnapshot.currentSchemaVersion else {
+            return nil
+        }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

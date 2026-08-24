@@ -386,7 +386,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 11)
+        XCTAssertEqual(snapshot.schemaVersion, 12)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -1493,6 +1493,124 @@ final class EnvironmentScannerTests: XCTestCase {
         ])
     }
 
+    func testAttributesPythonListenerToWorkingDirectoryProject() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpython3.13\nf7\ntIPv4\nn127.0.0.1:8000\n",
+            ],
+            fileContents: [
+                "/Users/test/Projects/example-api/pyproject.toml": "[project] # PEP 621 metadata\nname = \"example-api\"\n",
+            ],
+            processExecutablePaths: [42: "/opt/homebrew/bin/python3.13"],
+            processWorkingDirectoryPaths: [42: "/Users/test/Projects/example-api/Sources"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "example-api")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Users/test/Projects/example-api")
+    }
+
+    func testAttributesPythonListenerUsingDottedPEP621ProjectName() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpython3.13\nf7\ntIPv4\nn127.0.0.1:8000\n",
+            ],
+            fileContents: [
+                "/Users/test/Projects/backend/pyproject.toml": "project.name = \"example-api\"\n",
+            ],
+            processWorkingDirectoryPaths: [42: "/Users/test/Projects/backend/Sources"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "example-api")
+    }
+
+    func testAttributesNodeListenerToWorkingDirectoryProject() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p43\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
+            ],
+            fileContents: [
+                "/Users/test/Projects/web/package.json": "{\"name\":\"web-console\"}",
+            ],
+            processExecutablePaths: [43: "/opt/homebrew/bin/node"],
+            processWorkingDirectoryPaths: [43: "/Users/test/Projects/web/src"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "web-console")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Users/test/Projects/web")
+    }
+
+    func testAttributesNodeListenerToContainingGitProject() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p43\ncnode\nf7\ntIPv4\nn127.0.0.1:5173\n",
+            ],
+            existingFiles: ["/Users/test/Projects/personal-os/.git"],
+            fileContents: [
+                "/Users/test/Projects/personal-os/frontend/package.json": "{\"name\":\"frontend\"}",
+            ],
+            processWorkingDirectoryPaths: [43: "/Users/test/Projects/personal-os/frontend/src"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "personal-os")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Users/test/Projects/personal-os/frontend")
+    }
+
+    func testAttributesPythonListenerToContainingApplication() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p1925\ncpython3.11\nf7\ntIPv4\nn127.0.0.1:9898\n",
+            ],
+            processExecutablePaths: [
+                1925: "/Applications/oMLX.app/Contents/Resources/Python/cpython-3.11/bin/python3.11",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .application)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "oMLX")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Applications/oMLX.app")
+    }
+
+    func testPrefersWorkingDirectoryProjectOverContainingApplication() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p1925\ncpython3.11\nf7\ntIPv4\nn127.0.0.1:9898\n",
+            ],
+            fileContents: [
+                "/Users/test/Projects/client-api/pyproject.toml": "[project]\nname = \"client-api\"\n",
+            ],
+            processExecutablePaths: [
+                1925: "/Applications/oMLX.app/Contents/Resources/Python/bin/python3.11",
+            ],
+            processWorkingDirectoryPaths: [1925: "/Users/test/Projects/client-api/src"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "client-api")
+    }
+
+    func testAttributionReadFailureFallsBackWithoutNotice() {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncpython3.13\nf7\ntIPv4\nn127.0.0.1:8000\n",
+            ],
+            processExecutableFailures: [42],
+            processWorkingDirectoryFailures: [42]
+        )).scan().snapshot
+
+        XCTAssertNil(snapshot.localServices.first?.attribution)
+        XCTAssertFalse(snapshot.issues.contains { $0.contains("归属") })
+    }
+
     func testClassifiesListenerExposureFromBindingAddress() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
@@ -1569,6 +1687,26 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(groups[0].pids, [10, 42])
         XCTAssertEqual(groups[1].pids, [30])
         XCTAssertEqual(groups[2].processName, "node")
+    }
+
+    func testKeepsDifferentLocalServiceAttributionsInSeparateDisplayGroups() {
+        let binding = ListenerBinding(address: "127.0.0.1", port: 8000, family: .ipv4)
+        let groups = groupLocalServicesForDisplay([
+            LocalServiceSnapshot(
+                processName: "python3.13",
+                pid: 10,
+                bindings: [binding],
+                attribution: LocalServiceAttribution(kind: .project, name: "api-a", path: "/Projects/api-a")
+            ),
+            LocalServiceSnapshot(
+                processName: "python3.13",
+                pid: 20,
+                bindings: [binding],
+                attribution: LocalServiceAttribution(kind: .project, name: "api-b", path: "/Projects/api-b")
+            ),
+        ])
+
+        XCTAssertEqual(groups.map(\.displayName), ["api-a", "api-b"])
     }
 
     func testBuildsOneExposureNotificationPerDisplayedLocalServiceGroup() {
@@ -1688,7 +1826,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV11SnapshotRoundTripsFiveDatabasesAndV10IsRejected() throws {
+    func testV12SnapshotRoundTripsServiceAttributionAndV11IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -1712,11 +1850,14 @@ final class EnvironmentScannerTests: XCTestCase {
                 "/bin/node": "v22.0.0\n",
                 "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
             ],
-            existingFiles: ["/Users/test/.config/gh/hosts.yml", "/Users/test/.gitignore"]
+            existingFiles: ["/Users/test/.config/gh/hosts.yml", "/Users/test/.gitignore"],
+            fileContents: ["/Users/test/Projects/web/package.json": "{\"name\":\"web-console\"}"],
+            processExecutablePaths: [42: "/bin/node"],
+            processWorkingDirectoryPaths: [42: "/Users/test/Projects/web/src"]
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 11)
+        XCTAssertEqual(store.load()?.schemaVersion, 12)
         XCTAssertEqual(store.load()?.gitCLI.version, "2.49.0 (Apple Git-154)")
         XCTAssertEqual(store.load()?.gitCLI.executable, "/bin/git")
         XCTAssertEqual(store.load()?.userGitConfiguration?.defaultIdentity.email, "test@example.com")
@@ -1731,6 +1872,9 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.localConfigurationExists == true)
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.ghTokenExists == true)
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
+        XCTAssertEqual(store.load()?.localServices.first?.attribution?.kind, .project)
+        XCTAssertEqual(store.load()?.localServices.first?.attribution?.name, "web-console")
+        XCTAssertEqual(store.load()?.localServices.first?.attribution?.path, "/Users/test/Projects/web")
         XCTAssertEqual(store.load()?.runtimes.first { $0.id == "node" }?.installations.first?.sources, [.system])
         XCTAssertEqual(store.load()?.databaseInstallationOverviews.map(\.id), [
             "postgresql", "mysql", "mariadb", "mongodb", "redis",
@@ -1750,7 +1894,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 10
+        json["schemaVersion"] = 11
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
@@ -1768,8 +1912,11 @@ private struct StubMachine: MachineAccess {
     let directoryContents: [String: [String]]
     let directoryFailures: Set<String>
     let existingFiles: Set<String>
+    let fileContentsByPath: [String: String]
     let processExecutablePaths: [Int32: String]
     let processExecutableFailures: Set<Int32>
+    let processWorkingDirectoryPaths: [Int32: String]
+    let processWorkingDirectoryFailures: Set<Int32>
 
     init(
         path: [String],
@@ -1784,7 +1931,9 @@ private struct StubMachine: MachineAccess {
         existingFiles: Set<String> = [],
         fileContents: [String: String] = [:],
         processExecutablePaths: [Int32: String] = [:],
-        processExecutableFailures: Set<Int32> = []
+        processExecutableFailures: Set<Int32> = [],
+        processWorkingDirectoryPaths: [Int32: String] = [:],
+        processWorkingDirectoryFailures: Set<Int32> = []
     ) {
         self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
         self.executables = executables
@@ -1795,8 +1944,11 @@ private struct StubMachine: MachineAccess {
         self.directoryContents = directoryContents
         self.directoryFailures = directoryFailures
         self.existingFiles = existingFiles.union(fileContents.keys)
+        self.fileContentsByPath = fileContents
         self.processExecutablePaths = processExecutablePaths
         self.processExecutableFailures = processExecutableFailures
+        self.processWorkingDirectoryPaths = processWorkingDirectoryPaths
+        self.processWorkingDirectoryFailures = processWorkingDirectoryFailures
     }
 
     func diskSpace() -> DiskSpace { DiskSpace(totalBytes: 1, freeBytes: 1) }
@@ -1811,11 +1963,22 @@ private struct StubMachine: MachineAccess {
         return entries
     }
 
+    func fileData(atPath path: String) throws -> Data {
+        guard let contents = fileContentsByPath[path] else { throw CocoaError(.fileReadNoSuchFile) }
+        return Data(contents.utf8)
+    }
+
     func resolvingSymlinksInPath(_ path: String) -> String { resolvedPaths[path, default: path] }
 
     func executablePath(forPID pid: Int32) throws -> String {
         if processExecutableFailures.contains(pid) { throw CocoaError(.fileReadNoPermission) }
         guard let path = processExecutablePaths[pid] else { throw CocoaError(.fileNoSuchFile) }
+        return path
+    }
+
+    func workingDirectoryPath(forPID pid: Int32) throws -> String {
+        if processWorkingDirectoryFailures.contains(pid) { throw CocoaError(.fileReadNoPermission) }
+        guard let path = processWorkingDirectoryPaths[pid] else { throw CocoaError(.fileNoSuchFile) }
         return path
     }
 

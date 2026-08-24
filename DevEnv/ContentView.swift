@@ -22,10 +22,12 @@ private extension View {
 
 struct LocalServiceDisplayGroup: Identifiable {
     var id: Int32 { pids[0] }
+    var displayName: String { attribution?.name ?? localServiceDescriptor(for: processName).displayName }
 
     let processName: String
     var pids: [Int32]
     let bindings: [ListenerBinding]
+    let attribution: LocalServiceAttribution?
 }
 
 struct LocalServiceDescriptor {
@@ -97,7 +99,9 @@ func groupLocalServicesForDisplay(
     // ponytail: listener counts are small; use keyed indices if this becomes measurable.
     for service in services {
         if let index = groups.firstIndex(where: {
-            $0.processName == service.processName && $0.bindings == service.bindings
+            $0.processName == service.processName
+                && $0.bindings == service.bindings
+                && $0.attribution == service.attribution
         }) {
             groups[index].pids.append(service.pid)
             groups[index].pids.sort()
@@ -105,7 +109,8 @@ func groupLocalServicesForDisplay(
             groups.append(LocalServiceDisplayGroup(
                 processName: service.processName,
                 pids: [service.pid],
-                bindings: service.bindings
+                bindings: service.bindings,
+                attribution: service.attribution
             ))
         }
     }
@@ -117,7 +122,7 @@ func localServiceNotifications(_ services: [LocalServiceSnapshot]) -> [String] {
     groupLocalServicesForDisplay(services).compactMap { group in
         let exposedCount = group.bindings.count { !$0.isLoopback }
         guard exposedCount > 0 else { return nil }
-        return "\(localServiceDescriptor(for: group.processName).displayName)：\(exposedCount) 个监听项可能可被局域网访问"
+        return "\(group.displayName)：\(exposedCount) 个监听项可能可被局域网访问"
     }
 }
 
@@ -897,7 +902,22 @@ struct ContentView: View {
 
     private func localServiceRow(_ group: LocalServiceDisplayGroup) -> some View {
         let descriptor = localServiceDescriptor(for: group.processName)
-        let applicationIcon = runningApplicationIcon(for: group.pids)
+        let applicationIcon: NSImage? = switch group.attribution?.kind {
+        case .application:
+            group.attribution.map { NSWorkspace.shared.icon(forFile: $0.path) }
+        case .project:
+            nil
+        case nil:
+            runningApplicationIcon(for: group.pids)
+        }
+        let explanation = switch group.attribution?.kind {
+        case .project:
+            "\(descriptor.displayName) 项目服务 · \(group.attribution.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "")"
+        case .application:
+            "\(descriptor.displayName) 运行时服务"
+        case nil:
+            descriptor.explanation
+        }
         let pidText = group.pids.count == 1
             ? "PID \(group.pids[0].formatted())"
             : "\(group.pids.count) 个进程 · PID \(group.pids.map { $0.formatted() }.joined(separator: "、"))"
@@ -937,10 +957,10 @@ struct ContentView: View {
                         .frame(width: 9, height: 9)
                         .shadow(color: .green.opacity(0.65), radius: 4)
                         .accessibilityHidden(true)
-                    Text(descriptor.displayName)
+                    Text(group.displayName)
                         .font(.title3.bold())
                 }
-                Text(descriptor.explanation)
+                Text(explanation)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Text(processText)
