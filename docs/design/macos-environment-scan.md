@@ -101,7 +101,7 @@ Runtime Installation 来源扩展启用后，V1–V7 快照视为不支持版本
 - 标题下方首先展示一个圆角总览面板，面板内按双列划分系统信息与扫描汇总；每列由图标标题和独立内层卡片组成，两张内层卡片始终以内容较高的一侧为准保持可见背景等高，不使用固定高度。其后依次展示 Runtime、本地服务和环境配置，不在正文中重复系统信息或单独展示 Scan Notice 模块。
 - 摘要展示已发现 Runtime 类别数、Runtime Installation 总数和本地服务组数，不给出 Scan Notice 数量、环境健康评分或“正常/异常”的整体判断。
 - 系统信息卡使用大号系统 Apple 标志，集中展示 macOS 版本、Build、架构，并以图标指标展示主机名和内存；系统卷使用线性进度条显示已用容量占总容量的比例，并同时标注已用、可用和总容量。扫描汇总的三个指标分别使用带图标底板和细描边的独立圆角行，数值右对齐突出显示。
-- Runtime 与“环境配置”都使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git 与 PATH 合并到“环境配置”圆角模块内并作为同级卡片展示：Homebrew 展示版本、安装状态和可执行路径，Git 展示当前生效 CLI、Git LFS 与 GitHub Authentication Configuration 摘要，PATH 展示目录总数与真实的 Runtime PATH 版本冲突数。Git 与非空 PATH 复用 Runtime 的展开策略：点击卡片摘要后，选中卡片移动到模块首位并占满整行，其余卡片重排到下方，同一时间只展开一张；Git 展开后展示 User Git Configuration、GitHub CLI 的 `git_protocol` 与本地/进程级认证来源事实，PATH 展开后默认展示前 3 个目录并可继续展开全部。
+- Runtime 与“环境配置”都使用自适应卡片网格，随窗口宽度自动增减列数；扫描提示保持单列。Homebrew、Git 与 PATH 合并到“环境配置”圆角模块内并作为同级卡片展示：Homebrew 摘要展示版本与安装状态，Git 摘要展示当前生效 CLI，PATH 摘要展示目录总数与真实的 Runtime PATH 版本冲突数。Homebrew、Git 与非空 PATH 复用 Runtime 的展开策略：点击卡片摘要后，选中卡片移动到模块首位并占满整行，其余卡片重排到下方，同一时间只展开一张；Homebrew 展开后展示可执行路径或读取错误，Git 展开后展示 Git LFS、User Git Configuration、GitHub CLI 的 `git_protocol` 与本地/进程级认证来源事实，PATH 展开后默认展示前 3 个目录并可继续展开全部。
 
 ### 扫描状态
 
@@ -177,7 +177,7 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - Git CLI 可用后，固定以 `git config --global --get` 分别查询 `user.name`、`user.email`、`init.defaultBranch`，并以 `git config --global --path --get core.excludesFile` 查询用户显式 ignore 路径；不列举全量配置，不读取 system、repository-local 或 conditional include 的实际仓库身份。
 - User Excludes File 优先采用显式配置；未配置时采用 `$XDG_CONFIG_HOME/git/ignore`，`XDG_CONFIG_HOME` 为空则采用 `$HOME/.config/git/ignore`。Machine Snapshot 只保存标准化绝对路径、来源和文件是否存在，不读取规则内容。
 - 默认身份、默认分支或 User Excludes File 缺失均为中性状态，不产生 Scan Notice。配置命令失败或超时只产生一条 User Git Configuration Scan Notice，并保留 Git CLI、其他扫描结果和快照可持久化性；Git 未发现或版本读取失败时跳过配置子扫描。
-- “环境配置”中的 Git 卡片默认折叠；折叠态补充 Git LFS 简明状态，展开后显示 Default Git Identity、默认分支、User Excludes File、签名配置和 Credential Helper Chain，并复用路径复制、键盘、VoiceOver 与“减少动态效果”交互，不计算就绪度、健康分或配置完成度。
+- “环境配置”中的 Git 卡片默认折叠；展开后显示 Git LFS、Default Git Identity、默认分支、User Excludes File、签名配置和 Credential Helper Chain，并复用路径复制、键盘、VoiceOver 与“减少动态效果”交互，不计算就绪度、健康分或配置完成度。
 - Git CLI 可用时，按当前 `PATH` 顺序只取第一个可执行 `git-lfs` 并以固定参数 `version` 读取版本；不扫描任何仓库的 LFS 跟踪规则、对象、缓存或同步状态。未发现保持中性，版本读取失败或超时只产生一条 Git LFS Scan Notice。
 - 签名子扫描只以 `git config --global --get` 查询 `gpg.format`、`user.signingKey`、`commit.gpgSign` 和 `tag.gpgSign`；不枚举、打开或验证 SSH/GPG 密钥，不访问钥匙串或 agent。缺失值显示“未配置”，命令失败只隔离签名详情并产生一条对应 Scan Notice。
 - Credential Helper Chain 只以 `git config --global --null --get-all credential.helper` 读取全部用户级值并保留顺序。Machine Snapshot 在编码前移除标准 helper 参数和路径，只保留 helper 标识；`!` 自定义命令只保存“自定义命令”，空值保存为 chain 重置事实。`store` 与其他 helper 一样只作事实展示，不评分或建议修复。
@@ -240,7 +240,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - User Git Configuration 全部缺失：展开 Git 卡片显示“未配置默认身份”、中性“未配置”默认分支和 Git 默认 User Excludes File，不产生 Scan Notice。
 - User Excludes File 不存在：保留其标准化绝对路径、来源和“文件不存在”状态，不读取内容且不产生 Scan Notice。
 - User Git Configuration 命令失败或超时：跳过配置详情并只产生一条清晰的 Scan Notice，Git CLI 与其他 Machine Environment 结果仍可保存。
-- Git LFS 成功、缺失或版本读取失败：折叠 Git 卡片分别显示版本、中性“未发现”或“读取失败”；只在失败时产生 Scan Notice。
+- Git LFS 成功、缺失或版本读取失败：展开 Git 卡片分别显示版本、中性“未发现”或“读取失败”；只在失败时产生 Scan Notice。
 - 签名配置全部缺失：展开 Git 卡片的四个白名单项均显示“未配置”，不枚举或验证任何密钥。
 - 多个 Credential Helper：按 Git 配置顺序展示；helper 参数、自定义命令正文及其中的敏感文本不进入 Machine Snapshot 或编码后的 JSON。
 - 签名或 Credential Helper 配置读取失败：只隐藏对应详情并产生一条 Scan Notice，其他 Git 与 Machine Environment 事实仍可保存。

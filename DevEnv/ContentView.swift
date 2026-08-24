@@ -165,6 +165,7 @@ final class EnvironmentViewModel: ObservableObject {
 
 struct ContentView: View {
     private enum EnvironmentCard {
+        case homebrew
         case git
         case path
     }
@@ -1030,7 +1031,10 @@ struct ContentView: View {
                     .font(.title3.bold())
             }
 
-            if expandedEnvironmentCard == .git {
+            if expandedEnvironmentCard == .homebrew {
+                homebrewCard(snapshot.homebrew)
+                environmentCardGrid(snapshot, excluding: .homebrew, pathWarningCount: pathWarningCount)
+            } else if expandedEnvironmentCard == .git {
                 gitCard(
                     snapshot.gitCLI,
                     lfs: snapshot.gitLFS,
@@ -1065,6 +1069,11 @@ struct ContentView: View {
                 showsAllPathEntries = false
             }
         }
+        .onChange(of: snapshot.homebrew.executable == nil && snapshot.homebrew.error == nil) { _, hasNoDetails in
+            if hasNoDetails, expandedEnvironmentCard == .homebrew {
+                expandedEnvironmentCard = nil
+            }
+        }
     }
 
     private func environmentCardGrid(
@@ -1077,7 +1086,9 @@ struct ContentView: View {
             alignment: .leading,
             spacing: 14
         ) {
-            homebrewCard(snapshot.homebrew)
+            if excludedCard != .homebrew {
+                homebrewCard(snapshot.homebrew)
+            }
             if excludedCard != .git {
                 gitCard(
                     snapshot.gitCLI,
@@ -1160,23 +1171,6 @@ struct ContentView: View {
                         .padding(.vertical, 4)
                         .background(appearance.color.opacity(0.10), in: Capsule())
 
-                    if let lfs {
-                        HStack {
-                            Text("Git LFS")
-                            Spacer()
-                            Text(lfs.version ?? (lfs.state == .failed ? "读取失败" : "未发现"))
-                                .foregroundStyle(lfs.state == .failed ? .orange : .secondary)
-                        }
-                        .font(.caption)
-                    }
-
-                    HStack {
-                        Text("GitHub Authentication Configuration")
-                        Spacer()
-                        Text(github.isConfigured ? "已配置" : "未配置")
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.caption)
                 }
                 .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
                 .contentShape(Rectangle())
@@ -1199,6 +1193,7 @@ struct ContentView: View {
                 Divider()
                 gitConfigurationDetails(
                     configuration,
+                    lfs: lfs,
                     signing: signing,
                     credentialHelpers: credentialHelpers,
                     executable: git.state == .available ? git.executable : nil,
@@ -1221,6 +1216,7 @@ struct ContentView: View {
 
     private func gitConfigurationDetails(
         _ configuration: UserGitConfigurationSnapshot?,
+        lfs: GitLFSSnapshot?,
         signing: GitSigningConfigurationSnapshot?,
         credentialHelpers: [String]?,
         executable: String?,
@@ -1233,6 +1229,10 @@ struct ContentView: View {
         }
 
         return VStack(alignment: .leading, spacing: 14) {
+            if let lfs {
+                gitConfigurationValue("Git LFS", lfs.version ?? (lfs.state == .failed ? "读取失败" : "未发现"))
+            }
+
             if let executable {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Git CLI 路径")
@@ -1350,65 +1350,81 @@ struct ContentView: View {
     }
 
     private func homebrewCard(_ homebrew: HomebrewSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color.green.opacity(0.09))
-                        Image(systemName: "shippingbox")
-                            .font(.system(size: 23, weight: .medium))
-                    }
-                    .frame(width: 54, height: 54)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.primary.opacity(0.07))
-                    }
-                    .accessibilityHidden(true)
+        let isExpanded = expandedEnvironmentCard == .homebrew
+        let hasDetails = homebrew.executable != nil || homebrew.error != nil
+        let summary = VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.green.opacity(0.09))
+                    Image(systemName: "shippingbox")
+                        .font(.system(size: 23, weight: .medium))
+                }
+                .frame(width: 54, height: 54)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.07))
+                }
+                .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Homebrew")
-                            .font(.headline)
-                        Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
-                            .font(.title2.bold())
-                            .monospacedDigit()
-                        Text("包管理器")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer(minLength: 8)
-
-                    Image(systemName: homebrew.available ? "checkmark" : "questionmark")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
-                        .frame(width: 38, height: 38)
-                        .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Homebrew")
+                        .font(.headline)
+                    Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
+                        .font(.title2.bold())
+                        .monospacedDigit()
+                    Text("包管理器")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
-                if homebrew.available {
-                    Text("已安装")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.green)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Color.green.opacity(0.10), in: Capsule())
+                Spacer(minLength: 8)
+
+                Image(systemName: homebrew.available ? "checkmark" : "questionmark")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
+                    .frame(width: 38, height: 38)
+                    .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
+            }
+
+            if homebrew.available {
+                Text("已安装")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color.green.opacity(0.10), in: Capsule())
+            }
+        }
+        .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+
+        return VStack(alignment: .leading, spacing: 12) {
+            Group {
+                if hasDetails {
+                    Button {
+                        toggleEnvironmentCard(.homebrew)
+                    } label: {
+                        summary
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(isExpanded ? "已展开" : "已折叠")
+                } else {
+                    summary
                 }
             }
-            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
-            Divider()
+            if isExpanded {
+                Divider()
 
-            if let executable = homebrew.executable {
-                copyablePath(executable)
-            } else if let error = homebrew.error {
-                Label(error, systemImage: "exclamationmark.circle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-            } else {
-                Text("未发现 Homebrew 可执行文件")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                if let executable = homebrew.executable {
+                    copyablePath(executable)
+                } else if let error = homebrew.error {
+                    Label(error, systemImage: "exclamationmark.circle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
             }
         }
         .padding(16)
@@ -1531,6 +1547,7 @@ struct ContentView: View {
             .font(.caption.weight(.semibold))
         }
         .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 
