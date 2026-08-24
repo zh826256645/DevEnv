@@ -164,14 +164,20 @@ final class EnvironmentViewModel: ObservableObject {
 }
 
 struct ContentView: View {
+    private enum EnvironmentCard {
+        case homebrew
+        case git
+        case path
+    }
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model = EnvironmentViewModel()
     @State private var copiedPath: String?
     @State private var hoveredPath: String?
     @State private var expandedRuntimeID: String?
     @State private var fullyShownRuntimeID: String?
-    @State private var isGitConfigurationExpanded = false
-    @State private var isPathExpanded = false
+    @State private var expandedEnvironmentCard: EnvironmentCard?
+    @State private var showsAllPathEntries = false
     @State private var isShowingNotifications = false
     @State private var readNoticeSnapshotDate: Date?
     @State private var environmentCardUpperContentHeight: CGFloat = 0
@@ -634,59 +640,168 @@ struct ContentView: View {
             ? runtime.installations
             : Array(runtime.installations.prefix(3))
 
-        return VStack(alignment: .leading, spacing: 0) {
-            if runtime.installations.isEmpty {
-                runtimeSummary(runtime)
-                    .padding(.vertical, 4)
-            } else {
-                VStack(alignment: .leading, spacing: 0) {
+        return Group {
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 16) {
                     Button {
                         toggleRuntime(runtime.id)
                     } label: {
-                        runtimeSummary(runtime)
+                        runtimeExpandedSummary(runtime)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityValue(isExpanded ? "已展开" : "已折叠")
+                    .accessibilityValue("已展开")
 
-                    if isExpanded {
-                        Divider()
-                            .padding(.vertical, 10)
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(visibleInstallations) { installation in
-                                runtimeInstallationRow(installation)
-                            }
-                            if runtime.installations.count > 3 {
-                                Button {
-                                    toggleInstallationLimit(runtime.id)
-                                } label: {
-                                    Label(
-                                        showsAllInstallations
-                                            ? "收起至 3 个安装路径"
-                                            : "展开其余 \(runtime.installations.count - 3) 个安装路径",
-                                        systemImage: showsAllInstallations ? "chevron.up" : "chevron.down"
-                                    )
-                                }
-                                .buttonStyle(.borderless)
-                            }
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(visibleInstallations) { installation in
+                            runtimeInstallationRow(installation, hasConflict: runtime.hasPathVersionConflict)
                         }
-                        .padding(.bottom, 8)
-                        .transition(.opacity)
+                        if runtime.installations.count > 3 {
+                            Button {
+                                toggleInstallationLimit(runtime.id)
+                            } label: {
+                                Label(
+                                    showsAllInstallations
+                                        ? "收起至 3 个安装路径"
+                                        : "展开其余 \(runtime.installations.count - 3) 个安装路径",
+                                    systemImage: showsAllInstallations ? "chevron.up" : "chevron.down"
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(Color.primary.opacity(0.09))
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            } else {
+                Group {
+                    if runtime.installations.isEmpty {
+                        runtimeSummary(runtime)
+                    } else {
+                        Button {
+                            toggleRuntime(runtime.id)
+                        } label: {
+                            runtimeSummary(runtime)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityValue("已折叠")
                     }
                 }
-                .padding(.vertical, 4)
             }
         }
-        .padding(14)
+        .padding(isExpanded ? 16 : 14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(status.color.opacity(isExpanded ? 0.10 : 0.035))
+            RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                .fill(status.color.opacity(isExpanded ? 0.08 : 0.035))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(status.color.opacity(isExpanded ? 0.50 : 0.25))
+                    RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                        .stroke(status.color.opacity(isExpanded ? 0.55 : 0.25))
                 }
         }
-        .shadow(color: .black.opacity(0.025), radius: 8, y: 3)
+        .shadow(color: status.color.opacity(isExpanded ? 0.10 : 0.025), radius: isExpanded ? 14 : 8, y: 3)
+    }
+
+    private func runtimeExpandedSummary(_ runtime: RuntimeSnapshot) -> some View {
+        let brand = runtimeBrand(runtime)
+        let status = runtimeCardStatus(runtime)
+        let pathVersionCount = Set(runtime.installations.filter(\.isInPath).compactMap(\.version)).count
+
+        return HStack(alignment: .center, spacing: 18) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(brand.color.opacity(0.10))
+                Image(brand.assetName)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(brand.color)
+                    .padding(11)
+            }
+            .frame(width: 64, height: 64)
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(brand.color.opacity(0.16))
+            }
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(runtime.name)
+                    .font(.title3.bold())
+                Text(effectiveVersion(for: runtime))
+                    .font(.title2.bold())
+                    .monospacedDigit()
+                Label("\(runtime.installations.count) 个安装", systemImage: "square.stack.3d.up.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Label(status.title, systemImage: status.pillSymbol)
+                    if let explanation = status.explanation {
+                        helpIcon(explanation)
+                    }
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(status.color)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(status.color.opacity(0.10), in: Capsule())
+            }
+            .frame(width: 150, alignment: .leading)
+
+            HStack(spacing: 10) {
+                environmentMetric(
+                    title: "当前生效",
+                    value: effectiveVersion(for: runtime),
+                    systemImage: "checkmark.circle",
+                    tint: runtime.state == .failed ? .orange : .green
+                )
+                environmentMetric(
+                    title: "PATH 版本",
+                    value: "\(pathVersionCount)",
+                    systemImage: "exclamationmark.circle",
+                    tint: runtime.hasPathVersionConflict ? .orange : .secondary
+                )
+                environmentMetric(
+                    title: "已发现",
+                    value: "\(runtime.installations.count)",
+                    systemImage: "square.stack.3d.up.fill",
+                    tint: .blue
+                )
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func environmentMetric(
+        title: String,
+        value: String,
+        systemImage: String,
+        tint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tint)
+            Text(value)
+                .font(.title3.bold())
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+        .background(tint.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(tint.opacity(0.25))
+        }
     }
 
     private func runtimeSummary(_ runtime: RuntimeSnapshot) -> some View {
@@ -827,28 +942,75 @@ struct ContentView: View {
         }
     }
 
-    private func runtimeInstallationRow(_ installation: RuntimeInstallation) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: installation.state == .discovered ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                .foregroundStyle(installation.state == .discovered ? .green : .orange)
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 8) {
-                    Text(installation.version ?? installation.error ?? "版本读取失败")
-                    if installation.state == .failed {
-                        helpIcon("该安装已被发现，但版本读取失败或可执行文件不可用；它不会阻止其他 Runtime Installation 继续扫描。")
-                    }
-                    if installation.isEffective {
-                        Text("当前生效")
-                            .font(.caption)
-                            .foregroundStyle(.blue)
-                    }
+    private func runtimeInstallationRow(
+        _ installation: RuntimeInstallation,
+        hasConflict: Bool
+    ) -> some View {
+        let isConflictingPath = hasConflict && installation.isInPath && !installation.isEffective
+        let tint: Color = installation.isEffective
+            ? .green
+            : (installation.state == .failed || isConflictingPath ? .orange : .secondary)
+        let symbol = installation.isEffective
+            ? "checkmark.circle.fill"
+            : (installation.state == .failed || isConflictingPath ? "exclamationmark.circle" : "circle.fill")
+        let state = installation.isEffective
+            ? "当前生效"
+            : (installation.isInPath ? "PATH" : "未进入 PATH")
+
+        return HStack(alignment: .center, spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 24)
+
+            Text(installation.version ?? "读取失败")
+                .font(.title3.weight(.semibold))
+                .monospacedDigit()
+                .frame(width: 90, alignment: .leading)
+
+            HStack(spacing: 5) {
+                ForEach(installation.sources.filter { $0 != .path }, id: \.self) { source in
+                    Text(source.displayName)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
                 }
+
+                Text(state)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(installation.isEffective ? .green : .secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
                 copyablePath(installation.executable)
                 if let actual = installation.actualExecutable {
                     copyablePath(actual, prefix: "实际路径")
                 }
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if installation.state == .failed {
+                helpIcon("该安装已被发现，但版本读取失败或可执行文件不可用；它不会阻止其他 Runtime Installation 继续扫描。")
+            } else if isConflictingPath {
+                Text("可能冲突")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(tint.opacity(installation.isEffective ? 0.07 : 0.025), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(tint.opacity(installation.isEffective || isConflictingPath ? 0.45 : 0.16))
         }
     }
 
@@ -869,9 +1031,10 @@ struct ContentView: View {
                     .font(.title3.bold())
             }
 
-            HStack(alignment: .top, spacing: 14) {
+            if expandedEnvironmentCard == .homebrew {
                 homebrewCard(snapshot.homebrew)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                environmentCardGrid(snapshot, excluding: .homebrew, pathWarningCount: pathWarningCount)
+            } else if expandedEnvironmentCard == .git {
                 gitCard(
                     snapshot.gitCLI,
                     lfs: snapshot.gitLFS,
@@ -880,18 +1043,12 @@ struct ContentView: View {
                     credentialHelpers: snapshot.gitCredentialHelpers,
                     github: snapshot.githubAuthenticationConfiguration
                 )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                environmentCardGrid(snapshot, excluding: .git, pathWarningCount: pathWarningCount)
+            } else if expandedEnvironmentCard == .path {
                 pathCard(snapshot.path, warningCount: pathWarningCount)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            .onPreferenceChange(EnvironmentCardUpperContentHeightKey.self) {
-                environmentCardUpperContentHeight = $0
-            }
-
-            if isPathExpanded {
-                pathDetails(snapshot.path)
-                    .transition(.opacity)
+                environmentCardGrid(snapshot, excluding: .path, pathWarningCount: pathWarningCount)
+            } else {
+                environmentCardGrid(snapshot, pathWarningCount: pathWarningCount)
             }
         }
         .padding(16)
@@ -903,6 +1060,50 @@ struct ContentView: View {
                         .stroke(Color.primary.opacity(0.08))
                 }
         }
+        .onPreferenceChange(EnvironmentCardUpperContentHeightKey.self) {
+            environmentCardUpperContentHeight = $0
+        }
+        .onChange(of: snapshot.path.isEmpty) { _, isEmpty in
+            if isEmpty, expandedEnvironmentCard == .path {
+                expandedEnvironmentCard = nil
+                showsAllPathEntries = false
+            }
+        }
+        .onChange(of: snapshot.homebrew.executable == nil && snapshot.homebrew.error == nil) { _, hasNoDetails in
+            if hasNoDetails, expandedEnvironmentCard == .homebrew {
+                expandedEnvironmentCard = nil
+            }
+        }
+    }
+
+    private func environmentCardGrid(
+        _ snapshot: MachineSnapshot,
+        excluding excludedCard: EnvironmentCard? = nil,
+        pathWarningCount: Int
+    ) -> some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 240, maximum: 320), spacing: 14, alignment: .top)],
+            alignment: .leading,
+            spacing: 14
+        ) {
+            if excludedCard != .homebrew {
+                homebrewCard(snapshot.homebrew)
+            }
+            if excludedCard != .git {
+                gitCard(
+                    snapshot.gitCLI,
+                    lfs: snapshot.gitLFS,
+                    configuration: snapshot.userGitConfiguration,
+                    signing: snapshot.gitSigningConfiguration,
+                    credentialHelpers: snapshot.gitCredentialHelpers,
+                    github: snapshot.githubAuthenticationConfiguration
+                )
+            }
+            if excludedCard != .path {
+                pathCard(snapshot.path, warningCount: pathWarningCount)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func gitCard(
@@ -913,6 +1114,7 @@ struct ContentView: View {
         credentialHelpers: [String]?,
         github: GitHubAuthenticationConfigurationSnapshot
     ) -> some View {
+        let isExpanded = expandedEnvironmentCard == .git
         let appearance: (color: Color, status: String, badge: String, pill: String) = switch git.state {
         case .available: (.green, "可用", "checkmark", "checkmark.circle.fill")
         case .failed: (.orange, "读取失败", "exclamationmark", "exclamationmark.circle.fill")
@@ -920,75 +1122,79 @@ struct ContentView: View {
         }
 
         return VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color.orange.opacity(0.09))
-                        Image("GitLogo")
-                            .resizable()
-                            .scaledToFit()
-                            .foregroundStyle(.orange)
-                            .padding(11)
-                    }
-                    .frame(width: 54, height: 54)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.primary.opacity(0.07))
-                    }
-                    .accessibilityHidden(true)
+            Button {
+                toggleEnvironmentCard(.git)
+            } label: {
+                Group {
+                    if isExpanded {
+                        gitExpandedSummary(
+                            git,
+                            lfs: lfs,
+                            configuration: configuration,
+                            github: github,
+                            status: appearance.status,
+                            statusColor: appearance.color,
+                            statusImage: appearance.pill
+                        )
+                    } else {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(alignment: .top, spacing: 12) {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(Color.orange.opacity(0.09))
+                                    Image("GitLogo")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .foregroundStyle(.orange)
+                                        .padding(11)
+                                }
+                                .frame(width: 54, height: 54)
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(Color.primary.opacity(0.07))
+                                }
+                                .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Git")
-                            .font(.headline)
-                        Text(git.version ?? appearance.status)
-                            .font(.title2.bold())
-                            .monospacedDigit()
-                        Text("当前生效 CLI")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Git")
+                                        .font(.headline)
+                                    Text(git.version ?? appearance.status)
+                                        .font(.title2.bold())
+                                        .monospacedDigit()
+                                    Text("当前生效 CLI")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer(minLength: 8)
+
+                                Image(systemName: appearance.badge)
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundStyle(appearance.color)
+                                    .frame(width: 38, height: 38)
+                                    .background(appearance.color.opacity(0.10), in: Circle())
+                                    .accessibilityHidden(true)
+                            }
+                            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+
+                            Divider()
+
+                            Label(appearance.status, systemImage: appearance.pill)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(appearance.color)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(appearance.color.opacity(0.10), in: Capsule())
+                        }
                     }
-
-                    Spacer(minLength: 8)
-
-                    Image(systemName: appearance.badge)
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(appearance.color)
-                        .frame(width: 38, height: 38)
-                        .background(appearance.color.opacity(0.10), in: Circle())
-                        .accessibilityHidden(true)
                 }
-
-                Label(appearance.status, systemImage: appearance.pill)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(appearance.color)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(appearance.color.opacity(0.10), in: Capsule())
-
-                if let lfs {
-                    HStack {
-                        Text("Git LFS")
-                        Spacer()
-                        Text(lfs.version ?? (lfs.state == .failed ? "读取失败" : "未发现"))
-                            .foregroundStyle(lfs.state == .failed ? .orange : .secondary)
-                    }
-                    .font(.caption)
-                }
-
-                HStack {
-                    Text("GitHub Authentication Configuration")
-                    Spacer()
-                    Text(github.isConfigured ? "已配置" : "未配置")
-                        .foregroundStyle(.secondary)
-                }
-                .font(.caption)
+                .contentShape(Rectangle())
             }
-            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
-
-            Divider()
+            .buttonStyle(.plain)
+            .accessibilityValue(isExpanded ? "已展开" : "已折叠")
 
             if git.state != .available {
+                Divider()
                 if let executable = git.executable {
                     copyablePath(executable)
                 } else {
@@ -998,21 +1204,10 @@ struct ContentView: View {
                 }
             }
 
-            Button {
-                toggleGitConfiguration()
-            } label: {
-                Label(
-                    isGitConfigurationExpanded ? "收起 Git 配置" : "查看 Git 配置",
-                    systemImage: isGitConfigurationExpanded ? "chevron.up" : "chevron.down"
-                )
-            }
-            .buttonStyle(.borderless)
-            .accessibilityValue(isGitConfigurationExpanded ? "已展开" : "已折叠")
-
-            if isGitConfigurationExpanded {
-                Divider()
+            if isExpanded {
                 gitConfigurationDetails(
                     configuration,
+                    lfs: lfs,
                     signing: signing,
                     credentialHelpers: credentialHelpers,
                     executable: git.state == .available ? git.executable : nil,
@@ -1033,82 +1228,182 @@ struct ContentView: View {
         }
     }
 
+    private func gitExpandedSummary(
+        _ git: GitCLISnapshot,
+        lfs: GitLFSSnapshot?,
+        configuration: UserGitConfigurationSnapshot?,
+        github: GitHubAuthenticationConfigurationSnapshot,
+        status: String,
+        statusColor: Color,
+        statusImage: String
+    ) -> some View {
+        let lfsValue = lfs?.version ?? (lfs?.state == .failed ? "读取失败" : "未发现")
+        let lfsColor: Color = lfs?.state == .failed ? .orange : (lfs?.state == .available ? .green : .secondary)
+        let githubStatus = switch github.cliState {
+        case .available: "已发现"
+        case .unavailable: "未发现"
+        case .failed: "读取失败"
+        }
+        let githubColor: Color = switch github.cliState {
+        case .available: .green
+        case .unavailable: .secondary
+        case .failed: .orange
+        }
+
+        return HStack(alignment: .center, spacing: 18) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.orange.opacity(0.10))
+                Image("GitLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.orange)
+                    .padding(13)
+            }
+            .frame(width: 64, height: 64)
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.orange.opacity(0.16))
+            }
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Git")
+                    .font(.title3.bold())
+                Text(git.version ?? status)
+                    .font(.title2.bold())
+                    .monospacedDigit()
+                Text("当前生效 CLI")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Label(status, systemImage: statusImage)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(statusColor.opacity(0.10), in: Capsule())
+            }
+            .frame(width: 150, alignment: .leading)
+
+            HStack(spacing: 10) {
+                environmentMetric(
+                    title: "Git LFS",
+                    value: lfsValue,
+                    systemImage: "externaldrive",
+                    tint: lfsColor
+                )
+                environmentMetric(
+                    title: "默认分支",
+                    value: configuration?.defaultBranch ?? "未配置",
+                    systemImage: "arrow.triangle.branch",
+                    tint: .indigo
+                )
+                environmentMetric(
+                    title: "认证",
+                    value: "GitHub CLI \(githubStatus)",
+                    systemImage: "person.crop.circle.badge.checkmark",
+                    tint: githubColor
+                )
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .contentShape(Rectangle())
+    }
+
     private func gitConfigurationDetails(
         _ configuration: UserGitConfigurationSnapshot?,
+        lfs: GitLFSSnapshot?,
         signing: GitSigningConfigurationSnapshot?,
         credentialHelpers: [String]?,
         executable: String?,
         github: GitHubAuthenticationConfigurationSnapshot
     ) -> some View {
+        let lfsValue = lfs?.version ?? (lfs?.state == .failed ? "读取失败" : "未发现")
+        let defaultBranch = configuration?.defaultBranch ?? "未配置"
         let githubCLIStatus = switch github.cliState {
         case .available: "已发现"
         case .unavailable: "未发现"
         case .failed: "读取失败"
         }
+        let githubCLIColor: Color = switch github.cliState {
+        case .available: .green
+        case .unavailable: .secondary
+        case .failed: .orange
+        }
 
-        return VStack(alignment: .leading, spacing: 14) {
+        return VStack(alignment: .leading, spacing: 12) {
             if let executable {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Git CLI 路径")
-                        .font(.callout.weight(.semibold))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
                     copyablePath(executable)
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.primary.opacity(0.09))
+                }
+            }
 
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 280), spacing: 12, alignment: .top)],
+                alignment: .leading,
+                spacing: 12
+            ) {
                 if let configuration {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Default Git Identity")
-                            .font(.callout.weight(.semibold))
-                        if configuration.defaultIdentity.name == nil || configuration.defaultIdentity.email == nil {
-                            Text("未配置默认身份")
+                    gitDetailCard("基础信息", systemImage: "info.circle") {
+                        gitDetailRow("Git LFS", lfsValue)
+                        gitDetailRow(
+                            "Excludes File 来源",
+                            configuration.excludesFile.source == .explicitConfiguration ? "显式配置" : "Git 默认"
+                        )
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("User Excludes File")
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
+                            copyablePath(configuration.excludesFile.path)
                         }
-                        if let name = configuration.defaultIdentity.name { gitConfigurationValue("名称", name) }
-                        if let email = configuration.defaultIdentity.email { gitConfigurationValue("邮箱", email) }
+                        gitStatusPill(
+                            configuration.excludesFile.exists ? "文件存在" : "文件不存在",
+                            color: configuration.excludesFile.exists ? .green : .secondary,
+                            systemImage: configuration.excludesFile.exists ? "checkmark.circle.fill" : "minus.circle"
+                        )
                     }
 
-                    gitConfigurationValue("默认分支", configuration.defaultBranch ?? "未配置")
-
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("User Excludes File")
-                            .font(.callout.weight(.semibold))
-                        Text(configuration.excludesFile.source == .explicitConfiguration ? "显式配置" : "Git 默认")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        copyablePath(configuration.excludesFile.path)
-                        Text(configuration.excludesFile.exists ? "文件存在" : "文件不存在")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    gitDetailCard("Default Git Identity", systemImage: "person") {
+                        gitDetailRow("名称", configuration.defaultIdentity.name ?? "未配置")
+                        gitDetailRow("邮箱", configuration.defaultIdentity.email ?? "未配置")
+                        gitDetailRow("默认分支", defaultBranch)
                     }
                 } else {
-                    Text("User Git Configuration 读取失败，请查看 Scan Notice")
-                        .font(.callout)
-                        .foregroundStyle(.orange)
+                    gitDetailCard("User Git Configuration", systemImage: "exclamationmark.triangle") {
+                        Text("读取失败，请查看 Scan Notice")
+                            .foregroundStyle(.orange)
+                    }
                 }
 
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("签名配置")
-                        .font(.callout.weight(.semibold))
+                gitDetailCard("签名配置", systemImage: "checkmark.shield") {
                     if let signing {
-                        gitConfigurationValue("格式", signing.format ?? "未配置")
-                        gitConfigurationValue("签名标识", signing.signingKey ?? "未配置")
-                        gitConfigurationValue("提交签名", signing.commitSigning ?? "未配置")
-                        gitConfigurationValue("标签签名", signing.tagSigning ?? "未配置")
+                        gitDetailRow("格式", signing.format ?? "未配置")
+                        gitDetailRow("签名标识", signing.signingKey ?? "未配置")
+                        gitDetailRow("提交签名", signing.commitSigning ?? "未配置")
+                        gitDetailRow("标签签名", signing.tagSigning ?? "未配置")
                     } else {
                         Text("读取失败，请查看 Scan Notice")
                             .foregroundStyle(.orange)
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Credential Helper Chain")
-                        .font(.callout.weight(.semibold))
+                gitDetailCard("Credential Helper Chain", systemImage: "key") {
                     if let credentialHelpers {
                         if credentialHelpers.isEmpty {
-                            Text("未配置")
-                                .foregroundStyle(.secondary)
+                            gitStatusPill("未配置", color: .secondary, systemImage: "minus.circle")
                         } else {
                             ForEach(Array(credentialHelpers.enumerated()), id: \.offset) { index, helper in
-                                gitConfigurationValue("\(index + 1)", helper)
+                                gitDetailRow("\(index + 1)", helper)
                             }
                         }
                     } else {
@@ -1118,98 +1413,194 @@ struct ContentView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text("GitHub Authentication Configuration")
-                    .font(.callout.weight(.semibold))
-                gitConfigurationValue("GitHub CLI", githubCLIStatus)
-                gitConfigurationValue("git_protocol", github.gitProtocol ?? (github.cliState == .failed ? "读取失败" : "未配置"))
-                gitConfigurationValue("本地配置", github.localConfigurationExists ? "已配置" : "未配置")
-                gitConfigurationValue("进程 GH_TOKEN", github.ghTokenExists ? "已配置" : "未配置")
-                gitConfigurationValue("进程 GITHUB_TOKEN", github.githubTokenExists ? "已配置" : "未配置")
+            gitDetailCard("GitHub Authentication Configuration", systemImage: "person.crop.circle") {
+                VStack(spacing: 0) {
+                    gitAuthenticationRow("GitHub CLI", value: githubCLIStatus, color: githubCLIColor)
+                    Divider()
+                    gitAuthenticationRow(
+                        "git_protocol",
+                        value: github.gitProtocol ?? (github.cliState == .failed ? "读取失败" : "未配置"),
+                        color: github.gitProtocol == nil ? .secondary : .primary
+                    )
+                    Divider()
+                    gitAuthenticationRow("本地配置", configured: github.localConfigurationExists)
+                    Divider()
+                    gitAuthenticationRow("进程 GH_TOKEN", configured: github.ghTokenExists)
+                    Divider()
+                    gitAuthenticationRow("进程 GITHUB_TOKEN", configured: github.githubTokenExists)
+                }
+                .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.primary.opacity(0.08))
+                }
             }
         }
     }
 
-    private func gitConfigurationValue(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func gitDetailCard<Content: View>(
+        _ title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(Color.primary.opacity(0.09))
+        }
+    }
+
+    private func gitDetailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .frame(width: 110, alignment: .leading)
             Text(value)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
     }
 
-    private func toggleGitConfiguration() {
+    private func gitStatusPill(_ value: String, color: Color, systemImage: String) -> some View {
+        Label(value, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.09), in: Capsule())
+    }
+
+    private func gitAuthenticationRow(_ label: String, value: String, color: Color) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .frame(width: 180, alignment: .leading)
+            Text(value)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(color)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+    }
+
+    private func gitAuthenticationRow(_ label: String, configured: Bool) -> some View {
+        gitAuthenticationRow(
+            label,
+            value: configured ? "已配置" : "未配置",
+            color: configured ? .green : .secondary
+        )
+    }
+
+    private func toggleEnvironmentCard(_ card: EnvironmentCard) {
+        let nextCard = expandedEnvironmentCard == card ? nil : card
         if reduceMotion {
-            isGitConfigurationExpanded.toggle()
+            expandedEnvironmentCard = nextCard
+            showsAllPathEntries = false
         } else {
-            withAnimation(.smooth(duration: 0.25)) {
-                isGitConfigurationExpanded.toggle()
+            withAnimation(.smooth(duration: 0.32)) {
+                expandedEnvironmentCard = nextCard
+                showsAllPathEntries = false
+            }
+        }
+    }
+
+    private func togglePathEntryLimit() {
+        if reduceMotion {
+            showsAllPathEntries.toggle()
+        } else {
+            withAnimation(.snappy(duration: 0.25, extraBounce: 0.02)) {
+                showsAllPathEntries.toggle()
             }
         }
     }
 
     private func homebrewCard(_ homebrew: HomebrewSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color.green.opacity(0.09))
-                        Image(systemName: "shippingbox")
-                            .font(.system(size: 23, weight: .medium))
-                    }
-                    .frame(width: 54, height: 54)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.primary.opacity(0.07))
-                    }
-                    .accessibilityHidden(true)
+        let isExpanded = expandedEnvironmentCard == .homebrew
+        let hasDetails = homebrew.executable != nil || homebrew.error != nil
+        let summary = VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.green.opacity(0.09))
+                    Image(systemName: "shippingbox")
+                        .font(.system(size: 23, weight: .medium))
+                }
+                .frame(width: 54, height: 54)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.07))
+                }
+                .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Homebrew")
-                            .font(.headline)
-                        Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
-                            .font(.title2.bold())
-                            .monospacedDigit()
-                        Text("包管理器")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer(minLength: 8)
-
-                    Image(systemName: homebrew.available ? "checkmark" : "questionmark")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
-                        .frame(width: 38, height: 38)
-                        .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Homebrew")
+                        .font(.headline)
+                    Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
+                        .font(.title2.bold())
+                        .monospacedDigit()
+                    Text("包管理器")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
-                if homebrew.available {
-                    Text("已安装")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.green)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Color.green.opacity(0.10), in: Capsule())
-                }
+                Spacer(minLength: 8)
+
+                Image(systemName: homebrew.available ? "checkmark" : "questionmark")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
+                    .frame(width: 38, height: 38)
+                    .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Circle())
             }
             .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
 
             Divider()
 
-            if let executable = homebrew.executable {
-                copyablePath(executable)
-            } else if let error = homebrew.error {
-                Label(error, systemImage: "exclamationmark.circle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-            } else {
-                Text("未发现 Homebrew 可执行文件")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            Text(homebrew.available ? "已安装" : "未发现")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Capsule())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+
+        return VStack(alignment: .leading, spacing: 12) {
+            Group {
+                if isExpanded {
+                    Button {
+                        toggleEnvironmentCard(.homebrew)
+                    } label: {
+                        homebrewExpandedSummary(homebrew)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue("已展开")
+                } else if hasDetails {
+                    Button {
+                        toggleEnvironmentCard(.homebrew)
+                    } label: {
+                        summary
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue("已折叠")
+                } else {
+                    summary
+                }
+            }
+
+            if isExpanded {
+                homebrewDetails(homebrew)
+                    .transition(.opacity)
             }
         }
         .padding(16)
@@ -1221,101 +1612,123 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.primary.opacity(0.09))
                 }
+        }
+    }
+
+    private func homebrewExpandedSummary(_ homebrew: HomebrewSnapshot) -> some View {
+        let tint: Color = homebrew.available ? .green : (homebrew.error == nil ? .secondary : .orange)
+        let status = homebrew.available ? "已安装" : (homebrew.error == nil ? "未发现" : "读取失败")
+
+        return HStack(alignment: .center, spacing: 18) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(tint.opacity(0.10))
+                Image(systemName: "shippingbox")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(tint)
+            }
+            .frame(width: 64, height: 64)
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(tint.opacity(0.16))
+            }
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Homebrew")
+                    .font(.title3.bold())
+                Text(homebrew.version ?? (homebrew.available ? "可用" : "未发现"))
+                    .font(.title2.bold())
+                    .monospacedDigit()
+                Text("包管理器")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Label(
+                    status,
+                    systemImage: homebrew.available ? "checkmark.circle.fill" : (homebrew.error == nil ? "circle" : "exclamationmark.circle.fill")
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tint)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(tint.opacity(0.10), in: Capsule())
+            }
+            .frame(width: 150, alignment: .leading)
+
+            HStack(spacing: 10) {
+                environmentMetric(
+                    title: "当前版本",
+                    value: homebrew.version ?? "—",
+                    systemImage: "shippingbox.fill",
+                    tint: tint
+                )
+                environmentMetric(
+                    title: "安装状态",
+                    value: status,
+                    systemImage: homebrew.available ? "checkmark.circle" : (homebrew.error == nil ? "questionmark.circle" : "exclamationmark.circle"),
+                    tint: tint
+                )
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func homebrewDetails(_ homebrew: HomebrewSnapshot) -> some View {
+        if let executable = homebrew.executable {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Homebrew CLI 路径", systemImage: "terminal")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                copyablePath(executable)
+            }
+            .padding(12)
+            .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.primary.opacity(0.09))
+            }
+        } else if let error = homebrew.error {
+            Label(error, systemImage: "exclamationmark.circle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
         }
     }
 
     private func pathCard(_ path: [String], warningCount: Int) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.09))
-                        Image(systemName: "point.3.connected.trianglepath.dotted")
-                            .font(.system(size: 23, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
+        let isExpanded = expandedEnvironmentCard == .path
+
+        return VStack(alignment: .leading, spacing: 12) {
+            Group {
+                if isExpanded {
+                    Button {
+                        toggleEnvironmentCard(.path)
+                    } label: {
+                        pathExpandedSummary(path, warningCount: warningCount)
                     }
-                    .frame(width: 54, height: 54)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.primary.opacity(0.07))
-                    }
-                    .accessibilityHidden(true)
-
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 8) {
-                            Text("PATH")
-                                .font(.headline)
-                            Text("\(path.count) 项")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Color.primary.opacity(0.055), in: Capsule())
-                        }
-                        HStack(alignment: .firstTextBaseline, spacing: 5) {
-                            Text(path.count.formatted())
-                                .font(.title2.bold())
-                                .monospacedDigit()
-                                .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
-                            Text("个目录")
-                                .font(.callout)
-                            if warningCount > 0 {
-                                Text("·")
-                                    .foregroundStyle(.secondary)
-                                Text(warningCount.formatted())
-                                    .font(.title3.bold())
-                                    .monospacedDigit()
-                                    .foregroundStyle(.orange)
-                                Text("个冲突")
-                                    .font(.callout)
-                            }
-                        }
-                        Text("环境变量路径扫描")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
-                        .fixedSize(horizontal: true, vertical: false)
-                        .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background((path.isEmpty ? Color.secondary : Color.green).opacity(0.10), in: Capsule())
-
-                    if warningCount > 0 {
-                        Label("\(warningCount) 个冲突", systemImage: "exclamationmark.triangle.fill")
-                            .fixedSize(horizontal: true, vertical: false)
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(Color.orange.opacity(0.10), in: Capsule())
-                    }
-                }
-                .font(.caption.weight(.semibold))
-            }
-            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
-
-            Divider()
-
-            Button {
-                if reduceMotion {
-                    isPathExpanded.toggle()
+                    .buttonStyle(.plain)
+                    .accessibilityValue("已展开")
+                } else if path.isEmpty {
+                    pathCardSummary(path, warningCount: warningCount)
                 } else {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isPathExpanded.toggle()
+                    Button {
+                        toggleEnvironmentCard(.path)
+                    } label: {
+                        pathCardSummary(path, warningCount: warningCount)
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(isExpanded ? "已展开" : "已折叠")
                 }
-            } label: {
-                Label(isPathExpanded ? "收起" : "查看全部", systemImage: isPathExpanded ? "arrow.up" : "arrow.right")
-                    .labelStyle(.titleAndIcon)
-                    .fixedSize(horizontal: true, vertical: false)
             }
-            .font(.caption.weight(.semibold))
-            .buttonStyle(.borderless)
-            .frame(maxWidth: .infinity, alignment: .trailing)
+
+            if isExpanded {
+                pathDetails(path)
+                    .transition(.opacity)
+            }
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1329,34 +1742,196 @@ struct ContentView: View {
         }
     }
 
-    private func pathDetails(_ path: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("PATH 详情")
-                .font(.headline)
-            if path.isEmpty {
-                Text("未读取到 PATH")
+    private func pathExpandedSummary(_ path: [String], warningCount: Int) -> some View {
+        let tint: Color = warningCount > 0 ? .orange : .green
+
+        return HStack(alignment: .center, spacing: 18) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.10))
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .frame(width: 64, height: 64)
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.accentColor.opacity(0.16))
+            }
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("PATH")
+                    .font(.title3.bold())
+                Text("\(path.count) 个目录")
+                    .font(.title2.bold())
+                    .monospacedDigit()
+                Text("环境变量路径扫描")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-            } else {
-                ForEach(Array(path.enumerated()), id: \.offset) { index, entry in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text("\(index + 1)")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 22, alignment: .trailing)
-                        copyablePath(entry)
+                Label(
+                    warningCount > 0 ? "\(warningCount) 个 Runtime 冲突" : "未发现 Runtime 冲突",
+                    systemImage: warningCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tint)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(tint.opacity(0.10), in: Capsule())
+            }
+            .frame(width: 190, alignment: .leading)
+
+            HStack(spacing: 10) {
+                environmentMetric(
+                    title: "目录总数",
+                    value: path.count.formatted(),
+                    systemImage: "folder",
+                    tint: .green
+                )
+                environmentMetric(
+                    title: "Runtime 冲突",
+                    value: warningCount.formatted(),
+                    systemImage: warningCount > 0 ? "exclamationmark.triangle" : "checkmark.circle",
+                    tint: tint
+                )
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func pathCardSummary(_ path: [String], warningCount: Int) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.09))
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .font(.system(size: 23, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .frame(width: 54, height: 54)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.07))
+                }
+                .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 8) {
+                        Text("PATH")
+                            .font(.headline)
+                        Text("\(path.count) 项")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.055), in: Capsule())
                     }
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Text(path.count.formatted())
+                            .font(.title2.bold())
+                            .monospacedDigit()
+                            .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
+                        Text("个目录")
+                            .font(.callout)
+                        if warningCount > 0 {
+                            Text("·")
+                                .foregroundStyle(.secondary)
+                            Text(warningCount.formatted())
+                                .font(.title3.bold())
+                                .monospacedDigit()
+                                .foregroundStyle(.orange)
+                            Text("个冲突")
+                                .font(.callout)
+                        }
+                    }
+                    Text("环境变量路径扫描")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.45))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.primary.opacity(0.08))
+            .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Label(path.isEmpty ? "未读取" : "\(path.count) 个目录", systemImage: path.isEmpty ? "circle" : "checkmark.circle.fill")
+                    .fixedSize(horizontal: true, vertical: false)
+                    .foregroundStyle(path.isEmpty ? Color.secondary : Color.green)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background((path.isEmpty ? Color.secondary : Color.green).opacity(0.10), in: Capsule())
+
+                if warningCount > 0 {
+                    Label("\(warningCount) 个冲突", systemImage: "exclamationmark.triangle.fill")
+                        .fixedSize(horizontal: true, vertical: false)
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Color.orange.opacity(0.10), in: Capsule())
                 }
+            }
+            .font(.caption.weight(.semibold))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    private func pathDetails(_ path: [String]) -> some View {
+        let visibleEntries = showsAllPathEntries ? path : Array(path.prefix(3))
+
+        return VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(visibleEntries.enumerated()), id: \.offset) { index, entry in
+                HStack(spacing: 10) {
+                    Text("\(index + 1)")
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(index == 0 ? Color.accentColor : Color.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            (index == 0 ? Color.accentColor : Color.secondary).opacity(0.09),
+                            in: RoundedRectangle(cornerRadius: 7)
+                        )
+                    copyablePath(entry)
+                    if index == 0 {
+                        Text("最高优先级")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Color.accentColor.opacity(0.09), in: Capsule())
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.primary.opacity(0.09))
+                }
+            }
+
+            if path.count > 3 {
+                Button {
+                    togglePathEntryLimit()
+                } label: {
+                    Label(
+                        showsAllPathEntries
+                            ? "收起至 3 个目录"
+                            : "展开其余 \(path.count - 3) 个目录",
+                        systemImage: showsAllPathEntries ? "chevron.up" : "chevron.down"
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.primary.opacity(0.09))
+                    }
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 

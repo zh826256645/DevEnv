@@ -63,6 +63,34 @@ enum RuntimeState: String, Codable, Sendable {
     case failed
 }
 
+enum RuntimeInstallationSource: String, Codable, CaseIterable, Hashable, Sendable {
+    case system
+    case homebrew
+    case mise
+    case nvm
+    case uv
+    case pyenv
+    case javaHome
+    case rustup
+    case rbenv
+    case path
+
+    var displayName: String {
+        switch self {
+        case .system: "系统"
+        case .homebrew: "Homebrew"
+        case .mise: "mise"
+        case .nvm: "nvm"
+        case .uv: "uv"
+        case .pyenv: "pyenv"
+        case .javaHome: "java_home"
+        case .rustup: "rustup"
+        case .rbenv: "rbenv"
+        case .path: "PATH"
+        }
+    }
+}
+
 struct RuntimeInstallation: Codable, Identifiable, Sendable {
     let id: String
     let executable: String
@@ -72,11 +100,12 @@ struct RuntimeInstallation: Codable, Identifiable, Sendable {
     let error: String?
     let isEffective: Bool
     let isInPath: Bool
+    var sources: [RuntimeInstallationSource]
 }
 
 extension RuntimeInstallation {
     private enum CodingKeys: String, CodingKey {
-        case id, executable, actualExecutable, version, state, error, isEffective, isInPath
+        case id, executable, actualExecutable, version, state, error, isEffective, isInPath, sources
     }
 
     init(from decoder: any Decoder) throws {
@@ -89,6 +118,7 @@ extension RuntimeInstallation {
         error = try values.decodeIfPresent(String.self, forKey: .error)
         isEffective = try values.decode(Bool.self, forKey: .isEffective)
         isInPath = try values.decodeIfPresent(Bool.self, forKey: .isInPath) ?? true
+        sources = try values.decode([RuntimeInstallationSource].self, forKey: .sources)
     }
 }
 
@@ -277,6 +307,7 @@ struct EnvironmentScanner: Sendable {
         let runtimeID: String
         let version: String
         let executable: String
+        let source: RuntimeInstallationSource
     }
 
     private struct MiseInstallation: Decodable {
@@ -367,7 +398,7 @@ struct EnvironmentScanner: Sendable {
             )
         }
         let snapshot = MachineSnapshot(
-            schemaVersion: 7,
+            schemaVersion: 8,
             scannedAt: Date(),
             system: system,
             localServices: localServices,
@@ -739,7 +770,8 @@ struct EnvironmentScanner: Sendable {
                 state: version == nil ? .failed : .discovered,
                 error: error,
                 isEffective: installations.isEmpty,
-                isInPath: true
+                isInPath: true,
+                sources: inferredRuntimeSources(executable: executable, actualExecutable: actual)
             ))
         }
 
@@ -747,7 +779,10 @@ struct EnvironmentScanner: Sendable {
             let executable = standardizedPath(installation.executable)
             let available = machine.isExecutableFile(atPath: executable)
             let actual = available ? standardizedPath(machine.resolvingSymlinksInPath(executable)) : executable
-            guard seenTargets.insert(actual).inserted else { continue }
+            if let index = installations.firstIndex(where: { $0.id == actual }) {
+                installations[index].sources = mergedSources(installations[index].sources, installation.source)
+                continue
+            }
             let error = available ? nil : "可执行文件不可用"
             if let error {
                 issues.append("\(definition.name)：\(error)（\(executable)）")
@@ -760,7 +795,8 @@ struct EnvironmentScanner: Sendable {
                 state: available ? .discovered : .failed,
                 error: error,
                 isEffective: false,
-                isInPath: false
+                isInPath: false,
+                sources: [installation.source]
             ))
         }
 
@@ -787,7 +823,8 @@ struct EnvironmentScanner: Sendable {
                 RuntimeProviderInstallation(
                     runtimeID: definition.id,
                     version: installation.version,
-                    executable: standardizedPath("\(installation.installPath)/bin/\(definition.executable)")
+                    executable: standardizedPath("\(installation.installPath)/bin/\(definition.executable)"),
+                    source: .mise
                 )
             }
         }
@@ -810,7 +847,12 @@ struct EnvironmentScanner: Sendable {
         return entries.compactMap { entry in
             let directory = "\(versionRoot)/\(entry)"
             guard let version = nvmVersion(from: directory) else { return nil }
-            return RuntimeProviderInstallation(runtimeID: "node", version: version, executable: "\(directory)/bin/node")
+            return RuntimeProviderInstallation(
+                runtimeID: "node",
+                version: version,
+                executable: "\(directory)/bin/node",
+                source: .nvm
+            )
         }
     }
 
@@ -830,7 +872,12 @@ struct EnvironmentScanner: Sendable {
             return []
         }
         return installed.map {
-            RuntimeProviderInstallation(runtimeID: "python", version: $0.version, executable: standardizedPath($0.path))
+            RuntimeProviderInstallation(
+                runtimeID: "python",
+                version: $0.version,
+                executable: standardizedPath($0.path),
+                source: .uv
+            )
         }
     }
 
@@ -851,7 +898,8 @@ struct EnvironmentScanner: Sendable {
             return RuntimeProviderInstallation(
                 runtimeID: "python",
                 version: version,
-                executable: standardizedPath("\(root)/versions/\(version)/bin/python3")
+                executable: standardizedPath("\(root)/versions/\(version)/bin/python3"),
+                source: .pyenv
             )
         }
     }
@@ -875,7 +923,7 @@ struct EnvironmentScanner: Sendable {
                 .appendingPathComponent("bin", isDirectory: true)
                 .appendingPathComponent("java")
                 .path
-            return RuntimeProviderInstallation(runtimeID: "java", version: version, executable: java)
+            return RuntimeProviderInstallation(runtimeID: "java", version: version, executable: java, source: .javaHome)
         }
         guard !installations.isEmpty else {
             issues.append("java_home Java Runtime Provider：输出解析失败")
@@ -910,7 +958,8 @@ struct EnvironmentScanner: Sendable {
             return RuntimeProviderInstallation(
                 runtimeID: "rust",
                 version: toolchain,
-                executable: standardizedPath("\(root)/toolchains/\(toolchain)/bin/rustc")
+                executable: standardizedPath("\(root)/toolchains/\(toolchain)/bin/rustc"),
+                source: .rustup
             )
         }
         guard !installations.isEmpty else {
@@ -939,7 +988,8 @@ struct EnvironmentScanner: Sendable {
             return RuntimeProviderInstallation(
                 runtimeID: "ruby",
                 version: version,
-                executable: standardizedPath("\(root)/versions/\(version)/bin/ruby")
+                executable: standardizedPath("\(root)/versions/\(version)/bin/ruby"),
+                source: .rbenv
             )
         }
         guard !lines.isEmpty else {
@@ -1015,10 +1065,80 @@ struct EnvironmentScanner: Sendable {
                         .appendingPathComponent(version, isDirectory: true)
                         .appendingPathComponent("bin", isDirectory: true)
                         .appendingPathComponent(runtimeExecutable)
-                        .path
+                        .path,
+                    source: .homebrew
                 )
             }
         }
+    }
+
+    private func inferredRuntimeSources(
+        executable: String,
+        actualExecutable: String
+    ) -> [RuntimeInstallationSource] {
+        let paths = [standardizedPath(executable), actualExecutable]
+        var sources: [RuntimeInstallationSource] = []
+
+        if paths.contains(where: isSystemExecutable) { sources.append(.system) }
+
+        let home = machine.environment["HOME"]
+        let roots: [(RuntimeInstallationSource, [String])] = [
+            (.homebrew, ["/opt/homebrew/Cellar", "/usr/local/Cellar"]),
+            (.mise, absoluteRoots(
+                machine.environment["MISE_DATA_DIR"],
+                machine.environment["XDG_DATA_HOME"].map { "\($0)/mise" },
+                home.map { "\($0)/.local/share/mise" }
+            )),
+            (.nvm, absoluteRoots(machine.environment["NVM_DIR"], home.map { "\($0)/.nvm" })),
+            (.uv, absoluteRoots(
+                machine.environment["UV_PYTHON_INSTALL_DIR"],
+                machine.environment["XDG_DATA_HOME"].map { "\($0)/uv/python" },
+                home.map { "\($0)/.local/share/uv/python" }
+            )),
+            (.pyenv, absoluteRoots(machine.environment["PYENV_ROOT"], home.map { "\($0)/.pyenv" })),
+            (.rustup, absoluteRoots(
+                machine.environment["RUSTUP_HOME"],
+                home.map { "\($0)/.rustup" },
+                machine.environment["CARGO_HOME"],
+                home.map { "\($0)/.cargo" }
+            )),
+            (.rbenv, absoluteRoots(machine.environment["RBENV_ROOT"], home.map { "\($0)/.rbenv" })),
+        ]
+
+        for (source, directories) in roots where paths.contains(where: { path in
+            directories.contains(where: { isPath(path, inside: $0) })
+        }) {
+            sources.append(source)
+        }
+
+        return sources.isEmpty ? [.path] : sortedSources(sources)
+    }
+
+    private func absoluteRoots(_ roots: String?...) -> [String] {
+        roots.compactMap { root in
+            guard let root, root.hasPrefix("/") else { return nil }
+            return standardizedPath(root)
+        }
+    }
+
+    private func isSystemExecutable(_ path: String) -> Bool {
+        ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/System", "/Library/Apple/usr/bin"]
+            .contains { isPath(path, inside: $0) }
+    }
+
+    private func isPath(_ path: String, inside directory: String) -> Bool {
+        path == directory || path.hasPrefix(directory + "/")
+    }
+
+    private func mergedSources(
+        _ sources: [RuntimeInstallationSource],
+        _ source: RuntimeInstallationSource
+    ) -> [RuntimeInstallationSource] {
+        sortedSources((sources.filter { $0 != .path }) + [source])
+    }
+
+    private func sortedSources(_ sources: [RuntimeInstallationSource]) -> [RuntimeInstallationSource] {
+        RuntimeInstallationSource.allCases.filter(Set(sources).contains)
     }
 
     private func providerInstallationOrder(
@@ -1094,7 +1214,7 @@ struct SnapshotStore: Sendable {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 7 else { return nil }
+        guard (try? decoder.decode(Header.self, from: data).schemaVersion) == 8 else { return nil }
         return try? decoder.decode(MachineSnapshot.self, from: data)
     }
 

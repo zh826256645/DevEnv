@@ -56,6 +56,10 @@ _Avoid_: Database Scanner, Database Manager
 从已知工具或平台索引中发现未进入当前 `PATH` 的 Runtime Installation 的来源。
 _Avoid_: Scanner, Version Manager
 
+**Runtime Installation Source**:
+Environment Scan 能够确认的 Runtime Installation 管理或发现来源；它与该安装是否进入 `PATH`、是否当前生效无关，不声称还原历史安装操作。
+_Avoid_: Installation Method, Runtime State
+
 **Local Service**:
 当前 App 运行用户可见、按 PID 聚合且至少具有一个 TCP Listener Binding 的本机进程。
 _Avoid_: Daemon, Background Service
