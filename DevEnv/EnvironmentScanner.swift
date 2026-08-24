@@ -1025,7 +1025,7 @@ struct EnvironmentScanner: Sendable {
         }
         let listeningState: DatabaseListeningState = if installations.contains(where: { $0.listeningState == .listening }) {
             .listening
-        } else if installations.contains(where: { $0.listeningState == .unknown }) || !localServices.complete || relevantPathFailure {
+        } else if installations.contains(where: { $0.listeningState == .unknown }) || providerFailed {
             .unknown
         } else {
             .notListening

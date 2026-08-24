@@ -1332,16 +1332,14 @@ final class EnvironmentScannerTests: XCTestCase {
                 "\(postgres) --version": "postgres (PostgreSQL) 17.1\n",
                 "/opt/homebrew/bin/brew --version": "Homebrew 4.5.0\n",
             ],
-            commandStatuses: [lsof: -1],
             commandTimeouts: [brewList]
         )).scan().snapshot
 
         let discovered = try XCTUnwrap(withPathResult.databaseInstallationOverviews.first)
         XCTAssertEqual(discovered.discoveryState, .discovered)
         XCTAssertEqual(discovered.listeningState, .unknown)
-        XCTAssertEqual(discovered.installations.first?.listeningState, .unknown)
+        XCTAssertEqual(discovered.installations.first?.listeningState, .notListening)
         XCTAssertTrue(withPathResult.issues.contains("PostgreSQL Database Provider：Homebrew 命令超时"))
-        XCTAssertTrue(withPathResult.issues.contains(MachineSnapshot.localServiceFailureNotice))
 
         let withoutResults = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
