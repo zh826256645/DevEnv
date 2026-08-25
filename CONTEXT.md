@@ -9,8 +9,44 @@ DevEnv 帮助 macOS 开发者理解本机的开发工具状态，并将其与项
 _Avoid_: Environment, Development Environment
 
 **Project Requirements**:
-一个项目明确声明的运行时、工具和服务要求，而不是本机的实际状态。
+一个项目明确声明的系统条件、运行时、开发工具、外部服务或容器运行条件，而不是本机的实际状态；不包含由包管理器解析的库依赖。
 _Avoid_: Project Environment
+
+**Project Root**:
+一个项目的规范目录边界：优先采用包含所选目录的最近 Git 根；没有 Git 时，由项目清单或用户直接选择确定。嵌套 Git 根和用户明确选择的嵌套边界各自形成 Project Root，父项目不吸收其清单。
+_Avoid_: Package Root, Working Directory
+
+**Project Record**:
+DevEnv 对一个已发现 Project Root 保存的轻量身份记录；原目录暂时不可用时记录仍可保留，删除记录不会删除或修改原目录。
+_Avoid_: Project Snapshot, Project Files
+
+**Ignored Project**:
+用户从 DevEnv 删除后不再由 Project Search Root 自动恢复的 Project Root；直接重新添加该目录或由用户恢复时解除忽略。
+_Avoid_: Deleted Project, Unavailable Project
+
+**Project Component**:
+Project Root 内由自身目录中的项目清单声明独立 Project Requirements 的组成部分；同一项目的不同 Component 可以要求同类 Runtime 的不同版本。
+_Avoid_: Project, Package
+
+**Project Requirement Conflict**:
+同一 Project Component 对同一项 Machine Environment 能力存在无法同时满足的多份声明。
+_Avoid_: Runtime Conflict, Version Conflict
+
+**Project Notice**:
+项目发现或 Project Requirements 读取中的失败与不确定性，只影响对应 Project Search Root、Project 或 Project Component，不属于 Environment Scan 的 Scan Notice。
+_Avoid_: Scan Notice, Project Error, Health Problem
+
+**Requirement Satisfaction State**:
+Project Requirement 与 Machine Environment 比较后的证据状态，取值为“已满足”“未满足”“无法判断”或“声明冲突”；它不保证项目一定能够运行。
+_Avoid_: Project Health, Runnable Status, Compatibility Result
+
+**Project Requirements Summary**:
+一个 Project Record 对其 Project Requirements 比较结果的汇总，取值为“已满足”“未满足”“无法判断”“声明冲突”“未声明要求”或“不可用”；它不是项目健康或可运行性结论。
+_Avoid_: Project Health, Runnable Status
+
+**Project Search Root**:
+用户明确选择、供 DevEnv 在一次操作中于其边界内递归发现 Project Root 的临时目录；它本身不一定是项目，也不由 DevEnv 持久化。
+_Avoid_: Project Root, Workspace, Scan Directory
 
 **Environment Profile**:
 一套可移植的目标配置，描述期望存在的开发工具状态。
@@ -47,6 +83,10 @@ _Avoid_: Current Shell, Active Shell
 **Runtime Installation**:
 本机可被发现的某个语言运行时实例，包含其版本与来源位置。
 _Avoid_: Runtime, Package
+
+**Project-local Runtime Installation**:
+位于特定 Project Component 内、只在该项目上下文中发现和使用的 Runtime Installation；它可以作为该 Component 的要求满足证据，但不进入全机 Runtime 列表。
+_Avoid_: Virtual Environment, Global Runtime
 
 **Database Installation**:
 本机可被发现的某个数据库服务端软件安装实例，包含数据库类型、版本与服务端可执行文件路径。
