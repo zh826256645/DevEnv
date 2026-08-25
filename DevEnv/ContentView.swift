@@ -73,7 +73,7 @@ struct LocalServiceDisplayGroup: Identifiable {
     let attribution: LocalServiceAttribution?
 }
 
-struct LocalServiceDescriptor {
+struct ServiceDisplayDescriptor {
     let displayName: String
     let explanation: String
     let symbolName: String
@@ -81,7 +81,7 @@ struct LocalServiceDescriptor {
     let assetName: String?
 }
 
-func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
+func localServiceDescriptor(for processName: String) -> ServiceDisplayDescriptor {
     let name = processName.lowercased()
     func descriptor(
         _ displayName: String,
@@ -89,8 +89,8 @@ func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
         _ symbolName: String,
         _ tint: Color,
         _ assetName: String? = nil
-    ) -> LocalServiceDescriptor {
-        LocalServiceDescriptor(
+    ) -> ServiceDisplayDescriptor {
+        ServiceDisplayDescriptor(
             displayName: displayName,
             explanation: explanation,
             symbolName: symbolName,
@@ -132,6 +132,42 @@ func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
     default:
         return descriptor(processName, "未识别的本地 TCP 监听进程", "server.rack", .secondary)
     }
+}
+
+func homebrewServiceDescriptor(for formula: String) -> ServiceDisplayDescriptor {
+    let name = formula.lowercased()
+
+    if name == "postgresql" || name.hasPrefix("postgresql@") {
+        return localServiceDescriptor(for: "postgres")
+    }
+    if name == "mongodb-community" || name.hasPrefix("mongodb-community@") {
+        return localServiceDescriptor(for: "mongod")
+    }
+    if name == "redis" || name.hasPrefix("redis@") {
+        return localServiceDescriptor(for: "redis")
+    }
+    if name == "mysql" || name.hasPrefix("mysql@") {
+        return localServiceDescriptor(for: "mysql")
+    }
+    if name == "mariadb" || name.hasPrefix("mariadb@") {
+        return localServiceDescriptor(for: "mariadbd")
+    }
+    if name == "node" || name.hasPrefix("node@") {
+        return localServiceDescriptor(for: "node")
+    }
+    if name == "python" || name.hasPrefix("python@") {
+        return localServiceDescriptor(for: "python")
+    }
+    if name == "cloudflared" {
+        return ServiceDisplayDescriptor(displayName: formula, explanation: "", symbolName: "cloud.fill", tint: .blue, assetName: nil)
+    }
+    if name == "php" || name.hasPrefix("php@") {
+        return ServiceDisplayDescriptor(displayName: formula, explanation: "", symbolName: "chevron.left.forwardslash.chevron.right", tint: .indigo, assetName: nil)
+    }
+    if name == "unbound" {
+        return ServiceDisplayDescriptor(displayName: formula, explanation: "", symbolName: "network", tint: .teal, assetName: nil)
+    }
+    return ServiceDisplayDescriptor(displayName: formula, explanation: "", symbolName: "shippingbox.fill", tint: .secondary, assetName: nil)
 }
 
 func groupLocalServicesForDisplay(
@@ -187,18 +223,36 @@ enum NoticeIdentity: Hashable {
 @MainActor
 final class EnvironmentViewModel: ObservableObject {
     @Published private(set) var snapshot: MachineSnapshot?
-    @Published private(set) var isScanning = false
-    @Published private(set) var isRefreshingDynamicStatus = false
     @Published private(set) var scanError: String?
     @Published private(set) var dynamicRefreshError: String?
     @Published private(set) var isShowingStaleSnapshot = false
     @Published private(set) var dynamicStatusRefreshedAt: Date?
     @Published private(set) var autoRefreshSettings = AutoRefreshSettings.load()
+    @Published private(set) var homebrewServiceList: HomebrewServiceListState?
+    @Published private(set) var homebrewServiceActionResult: HomebrewServiceActionResult?
+    @Published private(set) var operationCoordinator = MachineOperationCoordinator()
 
-    var isBusy: Bool { isScanning || isRefreshingDynamicStatus }
+    var isScanning: Bool { operationCoordinator.active == .environmentScan }
+    var isRefreshingDynamicStatus: Bool { operationCoordinator.active == .dynamicStatusRefresh }
+    var isRefreshingHomebrewServices: Bool { operationCoordinator.active == .homebrewServiceRefresh }
+    var homebrewServiceActionFormula: String? {
+        guard case let .homebrewServiceAction(formula) = operationCoordinator.active else { return nil }
+        return formula
+    }
+    var isBusy: Bool { operationCoordinator.active != nil }
+    var busyDescription: String? {
+        switch operationCoordinator.active {
+        case .environmentScan: "正在扫描"
+        case .dynamicStatusRefresh: "正在刷新动态状态"
+        case .homebrewServiceRefresh: "正在刷新 Homebrew Service"
+        case .homebrewServiceAction: "正在修改 Homebrew Service"
+        case nil: nil
+        }
+    }
 
     private let scanner = EnvironmentScanner()
     private let store = SnapshotStore()
+    private var shouldRefreshHomebrewServicesWhenIdle = false
 
     init() {
         snapshot = store.load()
@@ -206,9 +260,8 @@ final class EnvironmentViewModel: ObservableObject {
     }
 
     func scan() {
-        guard !isScanning, !isRefreshingDynamicStatus else { return }
+        guard begin(.environmentScan) else { return }
         let hadSnapshot = snapshot != nil
-        isScanning = true
         scanError = nil
         isShowingStaleSnapshot = false
         let scanner = scanner
@@ -231,7 +284,7 @@ final class EnvironmentViewModel: ObservableObject {
                     self.scanError = "无法读取 macOS 基础信息，本次未更新快照"
                     self.isShowingStaleSnapshot = hadSnapshot
                 }
-                self.isScanning = false
+                self.finish(.environmentScan)
             }
         }
     }
@@ -248,8 +301,7 @@ final class EnvironmentViewModel: ObservableObject {
     }
 
     func refreshDynamicStatus() {
-        guard let snapshot, !isScanning, !isRefreshingDynamicStatus else { return }
-        isRefreshingDynamicStatus = true
+        guard let snapshot, begin(.dynamicStatusRefresh) else { return }
         let scanner = scanner
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let result = scanner.refreshDynamicStatus(in: snapshot)
@@ -263,13 +315,94 @@ final class EnvironmentViewModel: ObservableObject {
                 case let .failure(error):
                     self.dynamicRefreshError = error.localizedDescription
                 }
-                self.isRefreshingDynamicStatus = false
+                self.finish(.dynamicStatusRefresh)
             }
+        }
+    }
+
+    func refreshHomebrewServices() {
+        guard let executable = snapshot?.homebrew.executable,
+              snapshot?.homebrew.available == true else { return }
+        guard !isBusy else {
+            shouldRefreshHomebrewServicesWhenIdle = true
+            return
+        }
+        guard begin(.homebrewServiceRefresh) else { return }
+        shouldRefreshHomebrewServicesWhenIdle = false
+        let previous = homebrewServiceList
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let state = HomebrewServiceManager().refresh(executable: executable, previous: previous)
+            DispatchQueue.main.async {
+                self?.homebrewServiceList = state
+                self?.finish(.homebrewServiceRefresh)
+            }
+        }
+    }
+
+    func performHomebrewServiceAction(_ action: HomebrewServiceAction, on service: HomebrewService) {
+        guard let snapshot,
+              let executable = snapshot.homebrew.executable,
+              snapshot.homebrew.available,
+              let currentServices = homebrewServiceList?.services,
+              currentServices.contains(where: { $0.formula == service.formula }),
+              homebrewServiceList?.isStale == false,
+              begin(.homebrewServiceAction(service.formula)) else { return }
+        homebrewServiceActionResult = nil
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = HomebrewServiceManager().perform(
+                action,
+                on: service,
+                executable: executable,
+                currentServices: currentServices,
+                snapshot: snapshot
+            )
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.homebrewServiceList = result.list
+                self.homebrewServiceActionResult = result
+                if let dynamicStatus = result.dynamicStatus {
+                    self.snapshot = snapshot.applying(dynamicStatus)
+                    self.dynamicStatusRefreshedAt = Date()
+                    self.dynamicRefreshError = nil
+                } else if let error = result.dynamicStatusError {
+                    self.dynamicRefreshError = error
+                }
+                self.finish(.homebrewServiceAction(service.formula))
+                let message = result.message
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                    if self?.homebrewServiceActionResult?.message == message {
+                        self?.homebrewServiceActionResult = nil
+                    }
+                }
+            }
+        }
+    }
+
+    private func begin(_ operation: MachineOperationCoordinator.Operation) -> Bool {
+        var coordinator = operationCoordinator
+        guard coordinator.begin(operation) else { return false }
+        operationCoordinator = coordinator
+        return true
+    }
+
+    private func finish(_ operation: MachineOperationCoordinator.Operation) {
+        var coordinator = operationCoordinator
+        coordinator.finish(operation)
+        operationCoordinator = coordinator
+        if !isBusy, shouldRefreshHomebrewServicesWhenIdle {
+            DispatchQueue.main.async { [weak self] in self?.refreshHomebrewServices() }
         }
     }
 }
 
 struct ContentView: View {
+    private struct PendingHomebrewServiceAction: Identifiable {
+        var id: String { "\(service.formula)-\(action.rawValue)" }
+        let service: HomebrewService
+        let action: HomebrewServiceAction
+        let executable: String
+    }
+
     private enum Page: CaseIterable, Hashable {
         case overview
         case runtimes
@@ -298,6 +431,11 @@ struct ContentView: View {
             case .settings: "gearshape"
             }
         }
+    }
+
+    private enum ServiceTab: Hashable {
+        case local
+        case homebrew
     }
 
     private struct AutoRefreshSchedule: Hashable {
@@ -332,6 +470,8 @@ struct ContentView: View {
     @State private var isShowingSettingsExitConfirmation = false
     @State private var usesForegroundRefreshInterval = NSApplication.shared.isActive
     @State private var environmentCardUpperContentHeight: CGFloat = 0
+    @State private var pendingHomebrewServiceAction: PendingHomebrewServiceAction?
+    @State private var selectedServiceTab = ServiceTab.local
     @FocusState private var focusedCopyPath: String?
 
     var body: some View {
@@ -378,9 +518,9 @@ struct ContentView: View {
                     }
                 }
                 .accessibilityLabel(
-                    model.isScanning ? "正在扫描" : model.isRefreshingDynamicStatus ? "正在刷新动态状态" : "重新扫描"
+                    model.busyDescription ?? "重新扫描"
                 )
-                .help(model.isScanning ? "正在扫描" : model.isRefreshingDynamicStatus ? "正在刷新动态状态" : "重新扫描")
+                .help(model.busyDescription ?? "重新扫描")
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(model.isBusy)
             }
@@ -424,12 +564,34 @@ struct ContentView: View {
         }) {
             settingsExitConfirmation
         }
+        .alert(
+            pendingHomebrewServiceAction.map { "\($0.action.title) \($0.service.formula)？" } ?? "",
+            isPresented: isConfirmingHomebrewServiceAction,
+            presenting: pendingHomebrewServiceAction
+        ) { request in
+            Button("取消", role: .cancel) {}
+                .keyboardShortcut(.defaultAction)
+            Button("确认\(request.action.title)", role: request.action == .stop ? .destructive : nil) {
+                model.performHomebrewServiceAction(request.action, on: request.service)
+            }
+        } message: { request in
+            let command = ([request.executable, "services", request.action.rawValue, request.service.formula])
+                .joined(separator: " ")
+            Text("\(command)\n\n\(request.action.persistentEffect)")
+        }
     }
 
     private var autoRefreshSchedule: AutoRefreshSchedule {
         AutoRefreshSchedule(
             isEnabled: model.autoRefreshSettings.isEnabled,
             seconds: Int(model.autoRefreshSettings.interval(isActive: usesForegroundRefreshInterval))
+        )
+    }
+
+    private var isConfirmingHomebrewServiceAction: Binding<Bool> {
+        Binding(
+            get: { pendingHomebrewServiceAction != nil },
+            set: { if !$0 { pendingHomebrewServiceAction = nil } }
         )
     }
 
@@ -1161,7 +1323,9 @@ struct ContentView: View {
 
     @ViewBuilder
     private func databasePage(_ overviews: [DatabaseInstallationOverview]) -> some View {
+        homebrewServiceFeedback
         databaseMetricsSection(overviews)
+            .onAppear(perform: model.refreshHomebrewServices)
         databaseInstallationsSection(overviews)
     }
 
@@ -1411,38 +1575,55 @@ struct ContentView: View {
         let tint: Color = installation.error == nil
             ? listening.color
             : .orange
+        let homebrewExecutable = model.snapshot?.homebrew.available == true
+            ? model.snapshot?.homebrew.executable
+            : nil
+        let service = homebrewExecutable == nil ? nil : installation.homebrewFormula.flatMap { formula in
+            model.homebrewServiceList?.services.first { $0.formula == formula }
+        }
+        let homebrewServiceStateUnknown = homebrewExecutable == nil
+            || model.homebrewServiceList == nil
+            || model.homebrewServiceList?.error != nil
 
-        return HStack(alignment: .center, spacing: 14) {
-            Image(systemName: installation.error == nil
-                ? listening.symbol
-                : "exclamationmark.circle.fill")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 24)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 14) {
+                Image(systemName: installation.error == nil
+                    ? listening.symbol
+                    : "exclamationmark.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 24)
 
-            Text(installation.version ?? "读取失败")
-                .font(.title3.weight(.semibold))
-                .monospacedDigit()
-                .textSelection(.enabled)
-                .frame(width: 90, alignment: .leading)
+                Text(installation.version ?? "读取失败")
+                    .font(.title3.weight(.semibold))
+                    .monospacedDigit()
+                    .textSelection(.enabled)
+                    .frame(width: 90, alignment: .leading)
 
-            HStack(spacing: 5) {
-                ForEach(installation.sources, id: \.self) { source in
-                    Text(source.displayName)
+                HStack(spacing: 5) {
+                    ForEach(installation.sources, id: \.self) { source in
+                        Text(source.displayName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                    }
+                    Text("监听：\(listening.title)")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(tint)
                         .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
                 }
-                Text(listening.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(tint)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+
+                Spacer(minLength: 0)
+
+                if installation.error != nil {
+                    helpIcon("该 Database Installation 已被发现，但版本读取失败或可执行文件不可用；可独立确定的 TCP 监听状态不受影响。")
+                }
             }
 
             VStack(alignment: .leading, spacing: 5) {
@@ -1452,9 +1633,48 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 38)
 
-            if installation.error != nil {
-                helpIcon("该 Database Installation 已被发现，但版本读取失败或可执行文件不可用；可独立确定的 TCP 监听状态不受影响。")
+            if let formula = installation.homebrewFormula {
+                Divider()
+                HStack(spacing: 10) {
+                    if let service {
+                        Label(
+                            "Homebrew：\(homebrewServiceDetail(service)) · \(formula)",
+                            systemImage: "shippingbox.fill"
+                        )
+                        .foregroundStyle(homebrewServiceColor(service.status))
+
+                        Spacer()
+
+                        if model.homebrewServiceActionFormula == service.formula {
+                            ProgressView("正在处理")
+                                .controlSize(.small)
+                                .accessibilityLabel("正在为 \(service.formula) 执行 Homebrew Service 操作")
+                        } else {
+                            ForEach(service.allowedActions, id: \.self) { action in
+                                homebrewServiceActionButton(
+                                    action,
+                                    service: service,
+                                    executable: homebrewExecutable ?? ""
+                                )
+                            }
+                            .disabled(model.isBusy || model.homebrewServiceList?.isStale == true)
+                        }
+                    } else {
+                        Label(
+                            homebrewServiceStateUnknown
+                                ? "\(formula) · Homebrew Service 状态未知"
+                                : "\(formula) · 未提供 Homebrew Service",
+                            systemImage: "shippingbox"
+                        )
+                        .foregroundStyle(
+                            homebrewServiceStateUnknown ? .orange : .secondary
+                        )
+                    }
+                }
+                .font(.caption.weight(.semibold))
+                .padding(.leading, 38)
             }
         }
         .padding(.horizontal, 14)
@@ -1554,28 +1774,257 @@ struct ContentView: View {
                 )
             }
 
-            Text("Local Service 列表")
-                .font(.title3.bold())
+            serviceTabSwitcher(
+                localCount: groups.count,
+                homebrewCount: model.homebrewServiceList?.services.count ?? 0
+            )
 
-            if groups.isEmpty {
-                if let notice = snapshot.localServiceScanNotice {
-                    ContentUnavailableView {
-                        Label("监听读取失败", systemImage: "exclamationmark.triangle")
-                    } description: {
-                        Text("\(notice)。请通过右上角通知查看详情或重新扫描。")
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 110)
-                } else {
-                    ContentUnavailableView("当前没有可见的 TCP 监听服务", systemImage: "network.slash")
+            switch selectedServiceTab {
+            case .local:
+                if groups.isEmpty {
+                    if let notice = snapshot.localServiceScanNotice {
+                        ContentUnavailableView {
+                            Label("监听读取失败", systemImage: "exclamationmark.triangle")
+                        } description: {
+                            Text("\(notice)。请通过右上角通知查看详情或重新扫描。")
+                        }
                         .frame(maxWidth: .infinity, minHeight: 110)
+                    } else {
+                        ContentUnavailableView("当前没有可见的 TCP 监听服务", systemImage: "network.slash")
+                            .frame(maxWidth: .infinity, minHeight: 110)
+                    }
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(groups) { group in
+                            localServiceRow(group)
+                        }
+                    }
                 }
+            case .homebrew:
+                homebrewServicesSection(snapshot)
+            }
+        }
+        .onAppear(perform: model.refreshHomebrewServices)
+    }
+
+    private func serviceTabSwitcher(localCount: Int, homebrewCount: Int) -> some View {
+        HStack(spacing: 4) {
+            serviceTabButton(
+                .local,
+                title: "本地服务",
+                systemImage: "server.rack",
+                count: localCount
+            )
+            serviceTabButton(
+                .homebrew,
+                title: "Homebrew 服务",
+                systemImage: "shippingbox",
+                count: homebrewCount
+            )
+        }
+        .padding(4)
+        .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.primary.opacity(0.10))
+        }
+    }
+
+    private func serviceTabButton(
+        _ tab: ServiceTab,
+        title: String,
+        systemImage: String,
+        count: Int
+    ) -> some View {
+        let isSelected = selectedServiceTab == tab
+        return Button {
+            selectedServiceTab = tab
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                Text(title)
+                    .fontWeight(.semibold)
+                Text(count.formatted())
+                    .font(.caption.bold())
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(isSelected ? Color.white : Color.secondary.opacity(0.12), in: Capsule())
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(isSelected ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title)，\(count) 项")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    @ViewBuilder
+    private func homebrewServicesSection(_ snapshot: MachineSnapshot) -> some View {
+        Button(action: model.refreshHomebrewServices) {
+            if model.isRefreshingHomebrewServices {
+                ProgressView().controlSize(.small)
             } else {
-                VStack(spacing: 10) {
-                    ForEach(groups) { group in
-                        localServiceRow(group)
+                Label("刷新", systemImage: "arrow.clockwise")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityLabel(model.isRefreshingHomebrewServices ? "正在刷新 Homebrew Service" : "刷新 Homebrew Service")
+        .disabled(model.isBusy || !snapshot.homebrew.available)
+
+        homebrewServiceFeedback
+
+        if !snapshot.homebrew.available || snapshot.homebrew.executable == nil {
+            ContentUnavailableView("Homebrew 不可用", systemImage: "shippingbox")
+                .frame(maxWidth: .infinity, minHeight: 110)
+        } else if model.homebrewServiceList == nil && model.isRefreshingHomebrewServices {
+            ProgressView("正在读取 Homebrew Service…")
+                .frame(maxWidth: .infinity, minHeight: 110)
+        } else if model.homebrewServiceList == nil {
+            ContentUnavailableView("尚未读取 Homebrew Service", systemImage: "shippingbox")
+                .frame(maxWidth: .infinity, minHeight: 110)
+        } else if let list = model.homebrewServiceList, list.services.isEmpty {
+            ContentUnavailableView(
+                list.error == nil ? "没有可管理的 Homebrew Service" : "无法读取 Homebrew Service",
+                systemImage: list.error == nil ? "shippingbox" : "exclamationmark.triangle"
+            )
+            .frame(maxWidth: .infinity, minHeight: 110)
+        } else if let services = model.homebrewServiceList?.services {
+            VStack(spacing: 10) {
+                ForEach(services) { service in
+                    homebrewServiceRow(service, executable: snapshot.homebrew.executable ?? "")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var homebrewServiceFeedback: some View {
+        if let result = model.homebrewServiceActionResult {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: result.kind == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(result.message).fontWeight(.semibold)
+                    if let output = result.output, result.kind != .success {
+                        Text(output).font(.caption.monospaced()).textSelection(.enabled)
                     }
                 }
             }
+            .foregroundStyle(result.kind == .success ? Color.green : Color.orange)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background((result.kind == .success ? Color.green : Color.orange).opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+        }
+
+        if let list = model.homebrewServiceList, let error = list.error {
+            Label(list.isStale ? "\(error)；继续显示上次成功结果" : error, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private func homebrewServiceRow(_ service: HomebrewService, executable: String) -> some View {
+        let isRunning = model.homebrewServiceActionFormula == service.formula
+        let descriptor = homebrewServiceDescriptor(for: service.formula)
+        let statusTint = homebrewServiceColor(service.status)
+        return HStack(alignment: .center, spacing: 16) {
+            serviceDescriptorIcon(descriptor)
+                .frame(width: 54, height: 54)
+                .shadow(color: .black.opacity(0.14), radius: 7, y: 4)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(statusTint)
+                        .frame(width: 9, height: 9)
+                        .shadow(color: statusTint.opacity(0.65), radius: 4)
+                        .accessibilityHidden(true)
+                    Text(service.formula)
+                        .font(.title3.bold())
+                }
+                Text("Homebrew 管理的当前用户后台服务")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(homebrewServiceDetail(service))
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Spacer()
+            if isRunning {
+                ProgressView("正在处理")
+                    .controlSize(.small)
+                    .accessibilityLabel("正在\(service.formula)执行 Homebrew Service 操作")
+            } else {
+                ForEach(service.allowedActions, id: \.self) { action in
+                    homebrewServiceActionButton(action, service: service, executable: executable)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color.primary.opacity(0.018))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
+                }
+        }
+        .disabled(model.isBusy || model.homebrewServiceList?.isStale == true)
+    }
+
+    private func homebrewServiceDetail(_ service: HomebrewService) -> String {
+        if service.status == .error, let exitCode = service.exitCode {
+            return "\(homebrewServiceStatusTitle(service.status)) · 退出码 \(exitCode)"
+        }
+        return homebrewServiceStatusTitle(service.status)
+    }
+
+    @ViewBuilder
+    private func homebrewServiceActionButton(
+        _ action: HomebrewServiceAction,
+        service: HomebrewService,
+        executable: String
+    ) -> some View {
+        let button = Button(action.title) {
+            pendingHomebrewServiceAction = PendingHomebrewServiceAction(
+                service: service,
+                action: action,
+                executable: executable
+            )
+        }
+        .accessibilityLabel(Text(action.title + " Homebrew Service " + service.formula))
+
+        if action == .start {
+            button.buttonStyle(.borderedProminent)
+        } else if action == .stop {
+            button.buttonStyle(.bordered).tint(.red)
+        } else {
+            button.buttonStyle(.bordered)
+        }
+    }
+
+    private func homebrewServiceStatusTitle(_ status: HomebrewServiceStatus) -> String {
+        switch status {
+        case .none: "未注册"
+        case .stopped: "已停止"
+        case .started: "已启动"
+        case .scheduled: "已计划"
+        case .error: "异常"
+        case .unknown: "状态未知"
+        }
+    }
+
+    private func homebrewServiceColor(_ status: HomebrewServiceStatus) -> Color {
+        switch status {
+        case .started, .scheduled: .green
+        case .error, .unknown: .orange
+        case .none, .stopped: .secondary
         }
     }
 
@@ -1610,19 +2059,8 @@ struct ContentView: View {
                     Image(nsImage: applicationIcon)
                         .resizable()
                         .scaledToFit()
-                } else if let assetName = descriptor.assetName {
-                    Image(assetName)
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundStyle(descriptor.tint)
-                        .padding(13)
-                        .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
                 } else {
-                    Image(systemName: descriptor.symbolName)
-                        .font(.system(size: 23, weight: .semibold))
-                        .foregroundStyle(descriptor.tint)
-                        .padding(13)
-                        .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+                    serviceDescriptorIcon(descriptor)
                 }
             }
             .frame(width: 54, height: 54)
@@ -1669,6 +2107,24 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .stroke(Color.primary.opacity(0.10))
                 }
+        }
+    }
+
+    @ViewBuilder
+    private func serviceDescriptorIcon(_ descriptor: ServiceDisplayDescriptor) -> some View {
+        if let assetName = descriptor.assetName {
+            Image(assetName)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(descriptor.tint)
+                .padding(13)
+                .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+        } else {
+            Image(systemName: descriptor.symbolName)
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(descriptor.tint)
+                .padding(13)
+                .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
         }
     }
 

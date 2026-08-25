@@ -222,6 +222,7 @@ struct DatabaseInstallation: Codable, Identifiable, Sendable {
     let version: String?
     let error: String?
     let sources: [DatabaseInstallationSource]
+    let homebrewFormula: String?
     let listeningState: DatabaseListeningState
 }
 
@@ -362,6 +363,7 @@ struct InstalledApplication: Sendable {
 protocol MachineAccess: Sendable {
     var environment: [String: String] { get }
     var hostName: String { get }
+    var currentUserName: String { get }
     var currentDirectoryPath: String { get }
     var defaultLoginShellPath: String? { get }
     func diskSpace() -> DiskSpace
@@ -373,12 +375,22 @@ protocol MachineAccess: Sendable {
     func executablePath(forPID pid: Int32) throws -> String
     func workingDirectoryPath(forPID pid: Int32) throws -> String
     func application(bundleIdentifier: String) -> InstalledApplication?
-    func command(executable: String, arguments: [String]) -> MachineCommandResult
+    func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult
+}
+
+extension MachineAccess {
+    func command(executable: String, arguments: [String]) -> MachineCommandResult {
+        command(executable: executable, arguments: arguments, timeout: 2)
+    }
 }
 
 struct LiveMachineAccess: MachineAccess {
     var environment: [String: String] { ProcessInfo.processInfo.environment }
     var hostName: String { ProcessInfo.processInfo.hostName }
+    var currentUserName: String {
+        guard let name = getpwuid(geteuid())?.pointee.pw_name else { return NSUserName() }
+        return String(cString: name)
+    }
     var currentDirectoryPath: String { FileManager.default.currentDirectoryPath }
     var defaultLoginShellPath: String? {
         guard let shell = getpwuid(getuid())?.pointee.pw_shell else { return nil }
@@ -445,7 +457,7 @@ struct LiveMachineAccess: MachineAccess {
         )
     }
 
-    func command(executable: String, arguments: [String]) -> MachineCommandResult {
+    func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -465,10 +477,13 @@ struct LiveMachineAccess: MachineAccess {
         } catch {
             return MachineCommandResult(output: "", status: -1, timedOut: false)
         }
-        let timedOut = finished.wait(timeout: .now() + 2) == .timedOut
+        let timedOut = finished.wait(timeout: .now() + timeout) == .timedOut
         if timedOut {
-            process.terminate()
-            process.waitUntilExit()
+            if process.isRunning { process.terminate() }
+            if finished.wait(timeout: .now() + 1) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                process.waitUntilExit()
+            }
         }
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         return MachineCommandResult(output: output, status: process.terminationStatus, timedOut: timedOut)
@@ -526,6 +541,7 @@ struct EnvironmentScanner: Sendable {
         let actualExecutable: String
         var version: String?
         var sources: [DatabaseInstallationSource]
+        var homebrewFormula: String?
         var error: String?
     }
 
@@ -748,6 +764,7 @@ struct EnvironmentScanner: Sendable {
                     version: installation.version,
                     error: installation.error,
                     sources: installation.sources,
+                    homebrewFormula: installation.homebrewFormula,
                     listeningState: listeningState
                 )
             }
@@ -1286,6 +1303,7 @@ struct EnvironmentScanner: Sendable {
             actualExecutable: String,
             version: String?,
             source: DatabaseInstallationSource,
+            homebrewFormula: String? = nil,
             error: String?
         ) {
             mergeDatabaseCandidate(DatabaseCandidate(
@@ -1293,6 +1311,7 @@ struct EnvironmentScanner: Sendable {
                 actualExecutable: actualExecutable,
                 version: version,
                 sources: [source],
+                homebrewFormula: homebrewFormula,
                 error: error
             ), into: &candidates)
         }
@@ -1335,6 +1354,7 @@ struct EnvironmentScanner: Sendable {
                         actualExecutable: actual,
                         version: version,
                         source: .homebrew,
+                        homebrewFormula: formula.formula,
                         error: error
                     )
                 }
@@ -1400,6 +1420,7 @@ struct EnvironmentScanner: Sendable {
                 version: candidate.version,
                 error: candidate.error,
                 sources: candidate.sources,
+                homebrewFormula: candidate.homebrewFormula,
                 listeningState: listeningState
             )
         }
@@ -1445,6 +1466,7 @@ struct EnvironmentScanner: Sendable {
         candidates[index].error = candidates[index].version == nil
             ? candidates[index].error ?? candidate.error
             : nil
+        candidates[index].homebrewFormula = candidates[index].homebrewFormula ?? candidate.homebrewFormula
         let sources = candidates[index].sources + candidate.sources
         candidates[index].sources = DatabaseInstallationSource.allCases.filter(Set(sources).contains)
     }
@@ -1464,6 +1486,7 @@ struct EnvironmentScanner: Sendable {
                 actualExecutable: String,
                 version: String?,
                 source: DatabaseInstallationSource,
+                homebrewFormula: String? = nil,
                 notice: String?
             ) {
                 mergeDatabaseCandidate(DatabaseCandidate(
@@ -1471,6 +1494,7 @@ struct EnvironmentScanner: Sendable {
                     actualExecutable: actualExecutable,
                     version: version,
                     sources: [source],
+                    homebrewFormula: homebrewFormula,
                     error: notice
                 ), into: &candidates)
             }
@@ -1520,6 +1544,7 @@ struct EnvironmentScanner: Sendable {
                             actualExecutable: actual,
                             version: version,
                             source: .homebrew,
+                            homebrewFormula: formula.formula,
                             notice: notice
                         )
                     }
@@ -1589,6 +1614,7 @@ struct EnvironmentScanner: Sendable {
                     version: candidate.version,
                     error: candidate.error,
                     sources: candidate.sources,
+                    homebrewFormula: candidate.homebrewFormula,
                     listeningState: listeningState
                 )
             }
@@ -1650,6 +1676,7 @@ struct EnvironmentScanner: Sendable {
             actualExecutable: String,
             version: String?,
             source: DatabaseInstallationSource,
+            homebrewFormula: String? = nil,
             error: String?
         ) {
             var databaseCandidates = candidates[database, default: []]
@@ -1658,6 +1685,7 @@ struct EnvironmentScanner: Sendable {
                 actualExecutable: actualExecutable,
                 version: version,
                 sources: [source],
+                homebrewFormula: homebrewFormula,
                 error: error
             ), into: &databaseCandidates)
             candidates[database] = databaseCandidates
@@ -1718,6 +1746,7 @@ struct EnvironmentScanner: Sendable {
                             actualExecutable: actual,
                             version: version,
                             source: .homebrew,
+                            homebrewFormula: formula.formula,
                             error: error
                         )
                     }
@@ -1809,6 +1838,7 @@ struct EnvironmentScanner: Sendable {
                     version: candidate.version,
                     error: candidate.error,
                     sources: candidate.sources,
+                    homebrewFormula: candidate.homebrewFormula,
                     listeningState: listeningState
                 )
             }
