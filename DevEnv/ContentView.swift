@@ -1581,6 +1581,9 @@ struct ContentView: View {
         let service = homebrewExecutable == nil ? nil : installation.homebrewFormula.flatMap { formula in
             model.homebrewServiceList?.services.first { $0.formula == formula }
         }
+        let homebrewServiceStateUnknown = homebrewExecutable == nil
+            || model.homebrewServiceList == nil
+            || model.homebrewServiceList?.error != nil
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 14) {
@@ -1634,7 +1637,7 @@ struct ContentView: View {
                 HStack(spacing: 10) {
                     if let service {
                         Label(
-                            "\(formula) · \(homebrewServiceDetail(service))",
+                            "Homebrew：\(homebrewServiceDetail(service)) · \(formula)",
                             systemImage: "shippingbox.fill"
                         )
                         .foregroundStyle(homebrewServiceColor(service.status))
@@ -1657,13 +1660,13 @@ struct ContentView: View {
                         }
                     } else {
                         Label(
-                            homebrewExecutable == nil || model.homebrewServiceList == nil
+                            homebrewServiceStateUnknown
                                 ? "\(formula) · Homebrew Service 状态未知"
                                 : "\(formula) · 未提供 Homebrew Service",
                             systemImage: "shippingbox"
                         )
                         .foregroundStyle(
-                            homebrewExecutable == nil || model.homebrewServiceList == nil ? .orange : .secondary
+                            homebrewServiceStateUnknown ? .orange : .secondary
                         )
                     }
                 }

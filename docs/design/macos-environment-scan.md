@@ -316,7 +316,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - 同时安装 `postgresql` 与 `postgresql@16`：每个 Database Installation 行只控制其扫描时记录的确切 Formula，不提供类别级操作。
 - Homebrew-managed Database Installation 对应已停止 Homebrew Service：同时显示“Homebrew：已停止”和“监听：未监听”，只提供启动。
 - Homebrew Service 已启动但对应 Database Installation 未监听：保留两个独立状态，不把“未监听”误判为可启动。
-- Homebrew Database Installation 没有出现在 Homebrew Service 列表：标注“未提供 Homebrew Service”，不显示启动、停止或重启。
+- Homebrew-managed Database Installation 没有出现在成功读取的 Homebrew Service 列表：标注“未提供 Homebrew Service”，不显示启动、停止或重启。
 - 数据库 Homebrew Service 操作失败或超时：不自动重试，刷新后显示失败或结果未知以及当前 Homebrew Service 与 Database Listening State。
 - Homebrew Database Provider 失败且没有其他发现结果：显示“发现状态未知”并产生 Scan Notice，不显示“未安装”。
 - Local Service 扫描失败或已识别数据库进程的真实路径不可读：相关 Database Listening State 显示“监听状态未知”。
