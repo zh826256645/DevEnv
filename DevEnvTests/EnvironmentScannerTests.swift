@@ -1922,6 +1922,26 @@ final class EnvironmentScannerTests: XCTestCase {
         }
     }
 
+    func testDescribesCommonHomebrewServiceFormulae() {
+        let expectedDescriptors: [(String, String?)] = [
+            ("postgresql@18", "ServicePostgreSQLLogo"),
+            ("mongodb-community", "ServiceMongoDBLogo"),
+            ("redis", "ServiceRedisLogo"),
+            ("mysql@8.4", "ServiceMySQLLogo"),
+            ("mariadb", "ServiceMariaDBLogo"),
+            ("node@24", "RuntimeNodeLogo"),
+            ("python@3.13", "RuntimePythonLogo"),
+        ]
+
+        for (formula, expectedAssetName) in expectedDescriptors {
+            XCTAssertEqual(homebrewServiceDescriptor(for: formula).assetName, expectedAssetName)
+        }
+        XCTAssertEqual(homebrewServiceDescriptor(for: "cloudflared").symbolName, "cloud.fill")
+        XCTAssertEqual(homebrewServiceDescriptor(for: "php@8.4").symbolName, "chevron.left.forwardslash.chevron.right")
+        XCTAssertEqual(homebrewServiceDescriptor(for: "unbound").symbolName, "network")
+        XCTAssertEqual(homebrewServiceDescriptor(for: "unknown-service").symbolName, "shippingbox.fill")
+    }
+
     func testCrossProviderScanIsStableDeduplicatedAndPersistable() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

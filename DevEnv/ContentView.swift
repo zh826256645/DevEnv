@@ -73,7 +73,7 @@ struct LocalServiceDisplayGroup: Identifiable {
     let attribution: LocalServiceAttribution?
 }
 
-struct LocalServiceDescriptor {
+struct ServiceDisplayDescriptor {
     let displayName: String
     let explanation: String
     let symbolName: String
@@ -81,7 +81,7 @@ struct LocalServiceDescriptor {
     let assetName: String?
 }
 
-func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
+func localServiceDescriptor(for processName: String) -> ServiceDisplayDescriptor {
     let name = processName.lowercased()
     func descriptor(
         _ displayName: String,
@@ -89,8 +89,8 @@ func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
         _ symbolName: String,
         _ tint: Color,
         _ assetName: String? = nil
-    ) -> LocalServiceDescriptor {
-        LocalServiceDescriptor(
+    ) -> ServiceDisplayDescriptor {
+        ServiceDisplayDescriptor(
             displayName: displayName,
             explanation: explanation,
             symbolName: symbolName,
@@ -132,6 +132,42 @@ func localServiceDescriptor(for processName: String) -> LocalServiceDescriptor {
     default:
         return descriptor(processName, "未识别的本地 TCP 监听进程", "server.rack", .secondary)
     }
+}
+
+func homebrewServiceDescriptor(for formula: String) -> ServiceDisplayDescriptor {
+    let name = formula.lowercased()
+
+    if name == "postgresql" || name.hasPrefix("postgresql@") {
+        return localServiceDescriptor(for: "postgres")
+    }
+    if name == "mongodb-community" || name.hasPrefix("mongodb-community@") {
+        return localServiceDescriptor(for: "mongod")
+    }
+    if name == "redis" || name.hasPrefix("redis@") {
+        return localServiceDescriptor(for: "redis")
+    }
+    if name == "mysql" || name.hasPrefix("mysql@") {
+        return localServiceDescriptor(for: "mysql")
+    }
+    if name == "mariadb" || name.hasPrefix("mariadb@") {
+        return localServiceDescriptor(for: "mariadbd")
+    }
+    if name == "node" || name.hasPrefix("node@") {
+        return localServiceDescriptor(for: "node")
+    }
+    if name == "python" || name.hasPrefix("python@") {
+        return localServiceDescriptor(for: "python")
+    }
+    if name == "cloudflared" {
+        return ServiceDisplayDescriptor(displayName: formula, explanation: "", symbolName: "cloud.fill", tint: .blue, assetName: nil)
+    }
+    if name == "php" || name.hasPrefix("php@") {
+        return ServiceDisplayDescriptor(displayName: formula, explanation: "", symbolName: "chevron.left.forwardslash.chevron.right", tint: .indigo, assetName: nil)
+    }
+    if name == "unbound" {
+        return ServiceDisplayDescriptor(displayName: formula, explanation: "", symbolName: "network", tint: .teal, assetName: nil)
+    }
+    return ServiceDisplayDescriptor(displayName: formula, explanation: "", symbolName: "shippingbox.fill", tint: .secondary, assetName: nil)
 }
 
 func groupLocalServicesForDisplay(
@@ -1766,13 +1802,10 @@ struct ContentView: View {
 
     private func homebrewServiceRow(_ service: HomebrewService, executable: String) -> some View {
         let isRunning = model.homebrewServiceActionFormula == service.formula
-        let tint = homebrewServiceColor(service.status)
+        let descriptor = homebrewServiceDescriptor(for: service.formula)
+        let statusTint = homebrewServiceColor(service.status)
         return HStack(alignment: .center, spacing: 16) {
-            Image(systemName: "shippingbox.fill")
-                .font(.system(size: 23, weight: .semibold))
-                .foregroundStyle(tint)
-                .padding(13)
-                .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+            serviceDescriptorIcon(descriptor)
                 .frame(width: 54, height: 54)
                 .shadow(color: .black.opacity(0.14), radius: 7, y: 4)
                 .accessibilityHidden(true)
@@ -1780,9 +1813,9 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(tint)
+                        .fill(statusTint)
                         .frame(width: 9, height: 9)
-                        .shadow(color: tint.opacity(0.65), radius: 4)
+                        .shadow(color: statusTint.opacity(0.65), radius: 4)
                         .accessibilityHidden(true)
                     Text(service.formula)
                         .font(.title3.bold())
@@ -1901,19 +1934,8 @@ struct ContentView: View {
                     Image(nsImage: applicationIcon)
                         .resizable()
                         .scaledToFit()
-                } else if let assetName = descriptor.assetName {
-                    Image(assetName)
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundStyle(descriptor.tint)
-                        .padding(13)
-                        .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
                 } else {
-                    Image(systemName: descriptor.symbolName)
-                        .font(.system(size: 23, weight: .semibold))
-                        .foregroundStyle(descriptor.tint)
-                        .padding(13)
-                        .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+                    serviceDescriptorIcon(descriptor)
                 }
             }
             .frame(width: 54, height: 54)
@@ -1960,6 +1982,24 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .stroke(Color.primary.opacity(0.10))
                 }
+        }
+    }
+
+    @ViewBuilder
+    private func serviceDescriptorIcon(_ descriptor: ServiceDisplayDescriptor) -> some View {
+        if let assetName = descriptor.assetName {
+            Image(assetName)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(descriptor.tint)
+                .padding(13)
+                .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+        } else {
+            Image(systemName: descriptor.symbolName)
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(descriptor.tint)
+                .padding(13)
+                .background(descriptor.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
         }
     }
 
