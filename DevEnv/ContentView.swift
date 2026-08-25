@@ -886,14 +886,14 @@ struct ContentView: View {
 
             HStack(spacing: 10) {
                 environmentMetric(
-                    title: "Database Discovery State",
+                    title: "发现状态",
                     value: discovery.title,
                     systemImage: discovery.symbol,
                     tint: discovery.color,
                     usesNeutralBackground: true
                 )
                 environmentMetric(
-                    title: "Database Listening State",
+                    title: "监听状态",
                     value: listening.title,
                     systemImage: listening.symbol,
                     tint: listening.color,
@@ -1011,6 +1011,7 @@ struct ContentView: View {
                     Text(source.displayName)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -1018,6 +1019,7 @@ struct ContentView: View {
                 Text(listening.title)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(tint)
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -1627,6 +1629,7 @@ struct ContentView: View {
                     Text(source.displayName)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -1635,6 +1638,7 @@ struct ContentView: View {
                 Text(state)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(installation.isEffective ? .green : .secondary)
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -1654,6 +1658,7 @@ struct ContentView: View {
                 Text("可能冲突")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
