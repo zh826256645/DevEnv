@@ -374,6 +374,13 @@ protocol MachineAccess: Sendable {
     func workingDirectoryPath(forPID pid: Int32) throws -> String
     func application(bundleIdentifier: String) -> InstalledApplication?
     func command(executable: String, arguments: [String]) -> MachineCommandResult
+    func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult
+}
+
+extension MachineAccess {
+    func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult {
+        command(executable: executable, arguments: arguments)
+    }
 }
 
 struct LiveMachineAccess: MachineAccess {
@@ -446,6 +453,10 @@ struct LiveMachineAccess: MachineAccess {
     }
 
     func command(executable: String, arguments: [String]) -> MachineCommandResult {
+        command(executable: executable, arguments: arguments, timeout: 2)
+    }
+
+    func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -465,10 +476,13 @@ struct LiveMachineAccess: MachineAccess {
         } catch {
             return MachineCommandResult(output: "", status: -1, timedOut: false)
         }
-        let timedOut = finished.wait(timeout: .now() + 2) == .timedOut
+        let timedOut = finished.wait(timeout: .now() + timeout) == .timedOut
         if timedOut {
-            process.terminate()
-            process.waitUntilExit()
+            if process.isRunning { process.terminate() }
+            if finished.wait(timeout: .now() + 1) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                process.waitUntilExit()
+            }
         }
         let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         return MachineCommandResult(output: output, status: process.terminationStatus, timedOut: timedOut)

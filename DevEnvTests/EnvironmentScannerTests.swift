@@ -2081,6 +2081,269 @@ final class EnvironmentScannerTests: XCTestCase {
     }
 }
 
+final class HomebrewServiceManagerTests: XCTestCase {
+    private let brew = "/opt/homebrew/bin/brew"
+
+    func testListsNormalizedHomebrewServicesAndActions() {
+        let machine = StubMachine(
+            path: ["/bin"],
+            environment: ["USER": "test"],
+            commandOutputs: [
+                "\(brew) services list --json": """
+                [
+                  {"name":"a-none","status":"none","user":null,"exit_code":0},
+                  {"name":"b-stopped","status":"stopped","user":"test","exit_code":0},
+                  {"name":"c-started","status":"started","user":"test","exit_code":0},
+                  {"name":"d-scheduled","status":"scheduled","user":"test","exit_code":0},
+                  {"name":"e-error","status":"error","user":"test","exit_code":7},
+                  {"name":"f-unknown","status":"unknown","user":"test","exit_code":0},
+                  {"name":"g-future","status":"paused","user":"test","exit_code":0},
+                  {"name":"root-only","status":"started","user":"root","exit_code":0}
+                ]
+                """,
+            ]
+        )
+
+        let state = HomebrewServiceManager(machine: machine).refresh(executable: brew)
+
+        XCTAssertEqual(state.services.map(\.formula), [
+            "a-none", "b-stopped", "c-started", "d-scheduled", "e-error", "f-unknown", "g-future",
+        ])
+        XCTAssertEqual(state.services.map(\.status), [
+            .none, .stopped, .started, .scheduled, .error, .unknown, .unknown,
+        ])
+        XCTAssertEqual(state.services.map(\.allowedActions), [
+            [.start], [.start], [.stop, .restart], [.stop, .restart], [.stop, .restart], [], [],
+        ])
+        XCTAssertEqual(state.services.first { $0.formula == "e-error" }?.exitCode, 7)
+        XCTAssertFalse(state.isStale)
+        XCTAssertNil(state.error)
+    }
+
+    func testRefreshFailurePreservesOnlyAPreviousSuccessfulList() {
+        let previous = HomebrewServiceListState(
+            services: [HomebrewService(formula: "redis", status: .started, exitCode: 0)],
+            isStale: false,
+            error: nil
+        )
+        let invalid = StubMachine(
+            path: ["/bin"],
+            commandOutputs: ["\(brew) services list --json": "not-json"]
+        )
+
+        let initial = HomebrewServiceManager(machine: invalid).refresh(executable: brew)
+        let stale = HomebrewServiceManager(machine: invalid).refresh(executable: brew, previous: previous)
+
+        XCTAssertTrue(initial.services.isEmpty)
+        XCTAssertFalse(initial.isStale)
+        XCTAssertNotNil(initial.error)
+        XCTAssertEqual(stale.services.map(\.formula), ["redis"])
+        XCTAssertTrue(stale.isStale)
+        XCTAssertNotNil(stale.error)
+    }
+
+    func testListTimeoutAndNonzeroExitAreUnavailable() {
+        let key = "\(brew) services list --json"
+        let timedOut = HomebrewServiceManager(machine: StubMachine(
+            path: ["/bin"],
+            commandTimeouts: [key]
+        )).refresh(executable: brew)
+        let failed = HomebrewServiceManager(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [key: "unsupported"],
+            commandStatuses: [key: 1]
+        )).refresh(executable: brew)
+
+        XCTAssertEqual(timedOut.error, "Homebrew Service 列表读取超时")
+        XCTAssertEqual(failed.error, "Homebrew Service 列表读取失败：unsupported")
+    }
+
+    func testRejectsUnsupportedActionWithoutEmittingACommand() {
+        let recorder = CommandRecorder()
+        let service = HomebrewService(formula: "redis", status: .unknown, exitCode: nil)
+        let manager = HomebrewServiceManager(machine: StubMachine(path: ["/bin"], recorder: recorder))
+
+        let result = manager.perform(.start, on: service, executable: brew, currentServices: [service], snapshot: nil)
+
+        XCTAssertEqual(result.kind, .failure)
+        XCTAssertEqual(recorder.commands, [])
+    }
+
+    func testStartUsesExactCommandAndClassifiesRefreshedState() {
+        let recorder = CommandRecorder()
+        let list = "\(brew) services list --json"
+        let service = HomebrewService(formula: "redis", status: .stopped, exitCode: 0)
+        let machine = StubMachine(
+            path: ["/bin"],
+            commandOutputs: [list: "[{\"name\":\"redis\",\"status\":\"started\",\"user\":null,\"exit_code\":0}]"],
+            recorder: recorder
+        )
+
+        let result = HomebrewServiceManager(machine: machine).perform(
+            .start,
+            on: service,
+            executable: brew,
+            currentServices: [service],
+            snapshot: nil
+        )
+
+        XCTAssertEqual(result.kind, .success)
+        XCTAssertEqual(recorder.commands.map(\.description), [
+            "\(brew) services start redis [75.0]",
+            "\(brew) services list --json [2.0]",
+        ])
+        XCTAssertEqual(result.list.services.first?.status, .started)
+    }
+
+    func testActionTimeoutIsUnknownAndStillRefreshes() {
+        let recorder = CommandRecorder()
+        let action = "\(brew) services restart redis"
+        let list = "\(brew) services list --json"
+        let service = HomebrewService(formula: "redis", status: .started, exitCode: 0)
+        let machine = StubMachine(
+            path: ["/bin"],
+            commandOutputs: [list: "[{\"name\":\"redis\",\"status\":\"started\",\"user\":null,\"exit_code\":0}]"],
+            commandTimeouts: [action],
+            recorder: recorder
+        )
+
+        let result = HomebrewServiceManager(machine: machine).perform(
+            .restart,
+            on: service,
+            executable: brew,
+            currentServices: [service],
+            snapshot: nil
+        )
+
+        XCTAssertEqual(result.kind, .unknown)
+        XCTAssertEqual(result.message, "redis 重启结果未知：命令超时")
+        XCTAssertEqual(recorder.commands.count, 2)
+    }
+
+    func testStopAndRestartUseExactArguments() {
+        let cases: [(HomebrewServiceAction, HomebrewServiceStatus, String)] = [
+            (.stop, .none, "stop"),
+            (.restart, .scheduled, "restart"),
+        ]
+        for (action, finalStatus, verb) in cases {
+            let recorder = CommandRecorder()
+            let list = "\(brew) services list --json"
+            let service = HomebrewService(formula: "postgresql@17", status: .started, exitCode: 0)
+            let machine = StubMachine(
+                path: ["/bin"],
+                commandOutputs: [
+                    list: "[{\"name\":\"postgresql@17\",\"status\":\"\(finalStatus.rawValue)\",\"user\":null,\"exit_code\":0}]",
+                ],
+                recorder: recorder
+            )
+
+            let result = HomebrewServiceManager(machine: machine).perform(
+                action,
+                on: service,
+                executable: brew,
+                currentServices: [service],
+                snapshot: nil
+            )
+
+            XCTAssertEqual(result.kind, .success)
+            XCTAssertEqual(recorder.commands.first?.executable, brew)
+            XCTAssertEqual(recorder.commands.first?.arguments, ["services", verb, "postgresql@17"])
+            XCTAssertEqual(recorder.commands.first?.timeout, 75)
+        }
+    }
+
+    func testCommandFailureIncludesOutputAfterRefreshingList() {
+        let action = "\(brew) services start redis"
+        let list = "\(brew) services list --json"
+        let service = HomebrewService(formula: "redis", status: .stopped, exitCode: 0)
+        let machine = StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                action: "launchctl denied\n",
+                list: "[{\"name\":\"redis\",\"status\":\"stopped\",\"user\":null,\"exit_code\":1}]",
+            ],
+            commandStatuses: [action: 1]
+        )
+
+        let result = HomebrewServiceManager(machine: machine).perform(
+            .start,
+            on: service,
+            executable: brew,
+            currentServices: [service],
+            snapshot: nil
+        )
+
+        XCTAssertEqual(result.kind, .failure)
+        XCTAssertEqual(result.output, "launchctl denied")
+        XCTAssertEqual(result.list.services.first?.status, .stopped)
+    }
+
+    func testZeroExitWithMismatchedOrUnavailableFinalStateIsUnknown() {
+        let list = "\(brew) services list --json"
+        let service = HomebrewService(formula: "redis", status: .stopped, exitCode: 0)
+        let mismatched = HomebrewServiceManager(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [list: "[{\"name\":\"redis\",\"status\":\"error\",\"user\":null,\"exit_code\":1}]"]
+        )).perform(.start, on: service, executable: brew, currentServices: [service], snapshot: nil)
+        let unavailable = HomebrewServiceManager(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [list: "bad json"]
+        )).perform(.start, on: service, executable: brew, currentServices: [service], snapshot: nil)
+
+        XCTAssertEqual(mismatched.kind, .unknown)
+        XCTAssertEqual(unavailable.kind, .unknown)
+        XCTAssertTrue(unavailable.list.isStale)
+    }
+
+    func testServiceListRefreshPrecedesLocalServiceRefresh() {
+        let recorder = CommandRecorder()
+        let list = "\(brew) services list --json"
+        let service = HomebrewService(formula: "redis", status: .stopped, exitCode: 0)
+        let snapshot = EnvironmentScanner(machine: StubMachine(path: ["/bin"])).scan().snapshot
+        let machine = StubMachine(
+            path: ["/bin"],
+            commandOutputs: [list: "[{\"name\":\"redis\",\"status\":\"started\",\"user\":null,\"exit_code\":0}]"],
+            recorder: recorder
+        )
+
+        let result = HomebrewServiceManager(machine: machine).perform(
+            .start,
+            on: service,
+            executable: brew,
+            currentServices: [service],
+            snapshot: snapshot
+        )
+
+        XCTAssertNotNil(result.dynamicStatus)
+        XCTAssertEqual(recorder.commands.prefix(3).map(\.arguments), [
+            ["services", "start", "redis"],
+            ["services", "list", "--json"],
+            ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcftn"],
+        ])
+    }
+}
+
+private final class CommandRecorder: @unchecked Sendable {
+    struct Command: Equatable {
+        let executable: String
+        let arguments: [String]
+        let timeout: TimeInterval
+
+        var description: String {
+            "\(([executable] + arguments).joined(separator: " ")) [\(timeout)]"
+        }
+    }
+
+    private let lock = NSLock()
+    private var storage: [Command] = []
+
+    var commands: [Command] { lock.withLock { storage } }
+
+    func append(executable: String, arguments: [String], timeout: TimeInterval) {
+        lock.withLock { storage.append(Command(executable: executable, arguments: arguments, timeout: timeout)) }
+    }
+}
+
 private struct StubMachine: MachineAccess {
     let environment: [String: String]
     let hostName = "test-host"
@@ -2100,6 +2363,7 @@ private struct StubMachine: MachineAccess {
     let processWorkingDirectoryPaths: [Int32: String]
     let processWorkingDirectoryFailures: Set<Int32>
     let applications: [String: InstalledApplication]
+    let recorder: CommandRecorder?
 
     init(
         path: [String],
@@ -2119,7 +2383,8 @@ private struct StubMachine: MachineAccess {
         processExecutableFailures: Set<Int32> = [],
         processWorkingDirectoryPaths: [Int32: String] = [:],
         processWorkingDirectoryFailures: Set<Int32> = [],
-        applications: [String: InstalledApplication] = [:]
+        applications: [String: InstalledApplication] = [:],
+        recorder: CommandRecorder? = nil
     ) {
         self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
         self.defaultLoginShellPath = defaultLoginShellPath
@@ -2141,6 +2406,7 @@ private struct StubMachine: MachineAccess {
         self.processWorkingDirectoryPaths = processWorkingDirectoryPaths
         self.processWorkingDirectoryFailures = processWorkingDirectoryFailures
         self.applications = applications
+        self.recorder = recorder
     }
 
     func diskSpace() -> DiskSpace { DiskSpace(totalBytes: 1, freeBytes: 1) }
@@ -2177,6 +2443,11 @@ private struct StubMachine: MachineAccess {
     func application(bundleIdentifier: String) -> InstalledApplication? { applications[bundleIdentifier] }
 
     func command(executable: String, arguments: [String]) -> MachineCommandResult {
+        command(executable: executable, arguments: arguments, timeout: 2)
+    }
+
+    func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult {
+        recorder?.append(executable: executable, arguments: arguments, timeout: timeout)
         let key = ([executable] + arguments).joined(separator: " ")
         switch executable {
         case "/usr/bin/sw_vers":
