@@ -1644,10 +1644,6 @@ struct ContentView: View {
         let exposedPortCount = groups.reduce(0) { $0 + $1.bindings.count { !$0.isLoopback } }
 
         return VStack(alignment: .leading, spacing: 18) {
-            homebrewServicesSection(snapshot)
-
-            Divider()
-
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
                 spacing: 12
@@ -1678,6 +1674,8 @@ struct ContentView: View {
                 )
             }
 
+            homebrewServicesSection(snapshot)
+
             Text("Local Service 列表")
                 .font(.title3.bold())
 
@@ -1707,13 +1705,8 @@ struct ContentView: View {
     @ViewBuilder
     private func homebrewServicesSection(_ snapshot: MachineSnapshot) -> some View {
         HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Homebrew Service")
-                    .font(.title3.bold())
-                Text("Homebrew 注册状态；与下面观察到的 Local Service 分开显示。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+            Text("Homebrew Service 列表")
+                .font(.title3.bold())
             Spacer()
             Button(action: model.refreshHomebrewServices) {
                 if model.isRefreshingHomebrewServices {
@@ -1773,23 +1766,36 @@ struct ContentView: View {
 
     private func homebrewServiceRow(_ service: HomebrewService, executable: String) -> some View {
         let isRunning = model.homebrewServiceActionFormula == service.formula
-        return HStack(spacing: 14) {
+        let tint = homebrewServiceColor(service.status)
+        return HStack(alignment: .center, spacing: 16) {
             Image(systemName: "shippingbox.fill")
-                .font(.title2)
-                .foregroundStyle(homebrewServiceColor(service.status))
-                .frame(width: 36)
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(tint)
+                .padding(13)
+                .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
+                .frame(width: 54, height: 54)
+                .shadow(color: .black.opacity(0.14), radius: 7, y: 4)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(service.formula).font(.headline)
+
+            VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
-                    Text(homebrewServiceStatusTitle(service.status))
-                    if service.status == .error, let exitCode = service.exitCode {
-                        Text("退出码 \(exitCode)")
-                    }
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 9, height: 9)
+                        .shadow(color: tint.opacity(0.65), radius: 4)
+                        .accessibilityHidden(true)
+                    Text(service.formula)
+                        .font(.title3.bold())
                 }
-                .font(.caption)
-                .foregroundStyle(homebrewServiceColor(service.status))
+                Text("Homebrew 管理的当前用户后台服务")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(homebrewServiceDetail(service))
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             Spacer()
             if isRunning {
                 ProgressView("正在处理")
@@ -1801,9 +1807,24 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(14)
-        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color.primary.opacity(0.018))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
+                }
+        }
         .disabled(model.isBusy || model.homebrewServiceList?.isStale == true)
+    }
+
+    private func homebrewServiceDetail(_ service: HomebrewService) -> String {
+        if service.status == .error, let exitCode = service.exitCode {
+            return "\(homebrewServiceStatusTitle(service.status)) · 退出码 \(exitCode)"
+        }
+        return homebrewServiceStatusTitle(service.status)
     }
 
     @ViewBuilder
