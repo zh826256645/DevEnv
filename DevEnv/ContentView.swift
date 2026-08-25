@@ -1619,18 +1619,21 @@ struct ContentView: View {
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
                 }
 
-                VStack(alignment: .leading, spacing: 5) {
-                    copyablePath(installation.executable)
-                    if let actual = installation.actualExecutable {
-                        copyablePath(actual, prefix: "实际路径")
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 0)
 
                 if installation.error != nil {
                     helpIcon("该 Database Installation 已被发现，但版本读取失败或可执行文件不可用；可独立确定的 TCP 监听状态不受影响。")
                 }
             }
+
+            VStack(alignment: .leading, spacing: 5) {
+                copyablePath(installation.executable)
+                if let actual = installation.actualExecutable {
+                    copyablePath(actual, prefix: "实际路径")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 38)
 
             if let formula = installation.homebrewFormula {
                 Divider()
