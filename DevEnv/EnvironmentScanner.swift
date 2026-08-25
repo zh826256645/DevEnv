@@ -28,6 +28,28 @@ struct MachineSnapshot: Codable, Sendable {
     var localServiceScanNotice: String? {
         issues.first { $0 == Self.localServiceTimeoutNotice || $0 == Self.localServiceFailureNotice }
     }
+
+    func applying(_ dynamicStatus: DynamicStatusSnapshot) -> MachineSnapshot {
+        MachineSnapshot(
+            schemaVersion: schemaVersion,
+            scannedAt: scannedAt,
+            system: system,
+            localServices: dynamicStatus.localServices,
+            path: path,
+            runtimes: runtimes,
+            databaseInstallationOverviews: dynamicStatus.databaseInstallationOverviews,
+            homebrew: homebrew,
+            terminalApplications: terminalApplications,
+            shellInstallations: shellInstallations,
+            gitCLI: gitCLI,
+            gitLFS: gitLFS,
+            userGitConfiguration: userGitConfiguration,
+            gitSigningConfiguration: gitSigningConfiguration,
+            gitCredentialHelpers: gitCredentialHelpers,
+            githubAuthenticationConfiguration: githubAuthenticationConfiguration,
+            issues: issues
+        )
+    }
 }
 
 enum ListenerAddressFamily: String, Codable, Sendable {
@@ -301,6 +323,23 @@ struct GitHubAuthenticationConfigurationSnapshot: Codable, Sendable {
 struct ScanResult: Sendable {
     let snapshot: MachineSnapshot
     let canPersist: Bool
+}
+
+struct DynamicStatusSnapshot: Sendable {
+    let localServices: [LocalServiceSnapshot]
+    let databaseInstallationOverviews: [DatabaseInstallationOverview]
+}
+
+enum DynamicStatusRefreshError: LocalizedError, Sendable {
+    case timedOut
+    case failed
+
+    var errorDescription: String? {
+        switch self {
+        case .timedOut: "本地服务读取超时"
+        case .failed: "本地服务读取失败"
+        }
+    }
 }
 
 struct MachineCommandResult: Sendable {
@@ -652,6 +691,83 @@ struct EnvironmentScanner: Sendable {
             snapshot: snapshot,
             canPersist: system.macOSVersion != nil && system.architecture != nil
         )
+    }
+
+    func refreshDynamicStatus(
+        in snapshot: MachineSnapshot
+    ) -> Result<DynamicStatusSnapshot, DynamicStatusRefreshError> {
+        var issues: [String] = []
+        let localServices = scanLocalServices(issues: &issues)
+        guard localServices.complete else {
+            return .failure(issues.contains(MachineSnapshot.localServiceTimeoutNotice) ? .timedOut : .failed)
+        }
+        return .success(DynamicStatusSnapshot(
+            localServices: localServices.services,
+            databaseInstallationOverviews: refreshDatabaseListeningStates(
+                snapshot.databaseInstallationOverviews,
+                localServices: localServices
+            )
+        ))
+    }
+
+    private func refreshDatabaseListeningStates(
+        _ overviews: [DatabaseInstallationOverview],
+        localServices: LocalServiceScan
+    ) -> [DatabaseInstallationOverview] {
+        let listeningPaths = Set(localServices.executablePaths.values.map {
+            standardizedPath(machine.resolvingSymlinksInPath($0))
+        })
+        let failedProcessNames = Set(localServices.services
+            .filter { localServices.executablePathFailures.contains($0.pid) }
+            .map { $0.processName.lowercased() })
+        let processNamesByDatabase = [
+            "postgresql": Set(["postgres"]),
+            "mysql": Set(["mysqld"]),
+            "mariadb": Set(["mariadbd", "mysqld"]),
+            "mongodb": Set(["mongod", "mongos"]),
+            "redis": Set(["redis-server"]),
+        ]
+
+        return overviews.map { overview in
+            guard !overview.installations.isEmpty else { return overview }
+            let hasRelevantPathFailure = !failedProcessNames.isDisjoint(
+                with: processNamesByDatabase[overview.id, default: []]
+            )
+            let installations = overview.installations.map { installation in
+                let listeningState: DatabaseListeningState = if listeningPaths.contains(installation.id) {
+                    .listening
+                } else if hasRelevantPathFailure {
+                    .unknown
+                } else {
+                    .notListening
+                }
+                return DatabaseInstallation(
+                    id: installation.id,
+                    executable: installation.executable,
+                    actualExecutable: installation.actualExecutable,
+                    version: installation.version,
+                    error: installation.error,
+                    sources: installation.sources,
+                    listeningState: listeningState
+                )
+            }
+            let listeningState: DatabaseListeningState = if installations.contains(where: {
+                $0.listeningState == .listening
+            }) {
+                .listening
+            } else if installations.contains(where: { $0.listeningState == .unknown }) {
+                .unknown
+            } else {
+                .notListening
+            }
+            return DatabaseInstallationOverview(
+                id: overview.id,
+                name: overview.name,
+                installations: installations,
+                discoveryState: overview.discoveryState,
+                listeningState: listeningState
+            )
+        }
     }
 
     private func scanTerminalApplications() -> [TerminalApplicationSnapshot] {
@@ -1823,12 +1939,12 @@ struct EnvironmentScanner: Sendable {
         guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else { return [] }
         let result = machine.command(executable: executable, arguments: ["ls", "--installed", "--json"])
         guard result.status == 0, !result.timedOut else {
-            issues.append("mise Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            issues.append("mise 版本来源：\(result.timedOut ? "命令超时" : "读取失败")")
             return []
         }
         guard let data = result.output.data(using: .utf8),
               let installed = try? JSONDecoder().decode([String: [MiseInstallation]].self, from: data) else {
-            issues.append("mise Runtime Provider：输出解析失败")
+            issues.append("mise 版本来源：输出解析失败")
             return []
         }
         return runtimeDefinitions.flatMap { definition in
@@ -1853,7 +1969,7 @@ struct EnvironmentScanner: Sendable {
         } catch {
             let fileError = error as NSError
             if fileError.domain != NSCocoaErrorDomain || fileError.code != CocoaError.fileReadNoSuchFile.rawValue {
-                issues.append("nvm Runtime Provider：读取失败（\(versionRoot)）")
+                issues.append("nvm 版本来源：读取失败（\(versionRoot)）")
             }
             return []
         }
@@ -1876,12 +1992,12 @@ struct EnvironmentScanner: Sendable {
         guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else { return [] }
         let result = machine.command(executable: executable, arguments: ["python", "list", "--only-installed", "--output-format", "json"])
         guard result.status == 0, !result.timedOut else {
-            issues.append("uv Python Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            issues.append("uv Python 版本来源：\(result.timedOut ? "命令超时" : "读取失败")")
             return []
         }
         guard let data = result.output.data(using: .utf8),
               let installed = try? JSONDecoder().decode([UVInstallation].self, from: data) else {
-            issues.append("uv Python Runtime Provider：输出解析失败")
+            issues.append("uv Python 版本来源：输出解析失败")
             return []
         }
         return installed.map {
@@ -1902,7 +2018,7 @@ struct EnvironmentScanner: Sendable {
         guard let executable = candidates.first(where: { machine.isExecutableFile(atPath: $0) }) else { return [] }
         let result = machine.command(executable: executable, arguments: ["versions", "--bare"])
         guard result.status == 0, !result.timedOut else {
-            issues.append("pyenv Python Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            issues.append("pyenv Python 版本来源：\(result.timedOut ? "命令超时" : "读取失败")")
             return []
         }
         return result.output.split(whereSeparator: \.isNewline).compactMap { line in
@@ -1922,7 +2038,7 @@ struct EnvironmentScanner: Sendable {
         guard machine.isExecutableFile(atPath: executable) else { return [] }
         let result = machine.command(executable: executable, arguments: ["-V"])
         guard result.status == 0, !result.timedOut else {
-            issues.append("java_home Java Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            issues.append("java_home Java 版本来源：\(result.timedOut ? "命令超时" : "读取失败")")
             return []
         }
 
@@ -1939,7 +2055,7 @@ struct EnvironmentScanner: Sendable {
             return RuntimeProviderInstallation(runtimeID: "java", version: version, executable: java, source: .javaHome)
         }
         guard !installations.isEmpty else {
-            issues.append("java_home Java Runtime Provider：输出解析失败")
+            issues.append("java_home Java 版本来源：输出解析失败")
             return []
         }
         return installations
@@ -1956,7 +2072,7 @@ struct EnvironmentScanner: Sendable {
         guard let root, root.hasPrefix("/") else { return [] }
         let result = machine.command(executable: executable, arguments: ["toolchain", "list"])
         guard result.status == 0, !result.timedOut else {
-            issues.append("rustup Rust Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            issues.append("rustup Rust 版本来源：\(result.timedOut ? "命令超时" : "读取失败")")
             return []
         }
 
@@ -1976,7 +2092,7 @@ struct EnvironmentScanner: Sendable {
             )
         }
         guard !installations.isEmpty else {
-            issues.append("rustup Rust Runtime Provider：输出解析失败")
+            issues.append("rustup Rust 版本来源：输出解析失败")
             return []
         }
         return installations
@@ -1991,7 +2107,7 @@ struct EnvironmentScanner: Sendable {
 
         let result = machine.command(executable: executable, arguments: ["versions", "--bare"])
         guard result.status == 0, !result.timedOut else {
-            issues.append("rbenv Ruby Runtime Provider：\(result.timedOut ? "命令超时" : "读取失败")")
+            issues.append("rbenv Ruby 版本来源：\(result.timedOut ? "命令超时" : "读取失败")")
             return []
         }
         let lines = result.output.split(whereSeparator: \.isNewline)
@@ -2006,7 +2122,7 @@ struct EnvironmentScanner: Sendable {
             )
         }
         guard !lines.isEmpty else {
-            issues.append("rbenv Ruby Runtime Provider：输出解析失败")
+            issues.append("rbenv Ruby 版本来源：输出解析失败")
             return []
         }
         return installations
@@ -2040,7 +2156,7 @@ struct EnvironmentScanner: Sendable {
         let versionsResult = machine.command(executable: executable, arguments: ["list", "--formula", "--versions"])
         guard versionsResult.status == 0, !versionsResult.timedOut else {
             let failure = versionsResult.timedOut ? "命令超时" : "读取失败"
-            issues.append("Homebrew Runtime Provider：\(failure)")
+            issues.append("Homebrew 版本来源：\(failure)")
             return HomebrewInventory(formulas: [], cellar: nil, failureReason: failure)
         }
 
@@ -2063,7 +2179,7 @@ struct EnvironmentScanner: Sendable {
               !cellarResult.timedOut,
               let cellar = normalizedVersion(cellarResult.output) else {
             let failure = cellarResult.timedOut ? "命令超时" : "读取失败"
-            issues.append("Homebrew Runtime Provider：\(failure)")
+            issues.append("Homebrew 版本来源：\(failure)")
             return HomebrewInventory(formulas: formulas, cellar: nil, failureReason: failure)
         }
 

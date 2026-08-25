@@ -14,12 +14,12 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 
 截至 2026-08-25：
 
-- 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见语言 Runtime 的只读扫描和最新快照持久化。
-- 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源 Runtime Installation 发现。
+- 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见开发语言的只读扫描和最新快照持久化。
+- 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源安装版本发现。
 - 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
 - 已完成当前 `PATH` 首个生效 Git CLI、Git LFS、用户级配置与脱敏后的 GitHub Authentication Configuration 只读扫描。
 - 已完成受支持 Terminal Application 与注册 Shell Installation、Default Login Shell 的只读扫描。
-- 已完成总览、Runtime、数据库和本地服务侧边栏页面，以及按需展开详情、通知与状态说明等原生 SwiftUI 界面。
+- 已完成总览、开发语言、数据库和本地服务侧边栏页面，以及按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
 - v0.1 与 v0.2 的只读扫描范围已交付；v0.2 功能已完成，当前暂不创建版本 Tag 或 GitHub Release。
 - Git Tooling State 已交付 Git CLI、Git LFS、脱敏后的 User Git Configuration 与 GitHub Authentication Configuration。
@@ -50,7 +50,7 @@ System
 macOS
 Apple Silicon
 
-Runtime
+开发语言
 ✓ Node.js       24.6.0
 ✓ Python        3.13.5
 ✓ Go            1.25
@@ -72,7 +72,7 @@ Ports           12 listening
 
 ---
 
-### Runtime Management
+### 开发语言管理
 
 发现并管理常见开发语言运行时：
 
@@ -232,7 +232,7 @@ Ports
 * 已停止但项目依赖的 Service
 * Docker 状态异常
 * 失效的软链接
-* Runtime 版本不匹配
+* 开发语言版本不匹配
 
 ---
 
@@ -243,7 +243,7 @@ Ports
 DevEnv 可以将：
 
 * 当前开发环境
-* Runtime 信息
+* 开发语言信息
 * PATH
 * Shell 配置
 * 服务状态
@@ -570,8 +570,8 @@ Apple Silicon first
 * [x] 最新 Machine Snapshot 持久化
 * [x] PATH 与 Homebrew Availability 扫描
 * [x] Node.js、Python、Go、Java、Rust、Ruby 与 Lua 扫描
-* [x] Runtime Installation 版本、路径、来源与多版本展示
-* [x] Effective Runtime Installation 与 Runtime Conflict 识别
+* [x] 安装版本、路径、来源与多版本展示
+* [x] 当前生效安装版本与 PATH 版本冲突识别
 * [x] 原生 SwiftUI 总览、Scan Notice 与重新扫描
 
 v0.1 范围已冻结；新增能力进入后续里程碑。
@@ -584,7 +584,7 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 **Environment Scanner（已完成）**
 
-以只读方式扫描系统、Homebrew、PATH 与 Runtime Installation，并持久化最新 Machine Snapshot。
+以只读方式扫描系统、Homebrew、PATH 与安装版本，并持久化最新 Machine Snapshot。
 
 解决：
 
@@ -647,7 +647,7 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 支持：
 
-* Runtime 管理
+* 开发语言管理
 * Homebrew 管理
 * Service 管理
 * Docker 管理

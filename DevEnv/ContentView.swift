@@ -1,6 +1,49 @@
 import AppKit
 import SwiftUI
 
+struct AutoRefreshSettings: Equatable, Sendable {
+    static let foregroundRange = 5 ... 300
+    static let backgroundRange = 30 ... 3_600
+
+    var isEnabled: Bool
+    var foregroundSeconds: Int
+    var backgroundSeconds: Int
+
+    init(
+        isEnabled: Bool = true,
+        foregroundSeconds: Int = 10,
+        backgroundSeconds: Int = 60
+    ) {
+        self.isEnabled = isEnabled
+        self.foregroundSeconds = min(
+            max(foregroundSeconds, Self.foregroundRange.lowerBound),
+            Self.foregroundRange.upperBound
+        )
+        self.backgroundSeconds = max(
+            min(max(backgroundSeconds, Self.backgroundRange.lowerBound), Self.backgroundRange.upperBound),
+            self.foregroundSeconds
+        )
+    }
+
+    func interval(isActive: Bool) -> TimeInterval {
+        TimeInterval(isActive ? foregroundSeconds : backgroundSeconds)
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> Self {
+        AutoRefreshSettings(
+            isEnabled: defaults.object(forKey: "autoRefreshEnabled") as? Bool ?? true,
+            foregroundSeconds: defaults.object(forKey: "autoRefreshForegroundSeconds") as? Int ?? 10,
+            backgroundSeconds: defaults.object(forKey: "autoRefreshBackgroundSeconds") as? Int ?? 60
+        )
+    }
+
+    func save(to defaults: UserDefaults = .standard) {
+        defaults.set(isEnabled, forKey: "autoRefreshEnabled")
+        defaults.set(foregroundSeconds, forKey: "autoRefreshForegroundSeconds")
+        defaults.set(backgroundSeconds, forKey: "autoRefreshBackgroundSeconds")
+    }
+}
+
 private struct EnvironmentCardUpperContentHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
 
@@ -118,20 +161,41 @@ func groupLocalServicesForDisplay(
     return groups
 }
 
-func localServiceNotifications(_ services: [LocalServiceSnapshot]) -> [String] {
+struct EnvironmentNotice {
+    let identities: Set<NoticeIdentity>
+    let message: String
+}
+
+func localServiceNotices(_ services: [LocalServiceSnapshot]) -> [EnvironmentNotice] {
     groupLocalServicesForDisplay(services).compactMap { group in
-        let exposedCount = group.bindings.count { !$0.isLoopback }
-        guard exposedCount > 0 else { return nil }
-        return "\(group.displayName)：\(exposedCount) 个监听项可能可被局域网访问"
+        let exposedBindings = Set(group.bindings.filter { !$0.isLoopback })
+        guard !exposedBindings.isEmpty else { return nil }
+        return EnvironmentNotice(
+            identities: Set(exposedBindings.map {
+                .localService($0)
+            }),
+            message: "\(group.displayName)：\(exposedBindings.count) 个监听项可能可被局域网访问"
+        )
     }
+}
+
+enum NoticeIdentity: Hashable {
+    case message(String)
+    case localService(ListenerBinding)
 }
 
 @MainActor
 final class EnvironmentViewModel: ObservableObject {
     @Published private(set) var snapshot: MachineSnapshot?
     @Published private(set) var isScanning = false
+    @Published private(set) var isRefreshingDynamicStatus = false
     @Published private(set) var scanError: String?
+    @Published private(set) var dynamicRefreshError: String?
     @Published private(set) var isShowingStaleSnapshot = false
+    @Published private(set) var dynamicStatusRefreshedAt: Date?
+    @Published private(set) var autoRefreshSettings = AutoRefreshSettings.load()
+
+    var isBusy: Bool { isScanning || isRefreshingDynamicStatus }
 
     private let scanner = EnvironmentScanner()
     private let store = SnapshotStore()
@@ -142,7 +206,7 @@ final class EnvironmentViewModel: ObservableObject {
     }
 
     func scan() {
-        guard !isScanning else { return }
+        guard !isScanning, !isRefreshingDynamicStatus else { return }
         let hadSnapshot = snapshot != nil
         isScanning = true
         scanError = nil
@@ -157,7 +221,10 @@ final class EnvironmentViewModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 guard let self else { return }
-                if result.canPersist { self.snapshot = result.snapshot }
+                if result.canPersist {
+                    self.snapshot = result.snapshot
+                    self.dynamicRefreshError = nil
+                }
                 if let persistenceError {
                     self.scanError = "快照保存失败：\(persistenceError.localizedDescription)"
                 } else if !result.canPersist {
@@ -165,6 +232,38 @@ final class EnvironmentViewModel: ObservableObject {
                     self.isShowingStaleSnapshot = hadSnapshot
                 }
                 self.isScanning = false
+            }
+        }
+    }
+
+    func saveAutoRefreshSettings(_ settings: AutoRefreshSettings) {
+        let settings = AutoRefreshSettings(
+            isEnabled: settings.isEnabled,
+            foregroundSeconds: settings.foregroundSeconds,
+            backgroundSeconds: settings.backgroundSeconds
+        )
+        settings.save()
+        autoRefreshSettings = settings
+        if settings.isEnabled { refreshDynamicStatus() }
+    }
+
+    func refreshDynamicStatus() {
+        guard let snapshot, !isScanning, !isRefreshingDynamicStatus else { return }
+        isRefreshingDynamicStatus = true
+        let scanner = scanner
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = scanner.refreshDynamicStatus(in: snapshot)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case let .success(dynamicStatus):
+                    self.snapshot = snapshot.applying(dynamicStatus)
+                    self.dynamicStatusRefreshedAt = Date()
+                    self.dynamicRefreshError = nil
+                case let .failure(error):
+                    self.dynamicRefreshError = error.localizedDescription
+                }
+                self.isRefreshingDynamicStatus = false
             }
         }
     }
@@ -176,13 +275,17 @@ struct ContentView: View {
         case runtimes
         case databases
         case localServices
+        case settings
+
+        static var primaryPages: [Page] { allCases.filter { $0 != .settings } }
 
         var title: String {
             switch self {
             case .overview: "总览"
-            case .runtimes: "Runtime"
+            case .runtimes: "开发语言"
             case .databases: "数据库"
             case .localServices: "本地服务"
+            case .settings: "设置"
             }
         }
 
@@ -192,8 +295,14 @@ struct ContentView: View {
             case .runtimes: "terminal"
             case .databases: "cylinder"
             case .localServices: "network"
+            case .settings: "gearshape"
             }
         }
+    }
+
+    private struct AutoRefreshSchedule: Hashable {
+        let isEnabled: Bool
+        let seconds: Int
     }
 
     private enum EnvironmentCard: CaseIterable {
@@ -205,6 +314,7 @@ struct ContentView: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = EnvironmentViewModel()
     @State private var selectedPage: Page? = .overview
     @State private var copiedPath: String?
@@ -216,7 +326,11 @@ struct ContentView: View {
     @State private var expandedEnvironmentCard: EnvironmentCard?
     @State private var showsAllPathEntries = false
     @State private var isShowingNotifications = false
-    @State private var readNoticeSnapshotDate: Date?
+    @State private var readNoticeIdentities: Set<NoticeIdentity> = []
+    @State private var settingsDraft = AutoRefreshSettings()
+    @State private var pendingPage: Page?
+    @State private var isShowingSettingsExitConfirmation = false
+    @State private var usesForegroundRefreshInterval = NSApplication.shared.isActive
     @State private var environmentCardUpperContentHeight: CGFloat = 0
     @FocusState private var focusedCopyPath: String?
 
@@ -257,17 +371,78 @@ struct ContentView: View {
                 }
 
                 Button(action: model.scan) {
-                    if model.isScanning {
+                    if model.isBusy {
                         ProgressView().controlSize(.small)
                     } else {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
-                .accessibilityLabel(model.isScanning ? "正在扫描" : "重新扫描")
-                .help(model.isScanning ? "正在扫描" : "重新扫描")
+                .accessibilityLabel(
+                    model.isScanning ? "正在扫描" : model.isRefreshingDynamicStatus ? "正在刷新动态状态" : "重新扫描"
+                )
+                .help(model.isScanning ? "正在扫描" : model.isRefreshingDynamicStatus ? "正在刷新动态状态" : "重新扫描")
                 .keyboardShortcut("r", modifiers: .command)
-                .disabled(model.isScanning)
+                .disabled(model.isBusy)
             }
+        }
+        .task(id: autoRefreshSchedule) {
+            let schedule = autoRefreshSchedule
+            guard schedule.isEnabled else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(schedule.seconds))
+                } catch {
+                    return
+                }
+                model.refreshDynamicStatus()
+            }
+        }
+        .onAppear(perform: updateRefreshActivity)
+        .onChange(of: scenePhase) { _, _ in
+            updateRefreshActivity()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            updateRefreshActivity()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            updateRefreshActivity()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { _ in
+            updateRefreshActivity()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didDeminiaturizeNotification)) { _ in
+            updateRefreshActivity()
+        }
+        .onChange(of: currentNoticeIdentities) { _, identities in
+            readNoticeIdentities.formIntersection(identities)
+        }
+        .onChange(of: model.snapshot?.scannedAt) {
+            readNoticeIdentities.removeAll()
+        }
+        .sheet(isPresented: $isShowingSettingsExitConfirmation, onDismiss: {
+            pendingPage = nil
+        }) {
+            settingsExitConfirmation
+        }
+    }
+
+    private var autoRefreshSchedule: AutoRefreshSchedule {
+        AutoRefreshSchedule(
+            isEnabled: model.autoRefreshSettings.isEnabled,
+            seconds: Int(model.autoRefreshSettings.interval(isActive: usesForegroundRefreshInterval))
+        )
+    }
+
+    private func updateRefreshActivity() {
+        let wasUsingForegroundInterval = usesForegroundRefreshInterval
+        usesForegroundRefreshInterval = scenePhase == .active
+            && NSApplication.shared.isActive
+            && !NSApplication.shared.isHidden
+            && NSApplication.shared.windows.contains { $0.isVisible && !$0.isMiniaturized }
+        if !wasUsingForegroundInterval,
+           usesForegroundRefreshInterval,
+           model.autoRefreshSettings.isEnabled {
+            model.refreshDynamicStatus()
         }
     }
 
@@ -288,8 +463,8 @@ struct ContentView: View {
 
                 Divider()
 
-                List(selection: $selectedPage) {
-                    ForEach(Page.allCases, id: \.self) { page in
+                List(selection: pageSelection) {
+                    ForEach(Page.primaryPages, id: \.self) { page in
                         Label(page.title, systemImage: page.systemImage)
                             .font(.system(size: 15, weight: .medium))
                             .imageScale(.large)
@@ -301,6 +476,24 @@ struct ContentView: View {
                 }
                 .listStyle(.sidebar)
                 .padding(.top, 14)
+
+                Divider()
+
+                Button {
+                    requestPage(.settings)
+                } label: {
+                    Label(Page.settings.title, systemImage: Page.settings.systemImage)
+                        .font(.system(size: 15, weight: .medium))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            selectedPage == .settings ? Color.accentColor.opacity(0.15) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+                }
+                .buttonStyle(.plain)
+                .padding(10)
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
         } detail: {
@@ -313,9 +506,13 @@ struct ContentView: View {
 
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                header(page.title, snapshot: snapshot)
+                header(page, snapshot: snapshot)
                 if let scanError = model.scanError {
                     scanErrorBanner(scanError, snapshot: snapshot)
+                }
+                if let dynamicRefreshError = model.dynamicRefreshError,
+                   page == .databases || page == .localServices {
+                    dynamicRefreshErrorBanner(dynamicRefreshError)
                 }
 
                 switch page {
@@ -329,6 +526,8 @@ struct ContentView: View {
                     databasePage(snapshot.databaseInstallationOverviews)
                 case .localServices:
                     localServicesSection(snapshot)
+                case .settings:
+                    settingsPage
                 }
             }
             .frame(
@@ -340,6 +539,30 @@ struct ContentView: View {
             .padding(28)
         }
         .id(page)
+    }
+
+    private var pageSelection: Binding<Page?> {
+        Binding(
+            get: { selectedPage },
+            set: { page in
+                if let page { requestPage(page) }
+            }
+        )
+    }
+
+    private func requestPage(_ page: Page) {
+        guard page != selectedPage else { return }
+        if selectedPage == .settings, settingsDraft != model.autoRefreshSettings {
+            pendingPage = page
+            isShowingSettingsExitConfirmation = true
+            return
+        }
+        selectPage(page)
+    }
+
+    private func selectPage(_ page: Page) {
+        selectedPage = page
+        if page == .settings { settingsDraft = model.autoRefreshSettings }
     }
 
     private var loadingView: some View {
@@ -370,20 +593,197 @@ struct ContentView: View {
         }
     }
 
-    private func header(_ title: String, snapshot: MachineSnapshot) -> some View {
+    private func header(_ page: Page, snapshot: MachineSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
+            Text(page.title)
                 .font(.largeTitle.bold())
-            HStack(spacing: 10) {
-                Text("最近扫描：\(formatted(snapshot.scannedAt))")
-                    .foregroundStyle(.secondary)
-                if model.isScanning {
-                    Label("正在更新", systemImage: "arrow.triangle.2.circlepath")
+            if page != .settings {
+                HStack(spacing: 10) {
+                    if page == .databases || page == .localServices {
+                        Text(model.dynamicStatusRefreshedAt.map { "最近刷新：\(formatted($0))" } ?? "最近刷新：尚未刷新")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("最近扫描：\(formatted(snapshot.scannedAt))")
+                            .foregroundStyle(.secondary)
+                    }
+                    if model.isBusy {
+                        Label(
+                            model.isScanning ? "正在更新" : "正在刷新",
+                            systemImage: "arrow.triangle.2.circlepath"
+                        )
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var settingsPage: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 36, height: 36)
+                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("动态状态刷新")
+                        .font(.headline)
+                    Text("自动更新本地服务与已知数据库的监听状态")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
             }
+
+            GroupBox {
+                VStack(spacing: 0) {
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("定时刷新")
+                                .fontWeight(.medium)
+                            Text("关闭后保留当前的刷新间隔")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("定时刷新", isOn: $settingsDraft.isEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+                    .padding(.vertical, 6)
+
+                    Divider()
+                        .padding(.vertical, 14)
+
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("前台刷新间隔")
+                                .fontWeight(.medium)
+                            Text("应用处于活动状态时")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Stepper(value: foregroundSeconds, in: AutoRefreshSettings.foregroundRange) {
+                            Text("\(settingsDraft.foregroundSeconds) 秒")
+                                .monospacedDigit()
+                                .frame(width: 64, alignment: .trailing)
+                        }
+                        .fixedSize()
+                        .accessibilityLabel("前台刷新间隔")
+                        .accessibilityValue("\(settingsDraft.foregroundSeconds) 秒")
+                    }
+                    .disabled(!settingsDraft.isEnabled)
+
+                    Divider()
+                        .padding(.vertical, 14)
+
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("后台刷新间隔")
+                                .fontWeight(.medium)
+                            Text("应用非活动、隐藏或最小化时")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Stepper(value: backgroundSeconds, in: AutoRefreshSettings.backgroundRange) {
+                            Text("\(settingsDraft.backgroundSeconds) 秒")
+                                .monospacedDigit()
+                                .frame(width: 64, alignment: .trailing)
+                        }
+                        .fixedSize()
+                        .accessibilityLabel("后台刷新间隔")
+                        .accessibilityValue("\(settingsDraft.backgroundSeconds) 秒")
+                    }
+                    .disabled(!settingsDraft.isEnabled)
+                }
+                .padding(10)
+            }
+
+            if settingsDraft != model.autoRefreshSettings {
+                HStack {
+                    Text("有未保存的修改")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("保存") {
+                        saveSettings()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
         }
+        .frame(maxWidth: 640)
+    }
+
+    private var foregroundSeconds: Binding<Int> {
+        Binding(
+            get: { settingsDraft.foregroundSeconds },
+            set: { value in
+                settingsDraft.foregroundSeconds = value
+                settingsDraft.backgroundSeconds = max(settingsDraft.backgroundSeconds, value)
+            }
+        )
+    }
+
+    private var backgroundSeconds: Binding<Int> {
+        Binding(
+            get: { settingsDraft.backgroundSeconds },
+            set: { settingsDraft.backgroundSeconds = max($0, settingsDraft.foregroundSeconds) }
+        )
+    }
+
+    private func saveSettings() {
+        model.saveAutoRefreshSettings(settingsDraft)
+        settingsDraft = model.autoRefreshSettings
+    }
+
+    private var settingsExitConfirmation: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Text("设置尚未保存")
+                    .font(.title3.bold())
+                Spacer()
+                Button {
+                    isShowingSettingsExitConfirmation = false
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭并继续编辑")
+            }
+
+            Text("修改需要保存后才会生效。直接离开将放弃已修改的内容。")
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("放弃修改", role: .destructive) {
+                    leaveSettings(saving: false)
+                }
+                Button("保存并离开") {
+                    leaveSettings(saving: true)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(22)
+        .frame(width: 430)
+    }
+
+    private func leaveSettings(saving: Bool) {
+        guard let pendingPage else { return }
+        if saving {
+            saveSettings()
+        } else {
+            settingsDraft = model.autoRefreshSettings
+        }
+        isShowingSettingsExitConfirmation = false
+        selectPage(pendingPage)
+        self.pendingPage = nil
     }
 
     private func scanErrorBanner(_ error: String, snapshot: MachineSnapshot) -> some View {
@@ -402,7 +802,27 @@ struct ContentView: View {
                 }
                 Spacer()
                 Button("重新扫描", action: model.scan)
-                    .disabled(model.isScanning)
+                    .disabled(model.isBusy)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func dynamicRefreshErrorBanner(_ error: String) -> some View {
+        GroupBox {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("自动刷新失败，当前显示上次结果")
+                        .fontWeight(.semibold)
+                    Text(error)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("立即刷新", action: model.refreshDynamicStatus)
+                    .disabled(model.isBusy)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -429,7 +849,7 @@ struct ContentView: View {
         ) {
             overviewMetricCard(
                 discoveredCount.formatted(),
-                label: "Runtime 类别",
+                label: "开发语言类别",
                 systemImage: "square.grid.2x2",
                 tint: .blue
             )
@@ -535,7 +955,7 @@ struct ContentView: View {
         return topOverviewCard("环境状态", systemImage: "checkmark.shield") {
             VStack(spacing: 10) {
                 summaryMetric(pathConflictCount, label: "PATH 冲突", systemImage: "exclamationmark.triangle.fill", tint: .orange)
-                summaryMetric(unavailableRuntimeCount, label: "Runtime 未发现", systemImage: "questionmark.circle.fill", tint: .secondary)
+                summaryMetric(unavailableRuntimeCount, label: "开发语言未发现", systemImage: "questionmark.circle.fill", tint: .secondary)
                 summaryMetric(databaseNotListeningCount, label: "数据库未监听", systemImage: "cylinder", tint: .blue)
                 summaryMetric(exposedPortCount, label: "异常监听端口", systemImage: "antenna.radiowaves.left.and.right", tint: .red)
 
@@ -598,7 +1018,7 @@ struct ContentView: View {
 
     private func runtimesSection(_ runtimes: [RuntimeSnapshot]) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Runtime 列表")
+            Text("开发语言列表")
                 .font(.title3.bold())
 
             if let expandedRuntimeID,
@@ -641,7 +1061,7 @@ struct ContentView: View {
         ) {
             runtimeMetricCard(
                 discoveredCount,
-                title: "Runtime 类别",
+                title: "开发语言类别",
                 systemImage: "terminal",
                 tint: .blue
             )
@@ -886,14 +1306,14 @@ struct ContentView: View {
 
             HStack(spacing: 10) {
                 environmentMetric(
-                    title: "Database Discovery State",
+                    title: "发现状态",
                     value: discovery.title,
                     systemImage: discovery.symbol,
                     tint: discovery.color,
                     usesNeutralBackground: true
                 )
                 environmentMetric(
-                    title: "Database Listening State",
+                    title: "监听状态",
                     value: listening.title,
                     systemImage: listening.symbol,
                     tint: listening.color,
@@ -1011,6 +1431,7 @@ struct ContentView: View {
                     Text(source.displayName)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -1018,6 +1439,7 @@ struct ContentView: View {
                 Text(listening.title)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(tint)
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -1532,8 +1954,8 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Text(
                     runtime.installations.isEmpty
-                        ? "未检测到 Runtime Installation"
-                        : "\(runtime.installations.count) 个版本"
+                        ? "未检测到安装版本"
+                        : "\(runtime.installations.count) 个安装版本"
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1565,7 +1987,7 @@ struct ContentView: View {
                 "exclamationmark.triangle.fill",
                 "exclamationmark.triangle.fill",
                 .orange,
-                "当前 PATH 中存在该 Runtime 的多个不同版本。终端默认使用 PATH 顺序最靠前的版本，其他工具或项目可能解析到不同版本。"
+                "当前 PATH 中存在该开发语言的多个不同版本。终端默认使用 PATH 顺序最靠前的版本，其他工具或项目可能解析到不同版本。"
             )
         }
         if runtime.state == .failed {
@@ -1574,7 +1996,7 @@ struct ContentView: View {
                 "exclamationmark.triangle.fill",
                 "exclamationmark.circle.fill",
                 .orange,
-                "已找到 Runtime，但无法读取可用版本。常见原因包括命令超时、文件不可执行或版本输出无法识别。"
+                "已找到开发语言，但无法读取可用版本。常见原因包括命令超时、文件不可执行或版本输出无法识别。"
             )
         }
         if runtime.state == .discovered {
@@ -1627,6 +2049,7 @@ struct ContentView: View {
                     Text(source.displayName)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -1635,6 +2058,7 @@ struct ContentView: View {
                 Text(state)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(installation.isEffective ? .green : .secondary)
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -1649,11 +2073,12 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if installation.state == .failed {
-                helpIcon("该安装已被发现，但版本读取失败或可执行文件不可用；它不会阻止其他 Runtime Installation 继续扫描。")
+                helpIcon("该安装已被发现，但版本读取失败或可执行文件不可用；它不会阻止其他安装版本继续扫描。")
             } else if isConflictingPath {
                 Text("可能冲突")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -2642,7 +3067,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Label(
-                    warningCount > 0 ? "\(warningCount) 个 Runtime 冲突" : "未发现 Runtime 冲突",
+                    warningCount > 0 ? "\(warningCount) 个开发语言冲突" : "未发现开发语言冲突",
                     systemImage: warningCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
                 )
                 .font(.caption.weight(.semibold))
@@ -2661,7 +3086,7 @@ struct ContentView: View {
                     tint: .green
                 )
                 environmentMetric(
-                    title: "Runtime 冲突",
+                    title: "开发语言冲突",
                     value: warningCount.formatted(),
                     systemImage: warningCount > 0 ? "exclamationmark.triangle" : "checkmark.circle",
                     tint: tint
@@ -2965,12 +3390,11 @@ struct ContentView: View {
     }
 
     private var currentNotices: [String] {
-        model.snapshot.map(notifications(in:)) ?? []
+        currentEnvironmentNotices.map(\.message)
     }
 
     private var hasUnreadNotices: Bool {
-        guard let snapshot = model.snapshot else { return false }
-        return !currentNotices.isEmpty && readNoticeSnapshotDate != snapshot.scannedAt
+        !currentNoticeIdentities.isEmpty && !currentNoticeIdentities.isSubset(of: readNoticeIdentities)
     }
 
     private func notificationsPopover(_ notices: [String]) -> some View {
@@ -3006,15 +3430,21 @@ struct ContentView: View {
     }
 
     private func markCurrentNoticesRead() {
-        readNoticeSnapshotDate = model.snapshot?.scannedAt
+        readNoticeIdentities = currentNoticeIdentities
     }
 
-    private func notifications(in snapshot: MachineSnapshot) -> [String] {
-        snapshot.runtimes
+    private var currentNoticeIdentities: Set<NoticeIdentity> {
+        Set(currentEnvironmentNotices.flatMap(\.identities))
+    }
+
+    private var currentEnvironmentNotices: [EnvironmentNotice] {
+        guard let snapshot = model.snapshot else { return [] }
+        let messages = snapshot.runtimes
             .filter(\.hasPathVersionConflict)
             .map { "\($0.name)：PATH 版本冲突" }
-            + localServiceNotifications(snapshot.localServices)
             + snapshot.issues
+        return messages.map { EnvironmentNotice(identities: [.message($0)], message: $0) }
+            + localServiceNotices(snapshot.localServices)
     }
 
     private func effectiveVersion(for runtime: RuntimeSnapshot) -> String {
