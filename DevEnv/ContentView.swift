@@ -180,7 +180,7 @@ struct ContentView: View {
         var title: String {
             switch self {
             case .overview: "总览"
-            case .runtimes: "Runtime"
+            case .runtimes: "开发语言"
             case .databases: "数据库"
             case .localServices: "本地服务"
             }
@@ -429,7 +429,7 @@ struct ContentView: View {
         ) {
             overviewMetricCard(
                 discoveredCount.formatted(),
-                label: "Runtime 类别",
+                label: "开发语言类别",
                 systemImage: "square.grid.2x2",
                 tint: .blue
             )
@@ -535,7 +535,7 @@ struct ContentView: View {
         return topOverviewCard("环境状态", systemImage: "checkmark.shield") {
             VStack(spacing: 10) {
                 summaryMetric(pathConflictCount, label: "PATH 冲突", systemImage: "exclamationmark.triangle.fill", tint: .orange)
-                summaryMetric(unavailableRuntimeCount, label: "Runtime 未发现", systemImage: "questionmark.circle.fill", tint: .secondary)
+                summaryMetric(unavailableRuntimeCount, label: "开发语言未发现", systemImage: "questionmark.circle.fill", tint: .secondary)
                 summaryMetric(databaseNotListeningCount, label: "数据库未监听", systemImage: "cylinder", tint: .blue)
                 summaryMetric(exposedPortCount, label: "异常监听端口", systemImage: "antenna.radiowaves.left.and.right", tint: .red)
 
@@ -598,7 +598,7 @@ struct ContentView: View {
 
     private func runtimesSection(_ runtimes: [RuntimeSnapshot]) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Runtime 列表")
+            Text("开发语言列表")
                 .font(.title3.bold())
 
             if let expandedRuntimeID,
@@ -641,7 +641,7 @@ struct ContentView: View {
         ) {
             runtimeMetricCard(
                 discoveredCount,
-                title: "Runtime 类别",
+                title: "开发语言类别",
                 systemImage: "terminal",
                 tint: .blue
             )
@@ -1532,8 +1532,8 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Text(
                     runtime.installations.isEmpty
-                        ? "未检测到 Runtime Installation"
-                        : "\(runtime.installations.count) 个版本"
+                        ? "未检测到安装版本"
+                        : "\(runtime.installations.count) 个安装版本"
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1565,7 +1565,7 @@ struct ContentView: View {
                 "exclamationmark.triangle.fill",
                 "exclamationmark.triangle.fill",
                 .orange,
-                "当前 PATH 中存在该 Runtime 的多个不同版本。终端默认使用 PATH 顺序最靠前的版本，其他工具或项目可能解析到不同版本。"
+                "当前 PATH 中存在该开发语言的多个不同版本。终端默认使用 PATH 顺序最靠前的版本，其他工具或项目可能解析到不同版本。"
             )
         }
         if runtime.state == .failed {
@@ -1574,7 +1574,7 @@ struct ContentView: View {
                 "exclamationmark.triangle.fill",
                 "exclamationmark.circle.fill",
                 .orange,
-                "已找到 Runtime，但无法读取可用版本。常见原因包括命令超时、文件不可执行或版本输出无法识别。"
+                "已找到开发语言，但无法读取可用版本。常见原因包括命令超时、文件不可执行或版本输出无法识别。"
             )
         }
         if runtime.state == .discovered {
@@ -1649,7 +1649,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if installation.state == .failed {
-                helpIcon("该安装已被发现，但版本读取失败或可执行文件不可用；它不会阻止其他 Runtime Installation 继续扫描。")
+                helpIcon("该安装已被发现，但版本读取失败或可执行文件不可用；它不会阻止其他安装版本继续扫描。")
             } else if isConflictingPath {
                 Text("可能冲突")
                     .font(.caption.weight(.semibold))
@@ -2642,7 +2642,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Label(
-                    warningCount > 0 ? "\(warningCount) 个 Runtime 冲突" : "未发现 Runtime 冲突",
+                    warningCount > 0 ? "\(warningCount) 个开发语言冲突" : "未发现开发语言冲突",
                     systemImage: warningCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
                 )
                 .font(.caption.weight(.semibold))
@@ -2661,7 +2661,7 @@ struct ContentView: View {
                     tint: .green
                 )
                 environmentMetric(
-                    title: "Runtime 冲突",
+                    title: "开发语言冲突",
                     value: warningCount.formatted(),
                     systemImage: warningCount > 0 ? "exclamationmark.triangle" : "checkmark.circle",
                     tint: tint
