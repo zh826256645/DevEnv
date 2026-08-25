@@ -22,9 +22,10 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 - 已完成总览、开发语言、数据库和本地服务侧边栏页面，以及按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
 - v0.1 与 v0.2 的只读扫描范围已交付；v0.2 功能已完成，当前暂不创建版本 Tag 或 GitHub Release。
+- v0.3 Homebrew Service 管理功能已完成，当前暂未发布。
 - Git Tooling State 已交付 Git CLI、Git LFS、脱敏后的 User Git Configuration 与 GitHub Authentication Configuration。
 
-Docker、服务管理、端口管理、环境修改和诊断仍属于后续规划；现有 Environment Scan 保持只读。
+开发语言管理、Homebrew 包管理、Docker、端口管理和诊断仍属于后续规划。
 
 你可以通过 DevEnv 快速了解：
 
@@ -641,20 +642,20 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 ---
 
-### v0.3
+### v0.3（功能已完成，暂未发布）
 
-**Environment Manager**
+**Homebrew Service Management（已完成）**
 
 支持：
 
-* 开发语言管理
-* Homebrew 管理
-* Service 管理
-* Docker 管理
+* 展示当前用户可管理的 Homebrew Service
+* 启动、停止与重启 Homebrew Service
+* 修改前展示具体命令与持久影响，并由用户确认
+* 修改后重新读取 Homebrew Service 与 Local Service 状态
 
 解决：
 
-> 我的开发环境怎么管理？
+> 我如何安全地管理当前用户的 Homebrew Service？
 
 ---
 
@@ -718,6 +719,14 @@ Restore
 **AI Environment Doctor**
 
 AI 根据本机真实环境进行问题诊断。
+
+---
+
+### Later（未绑定版本）
+
+* 开发语言管理
+* Homebrew 包管理
+* Docker 管理
 
 解决：
 
