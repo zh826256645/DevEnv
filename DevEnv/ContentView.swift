@@ -620,41 +620,103 @@ struct ContentView: View {
     }
 
     private var settingsPage: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 36, height: 36)
+                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("动态状态刷新")
+                        .font(.headline)
+                    Text("自动更新本地服务与已知数据库的监听状态")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             GroupBox {
-                VStack(alignment: .leading, spacing: 18) {
-                    Toggle("定时刷新", isOn: $settingsDraft.isEnabled)
+                VStack(spacing: 0) {
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("定时刷新")
+                                .fontWeight(.medium)
+                            Text("关闭后保留当前的刷新间隔")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("定时刷新", isOn: $settingsDraft.isEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+                    .padding(.vertical, 6)
 
                     Divider()
+                        .padding(.vertical, 14)
 
-                    Stepper(value: foregroundSeconds, in: AutoRefreshSettings.foregroundRange) {
-                        LabeledContent("前台刷新间隔") {
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("前台刷新间隔")
+                                .fontWeight(.medium)
+                            Text("应用处于活动状态时")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Stepper(value: foregroundSeconds, in: AutoRefreshSettings.foregroundRange) {
                             Text("\(settingsDraft.foregroundSeconds) 秒")
                                 .monospacedDigit()
+                                .frame(width: 64, alignment: .trailing)
                         }
+                        .fixedSize()
+                        .accessibilityLabel("前台刷新间隔")
+                        .accessibilityValue("\(settingsDraft.foregroundSeconds) 秒")
                     }
                     .disabled(!settingsDraft.isEnabled)
-                    Stepper(value: backgroundSeconds, in: AutoRefreshSettings.backgroundRange) {
-                        LabeledContent("后台刷新间隔") {
+
+                    Divider()
+                        .padding(.vertical, 14)
+
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("后台刷新间隔")
+                                .fontWeight(.medium)
+                            Text("应用非活动、隐藏或最小化时")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Stepper(value: backgroundSeconds, in: AutoRefreshSettings.backgroundRange) {
                             Text("\(settingsDraft.backgroundSeconds) 秒")
                                 .monospacedDigit()
+                                .frame(width: 64, alignment: .trailing)
                         }
+                        .fixedSize()
+                        .accessibilityLabel("后台刷新间隔")
+                        .accessibilityValue("\(settingsDraft.backgroundSeconds) 秒")
                     }
                     .disabled(!settingsDraft.isEnabled)
                 }
-                .padding(8)
-            } label: {
-                Label("动态状态刷新", systemImage: "arrow.triangle.2.circlepath")
+                .padding(10)
             }
 
             if settingsDraft != model.autoRefreshSettings {
-                Button("保存") {
-                    saveSettings()
+                HStack {
+                    Text("有未保存的修改")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("保存") {
+                        saveSettings()
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
+        .frame(maxWidth: 640)
     }
 
     private var foregroundSeconds: Binding<Int> {
