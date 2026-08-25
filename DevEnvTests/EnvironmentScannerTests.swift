@@ -2087,7 +2087,8 @@ final class HomebrewServiceManagerTests: XCTestCase {
     func testListsNormalizedHomebrewServicesAndActions() {
         let machine = StubMachine(
             path: ["/bin"],
-            environment: ["USER": "test"],
+            environment: ["USER": "root"],
+            currentUserName: "test",
             commandOutputs: [
                 "\(brew) services list --json": """
                 [
@@ -2321,6 +2322,17 @@ final class HomebrewServiceManagerTests: XCTestCase {
             ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcftn"],
         ])
     }
+
+    func testCoordinatorSerializesServiceActionsAndScans() {
+        var coordinator = MachineOperationCoordinator()
+
+        XCTAssertTrue(coordinator.begin(.homebrewServiceAction("redis")))
+        XCTAssertFalse(coordinator.begin(.homebrewServiceAction("postgresql@17")))
+        XCTAssertFalse(coordinator.begin(.environmentScan))
+        XCTAssertFalse(coordinator.begin(.dynamicStatusRefresh))
+        coordinator.finish(.homebrewServiceAction("redis"))
+        XCTAssertTrue(coordinator.begin(.environmentScan))
+    }
 }
 
 private final class CommandRecorder: @unchecked Sendable {
@@ -2347,6 +2359,7 @@ private final class CommandRecorder: @unchecked Sendable {
 private struct StubMachine: MachineAccess {
     let environment: [String: String]
     let hostName = "test-host"
+    let currentUserName: String
     let currentDirectoryPath = "/"
     let defaultLoginShellPath: String?
     let executables: Set<String>
@@ -2368,6 +2381,7 @@ private struct StubMachine: MachineAccess {
     init(
         path: [String],
         environment: [String: String] = [:],
+        currentUserName: String = "test",
         defaultLoginShellPath: String? = "/bin/zsh",
         registeredShells: String? = "/bin/zsh\n",
         executables: Set<String> = [],
@@ -2387,6 +2401,7 @@ private struct StubMachine: MachineAccess {
         recorder: CommandRecorder? = nil
     ) {
         self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
+        self.currentUserName = currentUserName
         self.defaultLoginShellPath = defaultLoginShellPath
         self.executables = executables.union(["/bin/zsh"])
         self.resolvedPaths = resolvedPaths
@@ -2441,10 +2456,6 @@ private struct StubMachine: MachineAccess {
     }
 
     func application(bundleIdentifier: String) -> InstalledApplication? { applications[bundleIdentifier] }
-
-    func command(executable: String, arguments: [String]) -> MachineCommandResult {
-        command(executable: executable, arguments: arguments, timeout: 2)
-    }
 
     func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult {
         recorder?.append(executable: executable, arguments: arguments, timeout: timeout)

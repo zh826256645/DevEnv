@@ -57,6 +57,27 @@ struct HomebrewServiceListState: Equatable, Sendable {
     let error: String?
 }
 
+struct MachineOperationCoordinator: Equatable, Sendable {
+    enum Operation: Equatable, Sendable {
+        case environmentScan
+        case dynamicStatusRefresh
+        case homebrewServiceRefresh
+        case homebrewServiceAction(String)
+    }
+
+    private(set) var active: Operation?
+
+    mutating func begin(_ operation: Operation) -> Bool {
+        guard active == nil else { return false }
+        active = operation
+        return true
+    }
+
+    mutating func finish(_ operation: Operation) {
+        if active == operation { active = nil }
+    }
+}
+
 enum HomebrewServiceActionResultKind: Equatable, Sendable {
     case success
     case failure
@@ -107,9 +128,8 @@ struct HomebrewServiceManager: Sendable {
             let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
             error = output.isEmpty ? "Homebrew Service 列表读取失败" : "Homebrew Service 列表读取失败：\(output)"
         } else if let decoded = try? JSONDecoder().decode([JSONService].self, from: Data(result.output.utf8)) {
-            let currentUser = machine.environment["USER"]
             let services = decoded.compactMap { item -> HomebrewService? in
-                guard item.user == nil || item.user?.isEmpty == true || item.user == currentUser else { return nil }
+                guard item.user == nil || item.user?.isEmpty == true || item.user == machine.currentUserName else { return nil }
                 return HomebrewService(
                     formula: item.name,
                     status: HomebrewServiceStatus(homebrewValue: item.status),

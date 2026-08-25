@@ -187,23 +187,36 @@ enum NoticeIdentity: Hashable {
 @MainActor
 final class EnvironmentViewModel: ObservableObject {
     @Published private(set) var snapshot: MachineSnapshot?
-    @Published private(set) var isScanning = false
-    @Published private(set) var isRefreshingDynamicStatus = false
     @Published private(set) var scanError: String?
     @Published private(set) var dynamicRefreshError: String?
     @Published private(set) var isShowingStaleSnapshot = false
     @Published private(set) var dynamicStatusRefreshedAt: Date?
     @Published private(set) var autoRefreshSettings = AutoRefreshSettings.load()
     @Published private(set) var homebrewServiceList: HomebrewServiceListState?
-    @Published private(set) var isRefreshingHomebrewServices = false
-    @Published private(set) var homebrewServiceActionFormula: String?
     @Published private(set) var homebrewServiceActionResult: HomebrewServiceActionResult?
+    @Published private(set) var operationCoordinator = MachineOperationCoordinator()
 
-    var isRunningHomebrewServiceAction: Bool { homebrewServiceActionFormula != nil }
-    var isBusy: Bool { isScanning || isRefreshingDynamicStatus || isRunningHomebrewServiceAction }
+    var isScanning: Bool { operationCoordinator.active == .environmentScan }
+    var isRefreshingDynamicStatus: Bool { operationCoordinator.active == .dynamicStatusRefresh }
+    var isRefreshingHomebrewServices: Bool { operationCoordinator.active == .homebrewServiceRefresh }
+    var homebrewServiceActionFormula: String? {
+        guard case let .homebrewServiceAction(formula) = operationCoordinator.active else { return nil }
+        return formula
+    }
+    var isBusy: Bool { operationCoordinator.active != nil }
+    var busyDescription: String? {
+        switch operationCoordinator.active {
+        case .environmentScan: "正在扫描"
+        case .dynamicStatusRefresh: "正在刷新动态状态"
+        case .homebrewServiceRefresh: "正在刷新 Homebrew Service"
+        case .homebrewServiceAction: "正在修改 Homebrew Service"
+        case nil: nil
+        }
+    }
 
     private let scanner = EnvironmentScanner()
     private let store = SnapshotStore()
+    private var shouldRefreshHomebrewServicesWhenIdle = false
 
     init() {
         snapshot = store.load()
@@ -211,9 +224,8 @@ final class EnvironmentViewModel: ObservableObject {
     }
 
     func scan() {
-        guard !isScanning, !isRefreshingDynamicStatus, !isRunningHomebrewServiceAction else { return }
+        guard begin(.environmentScan) else { return }
         let hadSnapshot = snapshot != nil
-        isScanning = true
         scanError = nil
         isShowingStaleSnapshot = false
         let scanner = scanner
@@ -236,7 +248,7 @@ final class EnvironmentViewModel: ObservableObject {
                     self.scanError = "无法读取 macOS 基础信息，本次未更新快照"
                     self.isShowingStaleSnapshot = hadSnapshot
                 }
-                self.isScanning = false
+                self.finish(.environmentScan)
             }
         }
     }
@@ -253,8 +265,7 @@ final class EnvironmentViewModel: ObservableObject {
     }
 
     func refreshDynamicStatus() {
-        guard let snapshot, !isScanning, !isRefreshingDynamicStatus, !isRunningHomebrewServiceAction else { return }
-        isRefreshingDynamicStatus = true
+        guard let snapshot, begin(.dynamicStatusRefresh) else { return }
         let scanner = scanner
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let result = scanner.refreshDynamicStatus(in: snapshot)
@@ -268,23 +279,26 @@ final class EnvironmentViewModel: ObservableObject {
                 case let .failure(error):
                     self.dynamicRefreshError = error.localizedDescription
                 }
-                self.isRefreshingDynamicStatus = false
+                self.finish(.dynamicStatusRefresh)
             }
         }
     }
 
     func refreshHomebrewServices() {
         guard let executable = snapshot?.homebrew.executable,
-              snapshot?.homebrew.available == true,
-              !isBusy,
-              !isRefreshingHomebrewServices else { return }
-        isRefreshingHomebrewServices = true
+              snapshot?.homebrew.available == true else { return }
+        guard !isBusy else {
+            shouldRefreshHomebrewServicesWhenIdle = true
+            return
+        }
+        guard begin(.homebrewServiceRefresh) else { return }
+        shouldRefreshHomebrewServicesWhenIdle = false
         let previous = homebrewServiceList
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let state = HomebrewServiceManager().refresh(executable: executable, previous: previous)
             DispatchQueue.main.async {
                 self?.homebrewServiceList = state
-                self?.isRefreshingHomebrewServices = false
+                self?.finish(.homebrewServiceRefresh)
             }
         }
     }
@@ -295,9 +309,8 @@ final class EnvironmentViewModel: ObservableObject {
               snapshot.homebrew.available,
               let currentServices = homebrewServiceList?.services,
               currentServices.contains(where: { $0.formula == service.formula }),
-              !isBusy,
-              !isRefreshingHomebrewServices else { return }
-        homebrewServiceActionFormula = service.formula
+              homebrewServiceList?.isStale == false,
+              begin(.homebrewServiceAction(service.formula)) else { return }
         homebrewServiceActionResult = nil
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = HomebrewServiceManager().perform(
@@ -318,8 +331,30 @@ final class EnvironmentViewModel: ObservableObject {
                 } else if let error = result.dynamicStatusError {
                     self.dynamicRefreshError = error
                 }
-                self.homebrewServiceActionFormula = nil
+                self.finish(.homebrewServiceAction(service.formula))
+                let message = result.message
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                    if self?.homebrewServiceActionResult?.message == message {
+                        self?.homebrewServiceActionResult = nil
+                    }
+                }
             }
+        }
+    }
+
+    private func begin(_ operation: MachineOperationCoordinator.Operation) -> Bool {
+        var coordinator = operationCoordinator
+        guard coordinator.begin(operation) else { return false }
+        operationCoordinator = coordinator
+        return true
+    }
+
+    private func finish(_ operation: MachineOperationCoordinator.Operation) {
+        var coordinator = operationCoordinator
+        coordinator.finish(operation)
+        operationCoordinator = coordinator
+        if !isBusy, shouldRefreshHomebrewServicesWhenIdle {
+            DispatchQueue.main.async { [weak self] in self?.refreshHomebrewServices() }
         }
     }
 }
@@ -441,9 +476,9 @@ struct ContentView: View {
                     }
                 }
                 .accessibilityLabel(
-                    model.isScanning ? "正在扫描" : model.isRefreshingDynamicStatus ? "正在刷新动态状态" : "重新扫描"
+                    model.busyDescription ?? "重新扫描"
                 )
-                .help(model.isScanning ? "正在扫描" : model.isRefreshingDynamicStatus ? "正在刷新动态状态" : "重新扫描")
+                .help(model.busyDescription ?? "重新扫描")
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(model.isBusy)
             }
@@ -487,22 +522,20 @@ struct ContentView: View {
         }) {
             settingsExitConfirmation
         }
-        .alert(item: $pendingHomebrewServiceAction) { request in
+        .alert(
+            pendingHomebrewServiceAction.map { "\($0.action.title) \($0.service.formula)？" } ?? "",
+            isPresented: isConfirmingHomebrewServiceAction,
+            presenting: pendingHomebrewServiceAction
+        ) { request in
+            Button("取消", role: .cancel) {}
+                .keyboardShortcut(.defaultAction)
+            Button("确认\(request.action.title)", role: request.action == .stop ? .destructive : nil) {
+                model.performHomebrewServiceAction(request.action, on: request.service)
+            }
+        } message: { request in
             let command = ([request.executable, "services", request.action.rawValue, request.service.formula])
                 .joined(separator: " ")
-            let confirm: Alert.Button = request.action == .stop
-                ? .destructive(Text("确认停止")) {
-                    model.performHomebrewServiceAction(request.action, on: request.service)
-                }
-                : .default(Text("确认\(request.action.title)")) {
-                    model.performHomebrewServiceAction(request.action, on: request.service)
-                }
-            return Alert(
-                title: Text("\(request.action.title) \(request.service.formula)？"),
-                message: Text("\(command)\n\n\(request.action.persistentEffect)"),
-                primaryButton: .cancel(Text("取消")),
-                secondaryButton: confirm
-            )
+            Text("\(command)\n\n\(request.action.persistentEffect)")
         }
     }
 
@@ -510,6 +543,13 @@ struct ContentView: View {
         AutoRefreshSchedule(
             isEnabled: model.autoRefreshSettings.isEnabled,
             seconds: Int(model.autoRefreshSettings.interval(isActive: usesForegroundRefreshInterval))
+        )
+    }
+
+    private var isConfirmingHomebrewServiceAction: Binding<Bool> {
+        Binding(
+            get: { pendingHomebrewServiceAction != nil },
+            set: { if !$0 { pendingHomebrewServiceAction = nil } }
         )
     }
 
@@ -1683,7 +1723,7 @@ struct ContentView: View {
                 }
             }
             .accessibilityLabel(model.isRefreshingHomebrewServices ? "正在刷新 Homebrew Service" : "刷新 Homebrew Service")
-            .disabled(model.isBusy || model.isRefreshingHomebrewServices || !snapshot.homebrew.available)
+            .disabled(model.isBusy || !snapshot.homebrew.available)
         }
 
         if let result = model.homebrewServiceActionResult {
@@ -1712,6 +1752,9 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, minHeight: 110)
         } else if model.homebrewServiceList == nil && model.isRefreshingHomebrewServices {
             ProgressView("正在读取 Homebrew Service…")
+                .frame(maxWidth: .infinity, minHeight: 110)
+        } else if model.homebrewServiceList == nil {
+            ContentUnavailableView("尚未读取 Homebrew Service", systemImage: "shippingbox")
                 .frame(maxWidth: .infinity, minHeight: 110)
         } else if let list = model.homebrewServiceList, list.services.isEmpty {
             ContentUnavailableView(
@@ -1760,7 +1803,7 @@ struct ContentView: View {
         }
         .padding(14)
         .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
-        .disabled(model.isBusy || model.isRefreshingHomebrewServices)
+        .disabled(model.isBusy || model.homebrewServiceList?.isStale == true)
     }
 
     @ViewBuilder

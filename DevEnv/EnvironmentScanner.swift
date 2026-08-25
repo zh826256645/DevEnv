@@ -362,6 +362,7 @@ struct InstalledApplication: Sendable {
 protocol MachineAccess: Sendable {
     var environment: [String: String] { get }
     var hostName: String { get }
+    var currentUserName: String { get }
     var currentDirectoryPath: String { get }
     var defaultLoginShellPath: String? { get }
     func diskSpace() -> DiskSpace
@@ -373,19 +374,22 @@ protocol MachineAccess: Sendable {
     func executablePath(forPID pid: Int32) throws -> String
     func workingDirectoryPath(forPID pid: Int32) throws -> String
     func application(bundleIdentifier: String) -> InstalledApplication?
-    func command(executable: String, arguments: [String]) -> MachineCommandResult
     func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult
 }
 
 extension MachineAccess {
-    func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult {
-        command(executable: executable, arguments: arguments)
+    func command(executable: String, arguments: [String]) -> MachineCommandResult {
+        command(executable: executable, arguments: arguments, timeout: 2)
     }
 }
 
 struct LiveMachineAccess: MachineAccess {
     var environment: [String: String] { ProcessInfo.processInfo.environment }
     var hostName: String { ProcessInfo.processInfo.hostName }
+    var currentUserName: String {
+        guard let name = getpwuid(geteuid())?.pointee.pw_name else { return NSUserName() }
+        return String(cString: name)
+    }
     var currentDirectoryPath: String { FileManager.default.currentDirectoryPath }
     var defaultLoginShellPath: String? {
         guard let shell = getpwuid(getuid())?.pointee.pw_shell else { return nil }
@@ -450,10 +454,6 @@ struct LiveMachineAccess: MachineAccess {
             version: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             path: url.standardizedFileURL.path
         )
-    }
-
-    func command(executable: String, arguments: [String]) -> MachineCommandResult {
-        command(executable: executable, arguments: arguments, timeout: 2)
     }
 
     func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult {
