@@ -110,7 +110,7 @@ Terminal Application 与 Shell Installation 扩展启用后，V1–V12 快照视
 
 ### 扫描状态
 
-- 应用启动时自动执行一次 Environment Scan，不执行定时或后台轮询。
+- 应用启动时自动执行一次 Environment Scan；Environment Scan 本身不定时轮询，周期更新仅执行后文定义的 Dynamic Status Refresh。
 - 没有可用 Machine Snapshot 时展示应用图标、“正在读取系统信息…”和不确定进度指示器，不伪造百分比或逐项进度。
 - 已有 Machine Snapshot 时立即展示总览并标记“正在更新”；扫描完成后一次性替换整份快照，不混合新旧模块数据。
 - 后台更新失败时保留旧快照，并明确展示当前结果的扫描时间、失败原因和“重新扫描”操作；没有旧快照时展示整页失败状态。
@@ -230,7 +230,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - 卡片复用 Runtime 的折叠与展开交互：同时只展开一张，默认最多展示前 3 个 Database Installation，存在更多安装时才提供“查看全部”。
 - “正在监听”使用绿色；“未发现”和“未监听”是中性灰色，不产生 Scan Notice；发现或监听状态未知以及读取失败使用橙色并产生 Scan Notice。
 - 数据库监听进程仍保留在完整的“本地服务”区域；进程真实路径只用于 Database Installation 发现与匹配，不增加到 Local Service 行。
-- 数据库结果只随应用启动扫描和手动“重新扫描”更新，不增加轮询或独立刷新入口。
+- Database Installation 的发现、版本和来源只随应用启动扫描和手动“重新扫描”更新；Dynamic Status Refresh 只重新计算已知安装的 Database Listening State。
 - MongoDB 与 Redis Database Installation 扩展引入时使用 `schemaVersion = 11`；V1–V10 快照直接忽略并重新扫描，不增加快照迁移。
 
 ## TCP 监听服务扩展
@@ -239,7 +239,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - 扫描保留进程名、PID、监听地址、端口和 IPv4/IPv6 地址族；同一 PID 聚合为一个 Local Service，完全相同的 Listener Binding 去重。Python 与 Node Local Service 还可保存 Local Service Attribution。
 - loopback Listener Binding 不显示额外提示；wildcard 与非 loopback 绑定显示黄底感叹号，悬停时说明“可能可被局域网访问”。该范围只描述监听地址，不表示已验证防火墙或其他设备的实际可达性。
 - Listener Binding 按端口、地址族、地址排序；Local Service 按最低端口、进程名、PID 排序。
-- Machine Snapshot 编码并恢复全部 Local Service；应用启动和手动重新扫描沿用整份快照刷新，不增加轮询或独立刷新入口。
+- Machine Snapshot 编码并恢复全部 Local Service；应用启动和手动重新扫描沿用整份快照刷新并持久化，Dynamic Status Refresh 只更新内存中的 Local Service。
 - 监听命令失败或超时时，本次 Local Service 结果为空并产生一条 Scan Notice；系统、Homebrew Availability、PATH、Runtime Installation 和可用的部分快照不受影响。
 - 总览的“本地服务”区域展示服务数、端口数和全部 Listener Binding，并区分“当前没有可见监听项”和“监听读取失败”；扫描汇总增加本地服务组数，可能可被局域网访问的绑定按服务组加入现有通知入口，扫描时间和重新扫描操作保持不变。
 
@@ -256,6 +256,18 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 完整取舍见 [ADR-0006](../adr/0006-attribute-runtime-services-by-working-directory-and-app-path.md)。
 
 2026-08-23 普通权限真机验收：Debug App 快照记录 11 个 Local Service、24 个 Listener Binding，与紧接着执行的同一固定 `lsof` 命令逐项一致，未发现普通权限造成的重要监听项缺失；未使用管理员重扫。
+
+## Dynamic Status Refresh
+
+- 默认启用定时刷新，前台间隔为 10 秒，后台间隔为 60 秒；切回前台时立即刷新一次。非活动、最小化和隐藏状态均使用后台间隔。
+- 设置入口固定在侧边栏左下角。前台间隔可设为 5–300 秒，后台间隔可设为 30–3600 秒，且后台不得短于前台；关闭开关时保留并置灰间隔值。
+- 设置使用系统偏好跨重启保存。编辑期间只保留草稿，有修改时显示“保存”按钮；保存后立即应用并在启用状态下刷新一次。
+- 离开存在未保存修改的设置页时显示带关闭按钮的确认弹窗，提供“保存并离开”和“放弃修改”；关闭弹窗继续编辑。直接退出应用放弃草稿。
+- Dynamic Status Refresh 复用 Local Service 的固定只读扫描，只更新 Local Service 及已知 Database Installation 的 Database Listening State；不发现安装、不读取版本、不调用其他 Provider、不写入 Machine Snapshot。
+- 刷新失败时保留上一次成功结果并显示横幅，下一次成功后清除。数据库与本地服务页面显示最近一次成功动态刷新时间；总览的“最近扫描”仍表示完整 Environment Scan。
+- 新出现的局域网暴露 Listener Binding 点亮通知红点；相同结果不重复标记未读，消失的结果直接从通知中移除。
+
+完整取舍见 [ADR-0007](../adr/0007-refresh-dynamic-listening-status.md)。
 
 ## 验收场景
 
@@ -323,3 +335,4 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - [ADR-0004：Environment Scan 保持本地观察](../adr/0004-keep-environment-scan-local.md)
 - [ADR-0005：按安装路径映射数据库 TCP 监听状态](../adr/0005-map-database-listeners-by-installation-path.md)
 - [ADR-0006：按工作目录与 App 路径识别运行时服务归属](../adr/0006-attribute-runtime-services-by-working-directory-and-app-path.md)
+- [ADR-0007：定时刷新动态监听状态](../adr/0007-refresh-dynamic-listening-status.md)

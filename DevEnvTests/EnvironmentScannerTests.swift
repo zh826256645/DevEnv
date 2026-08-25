@@ -3,6 +3,45 @@ import XCTest
 @testable import DevEnv
 
 final class EnvironmentScannerTests: XCTestCase {
+    func testAutoRefreshSettingsDefaultsAndNormalizesIntervals() {
+        let defaults = AutoRefreshSettings()
+        XCTAssertTrue(defaults.isEnabled)
+        XCTAssertEqual(defaults.foregroundSeconds, 10)
+        XCTAssertEqual(defaults.backgroundSeconds, 60)
+        XCTAssertEqual(defaults.interval(isActive: true), 10)
+        XCTAssertEqual(defaults.interval(isActive: false), 60)
+
+        let normalized = AutoRefreshSettings(
+            isEnabled: false,
+            foregroundSeconds: 900,
+            backgroundSeconds: 20
+        )
+        XCTAssertFalse(normalized.isEnabled)
+        XCTAssertEqual(normalized.foregroundSeconds, 300)
+        XCTAssertEqual(normalized.backgroundSeconds, 300)
+
+        let upperBackground = AutoRefreshSettings(foregroundSeconds: 5, backgroundSeconds: 5_000)
+        XCTAssertEqual(upperBackground.foregroundSeconds, 5)
+        XCTAssertEqual(upperBackground.backgroundSeconds, 3_600)
+    }
+
+    func testAutoRefreshSettingsPersistAcrossLoads() throws {
+        let suiteName = "AutoRefreshSettingsTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        AutoRefreshSettings(
+            isEnabled: false,
+            foregroundSeconds: 25,
+            backgroundSeconds: 90
+        ).save(to: defaults)
+
+        XCTAssertEqual(
+            AutoRefreshSettings.load(from: defaults),
+            AutoRefreshSettings(isEnabled: false, foregroundSeconds: 25, backgroundSeconds: 90)
+        )
+    }
+
     func testScansTerminalApplicationsAndRegisteredShellsInStableOrder() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: [],
@@ -1496,6 +1535,65 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.localServices.count, 2)
     }
 
+    func testDynamicStatusRefreshUpdatesServicesAndKnownDatabaseListeningStates() throws {
+        let postgres = "/bin/postgres"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            executables: [postgres],
+            commandOutputs: ["\(postgres) --version": "postgres (PostgreSQL) 17.2\n"]
+        )).scan().snapshot
+
+        let result = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn":
+                    "p42\ncpostgres\nf7\ntIPv4\nn127.0.0.1:5432\n",
+            ],
+            processExecutablePaths: [42: postgres]
+        )).refreshDynamicStatus(in: snapshot)
+
+        let refreshed = try XCTUnwrap(try result.get())
+        XCTAssertEqual(refreshed.localServices.map(\.pid), [42])
+        XCTAssertEqual(
+            refreshed.databaseInstallationOverviews.first { $0.id == "postgresql" }?.listeningState,
+            .listening
+        )
+        XCTAssertEqual(
+            refreshed.databaseInstallationOverviews.first { $0.id == "postgresql" }?.installations.first?.listeningState,
+            .listening
+        )
+        XCTAssertEqual(refreshed.databaseInstallationOverviews.first { $0.id == "mysql" }?.discoveryState, .notFound)
+        XCTAssertEqual(snapshot.applying(refreshed).scannedAt, snapshot.scannedAt)
+    }
+
+    func testApplyingDynamicStatusPreservesScanNotices() {
+        let listenerCommand = "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandTimeouts: [listenerCommand]
+        )).scan().snapshot
+        let dynamicStatus = DynamicStatusSnapshot(
+            localServices: [],
+            databaseInstallationOverviews: snapshot.databaseInstallationOverviews
+        )
+
+        XCTAssertEqual(snapshot.applying(dynamicStatus).issues, snapshot.issues)
+        XCTAssertTrue(snapshot.issues.contains(MachineSnapshot.localServiceTimeoutNotice))
+    }
+
+    func testDynamicStatusRefreshReportsListenerTimeout() {
+        let command = "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn"
+        let snapshot = EnvironmentScanner(machine: StubMachine(path: ["/bin"])).scan().snapshot
+        let result = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandTimeouts: [command]
+        )).refreshDynamicStatus(in: snapshot)
+
+        guard case .failure(.timedOut) = result else {
+            return XCTFail("Expected listener timeout")
+        }
+    }
+
     func testAggregatesAndSortsVisibleTCPListeners() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
@@ -1761,17 +1859,44 @@ final class EnvironmentScannerTests: XCTestCase {
         let localBinding = ListenerBinding(address: "127.0.0.1", port: 8000, family: .ipv4)
         let exposedBinding = ListenerBinding(address: "*", port: 8001, family: .ipv4)
 
-        XCTAssertEqual(localServiceNotifications([
+        XCTAssertEqual(localServiceNotices([
             LocalServiceSnapshot(processName: "Server", pid: 10, bindings: [localBinding, exposedBinding]),
             LocalServiceSnapshot(processName: "Server", pid: 20, bindings: [localBinding, exposedBinding]),
             LocalServiceSnapshot(processName: "Server", pid: 40, bindings: [
                 ListenerBinding(address: "*", port: 8002, family: .ipv4),
             ]),
             LocalServiceSnapshot(processName: "Local", pid: 30, bindings: [localBinding]),
-        ]), [
+        ]).map(\.message), [
             "Server：1 个监听项可能可被局域网访问",
             "Server：1 个监听项可能可被局域网访问",
         ])
+    }
+
+    func testExposureNotificationIdentityChangesWithListenerBinding() {
+        let first = LocalServiceSnapshot(processName: "Server", pid: 10, bindings: [
+            ListenerBinding(address: "*", port: 8001, family: .ipv4),
+        ])
+        let second = LocalServiceSnapshot(processName: "Server", pid: 10, bindings: [
+            ListenerBinding(address: "*", port: 8002, family: .ipv4),
+        ])
+
+        XCTAssertNotEqual(
+            localServiceNotices([first]).flatMap(\.identities),
+            localServiceNotices([second]).flatMap(\.identities)
+        )
+    }
+
+    func testExposureNotificationKeepsRemainingListenerIdentity() throws {
+        let firstBinding = ListenerBinding(address: "*", port: 8001, family: .ipv4)
+        let secondBinding = ListenerBinding(address: "*", port: 8002, family: .ipv4)
+        let all = try XCTUnwrap(localServiceNotices([
+            LocalServiceSnapshot(processName: "Server", pid: 10, bindings: [firstBinding, secondBinding]),
+        ]).first)
+        let remaining = try XCTUnwrap(localServiceNotices([
+            LocalServiceSnapshot(processName: "Server", pid: 10, bindings: [firstBinding]),
+        ]).first)
+
+        XCTAssertEqual(remaining.identities, all.identities.intersection(remaining.identities))
     }
 
     func testDescribesCommonLocalServiceProcesses() {

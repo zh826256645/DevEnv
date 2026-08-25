@@ -20,6 +20,10 @@ _Avoid_: Environment
 对当前 Mac 的 Machine Environment 进行一次只读观察，形成可展示的状态结果。
 _Avoid_: Environment Check, Health Check
 
+**Dynamic Status Refresh**:
+在不重新发现安装、不更新版本且不持久化 Machine Snapshot 的前提下，只重新观察 Local Service，并据此更新已知 Database Installation 的 Database Listening State。
+_Avoid_: Environment Scan, Full Scan, Database Discovery
+
 **Scan Notice**:
 Environment Scan 发现的读取失败、不可用安装或状态冲突，表示值得用户查看，但不等同于系统故障或健康诊断。
 _Avoid_: Issue, Error, Health Problem

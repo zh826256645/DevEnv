@@ -28,6 +28,28 @@ struct MachineSnapshot: Codable, Sendable {
     var localServiceScanNotice: String? {
         issues.first { $0 == Self.localServiceTimeoutNotice || $0 == Self.localServiceFailureNotice }
     }
+
+    func applying(_ dynamicStatus: DynamicStatusSnapshot) -> MachineSnapshot {
+        MachineSnapshot(
+            schemaVersion: schemaVersion,
+            scannedAt: scannedAt,
+            system: system,
+            localServices: dynamicStatus.localServices,
+            path: path,
+            runtimes: runtimes,
+            databaseInstallationOverviews: dynamicStatus.databaseInstallationOverviews,
+            homebrew: homebrew,
+            terminalApplications: terminalApplications,
+            shellInstallations: shellInstallations,
+            gitCLI: gitCLI,
+            gitLFS: gitLFS,
+            userGitConfiguration: userGitConfiguration,
+            gitSigningConfiguration: gitSigningConfiguration,
+            gitCredentialHelpers: gitCredentialHelpers,
+            githubAuthenticationConfiguration: githubAuthenticationConfiguration,
+            issues: issues
+        )
+    }
 }
 
 enum ListenerAddressFamily: String, Codable, Sendable {
@@ -301,6 +323,23 @@ struct GitHubAuthenticationConfigurationSnapshot: Codable, Sendable {
 struct ScanResult: Sendable {
     let snapshot: MachineSnapshot
     let canPersist: Bool
+}
+
+struct DynamicStatusSnapshot: Sendable {
+    let localServices: [LocalServiceSnapshot]
+    let databaseInstallationOverviews: [DatabaseInstallationOverview]
+}
+
+enum DynamicStatusRefreshError: LocalizedError, Sendable {
+    case timedOut
+    case failed
+
+    var errorDescription: String? {
+        switch self {
+        case .timedOut: "本地服务读取超时"
+        case .failed: "本地服务读取失败"
+        }
+    }
 }
 
 struct MachineCommandResult: Sendable {
@@ -652,6 +691,83 @@ struct EnvironmentScanner: Sendable {
             snapshot: snapshot,
             canPersist: system.macOSVersion != nil && system.architecture != nil
         )
+    }
+
+    func refreshDynamicStatus(
+        in snapshot: MachineSnapshot
+    ) -> Result<DynamicStatusSnapshot, DynamicStatusRefreshError> {
+        var issues: [String] = []
+        let localServices = scanLocalServices(issues: &issues)
+        guard localServices.complete else {
+            return .failure(issues.contains(MachineSnapshot.localServiceTimeoutNotice) ? .timedOut : .failed)
+        }
+        return .success(DynamicStatusSnapshot(
+            localServices: localServices.services,
+            databaseInstallationOverviews: refreshDatabaseListeningStates(
+                snapshot.databaseInstallationOverviews,
+                localServices: localServices
+            )
+        ))
+    }
+
+    private func refreshDatabaseListeningStates(
+        _ overviews: [DatabaseInstallationOverview],
+        localServices: LocalServiceScan
+    ) -> [DatabaseInstallationOverview] {
+        let listeningPaths = Set(localServices.executablePaths.values.map {
+            standardizedPath(machine.resolvingSymlinksInPath($0))
+        })
+        let failedProcessNames = Set(localServices.services
+            .filter { localServices.executablePathFailures.contains($0.pid) }
+            .map { $0.processName.lowercased() })
+        let processNamesByDatabase = [
+            "postgresql": Set(["postgres"]),
+            "mysql": Set(["mysqld"]),
+            "mariadb": Set(["mariadbd", "mysqld"]),
+            "mongodb": Set(["mongod", "mongos"]),
+            "redis": Set(["redis-server"]),
+        ]
+
+        return overviews.map { overview in
+            guard !overview.installations.isEmpty else { return overview }
+            let hasRelevantPathFailure = !failedProcessNames.isDisjoint(
+                with: processNamesByDatabase[overview.id, default: []]
+            )
+            let installations = overview.installations.map { installation in
+                let listeningState: DatabaseListeningState = if listeningPaths.contains(installation.id) {
+                    .listening
+                } else if hasRelevantPathFailure {
+                    .unknown
+                } else {
+                    .notListening
+                }
+                return DatabaseInstallation(
+                    id: installation.id,
+                    executable: installation.executable,
+                    actualExecutable: installation.actualExecutable,
+                    version: installation.version,
+                    error: installation.error,
+                    sources: installation.sources,
+                    listeningState: listeningState
+                )
+            }
+            let listeningState: DatabaseListeningState = if installations.contains(where: {
+                $0.listeningState == .listening
+            }) {
+                .listening
+            } else if installations.contains(where: { $0.listeningState == .unknown }) {
+                .unknown
+            } else {
+                .notListening
+            }
+            return DatabaseInstallationOverview(
+                id: overview.id,
+                name: overview.name,
+                installations: installations,
+                discoveryState: overview.discoveryState,
+                listeningState: listeningState
+            )
+        }
     }
 
     private func scanTerminalApplications() -> [TerminalApplicationSnapshot] {
