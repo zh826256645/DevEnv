@@ -100,6 +100,14 @@ _Avoid_: Version Conflict, PATH Error
 Homebrew 在当前 Mac 上是否可调用，以及可识别的安装位置。
 _Avoid_: Homebrew Environment
 
+**Homebrew Service**:
+当前 Homebrew 中声明了后台服务、可由当前 App 运行用户管理的已安装 Formula；它可以处于已启动、未启动或异常状态，与当前具有 TCP Listener Binding 的 Local Service 不等同。
+_Avoid_: Local Service, Homebrew Process, Background Process
+
+**Homebrew-managed Database Installation**:
+能够以确切 Formula 映射到 Homebrew Service 的 Database Installation；其 Homebrew Service 状态与 Database Listening State 是两个独立事实。
+_Avoid_: Running Database, Managed Database, Database Service
+
 **Git Tooling State**:
 当前 App 运行用户在该 Mac 上生效的 Git CLI、User Git Configuration 及配套工具状态，不包含任何具体仓库的分支、远端或工作区状态。
 _Avoid_: Git Environment, Git Health, Repository State

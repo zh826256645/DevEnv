@@ -207,7 +207,7 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 
 ## Database Installation 扩展
 
-状态：PostgreSQL、MySQL、MariaDB、MongoDB 与 Redis 已完整实现。只读展示 Database Installation 及其 TCP 监听状态，不连接或查询数据库。
+状态：PostgreSQL、MySQL、MariaDB、MongoDB 与 Redis 已完整实现。Environment Scan 只读发现 Database Installation 及其 TCP 监听状态，不连接或查询数据库；用户可另行管理精确匹配的 Homebrew Service。
 
 ### 发现与匹配
 
@@ -232,6 +232,14 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - 数据库监听进程仍保留在完整的“本地服务”区域；进程真实路径只用于 Database Installation 发现与匹配，不增加到 Local Service 行。
 - Database Installation 的发现、版本和来源只随应用启动扫描和手动“重新扫描”更新；Dynamic Status Refresh 只重新计算已知安装的 Database Listening State。
 - MongoDB 与 Redis Database Installation 扩展引入时使用 `schemaVersion = 11`；V1–V10 快照直接忽略并重新扫描，不增加快照迁移。
+
+### Homebrew Service 管理
+
+- 只为能够以扫描时记录的确切 Formula 映射到当前 Homebrew Service 列表的 Homebrew-managed Database Installation 提供启动、停止与重启；不从路径或版本反推 Formula，不管理 PATH-only、Local Service-only 或其他非 Homebrew 安装。
+- 操作位于具体 Database Installation 行。没有对应 Homebrew Service 时标注“未提供 Homebrew Service”，不显示操作按钮；Homebrew Service 列表过期时保留展示并禁用操作。
+- Database Installation 行分别展示 Homebrew Service 状态与 Database Listening State；按钮可用性只由 Homebrew Service 状态决定，不以 TCP 监听状态推断服务状态。
+- 操作复用 Homebrew Service 管理的命令、用户确认、登录自启动影响说明和全局 Machine Operation 互斥。停止使用危险样式。
+- 操作完成后重新读取 Homebrew Service 和动态监听状态。失败、超时或最终状态不一致时不自动重试或回滚，分别显示“失败”或“结果未知”以及重新读取后的状态。
 
 ## TCP 监听服务扩展
 
@@ -305,6 +313,11 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - 只由 Local Service 发现的 `mysqld` 无法通过版本输出区分 MySQL 与 MariaDB：不创建 Database Installation，保留 Local Service 并产生 Scan Notice。
 - `mariadbd` 版本读取失败：保留已确定为 MariaDB 的 Database Installation 和精确监听状态，并产生 Scan Notice。
 - 发现 Homebrew 数据库但没有匹配 Local Service：显示“未监听”，不产生 Scan Notice。
+- 同时安装 `postgresql` 与 `postgresql@16`：每个 Database Installation 行只控制其扫描时记录的确切 Formula，不提供类别级操作。
+- Homebrew-managed Database Installation 对应已停止 Homebrew Service：同时显示“Homebrew：已停止”和“监听：未监听”，只提供启动。
+- Homebrew Service 已启动但对应 Database Installation 未监听：保留两个独立状态，不把“未监听”误判为可启动。
+- Homebrew Database Installation 没有出现在 Homebrew Service 列表：标注“未提供 Homebrew Service”，不显示启动、停止或重启。
+- 数据库 Homebrew Service 操作失败或超时：不自动重试，刷新后显示失败或结果未知以及当前 Homebrew Service 与 Database Listening State。
 - Homebrew Database Provider 失败且没有其他发现结果：显示“发现状态未知”并产生 Scan Notice，不显示“未安装”。
 - Local Service 扫描失败或已识别数据库进程的真实路径不可读：相关 Database Listening State 显示“监听状态未知”。
 - Python 服务工作目录位于带 PEP 621 名称的项目内：卡片显示项目名、Python 项目服务和缩写项目根路径。

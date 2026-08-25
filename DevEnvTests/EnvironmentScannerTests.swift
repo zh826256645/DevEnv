@@ -1164,6 +1164,7 @@ final class EnvironmentScannerTests: XCTestCase {
 
         let mongodb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mongodb" })
         XCTAssertEqual(mongodb.installations.map(\.id), [mongodb8, mongodb7])
+        XCTAssertEqual(mongodb.installations.map(\.homebrewFormula), ["mongodb-community", "mongodb-community@7.0"])
         XCTAssertEqual(mongodb.installations.map(\.listeningState), [.listening, .notListening])
         XCTAssertEqual(mongodb.installations[0].sources, [.path, .homebrew, .localService])
         XCTAssertEqual(mongodb.listeningState, .listening)
@@ -1171,6 +1172,7 @@ final class EnvironmentScannerTests: XCTestCase {
 
         let redis = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "redis" })
         XCTAssertEqual(redis.installations.map(\.id), [redis8, redis7])
+        XCTAssertEqual(redis.installations.map(\.homebrewFormula), ["redis", "redis@7.2"])
         XCTAssertEqual(redis.installations.map(\.listeningState), [.notListening, .listening])
         XCTAssertEqual(redis.installations[1].sources, [.homebrew, .localService])
         XCTAssertEqual(redis.listeningState, .listening)
@@ -1271,6 +1273,7 @@ final class EnvironmentScannerTests: XCTestCase {
 
         let mysql = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mysql" })
         XCTAssertEqual(mysql.installations.map(\.id), [mysql84, mysql80])
+        XCTAssertEqual(mysql.installations.map(\.homebrewFormula), ["mysql", "mysql@8.0"])
         XCTAssertEqual(mysql.installations.map(\.version), ["8.4.3", "8.0.40"])
         XCTAssertEqual(mysql.installations.map(\.listeningState), [.listening, .notListening])
         XCTAssertEqual(mysql.installations[0].executable, "/usr/local/bin/mysqld")
@@ -1279,6 +1282,7 @@ final class EnvironmentScannerTests: XCTestCase {
 
         let mariadb = try XCTUnwrap(snapshot.databaseInstallationOverviews.first { $0.id == "mariadb" })
         XCTAssertEqual(mariadb.installations.map(\.id), [mariadb114, mariadb1011])
+        XCTAssertEqual(mariadb.installations.map(\.homebrewFormula), ["mariadb", "mariadb@10.11"])
         XCTAssertEqual(mariadb.installations.map(\.listeningState), [.notListening, .listening])
         XCTAssertEqual(mariadb.installations[1].sources, [.homebrew, .localService])
         XCTAssertEqual(snapshot.localServices.map(\.processName), ["mysqld", "mariadbd"])
@@ -1400,6 +1404,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(postgres.discoveryState, .discovered)
         XCTAssertEqual(postgres.listeningState, .listening)
         XCTAssertEqual(postgres.installations.map(\.id), [postgres16, postgres15])
+        XCTAssertEqual(postgres.installations.map(\.homebrewFormula), ["postgresql@16", "postgresql@15"])
         XCTAssertEqual(postgres.installations.map(\.version), ["16.3", "15.8"])
         XCTAssertEqual(postgres.installations.map(\.listeningState), [.listening, .notListening])
         XCTAssertEqual(postgres.installations[0].executable, "/usr/local/bin/postgres")
@@ -1426,6 +1431,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(discovered.discoveryState, .discovered)
         XCTAssertEqual(discovered.listeningState, .unknown)
         XCTAssertEqual(discovered.installations.first?.listeningState, .notListening)
+        XCTAssertNil(discovered.installations.first?.homebrewFormula)
         XCTAssertTrue(withPathResult.issues.contains("PostgreSQL Database Provider：Homebrew 命令超时"))
 
         let withoutResults = EnvironmentScanner(machine: StubMachine(

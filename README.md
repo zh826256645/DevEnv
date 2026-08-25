@@ -650,6 +650,8 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 * 展示当前用户可管理的 Homebrew Service
 * 启动、停止与重启 Homebrew Service
+* 在具体 Homebrew-managed Database Installation 上管理精确匹配的 Homebrew Service
+* 分别展示 Homebrew Service 状态与数据库 TCP 监听状态
 * 修改前展示具体命令与持久影响，并由用户确认
 * 修改后重新读取 Homebrew Service 与 Local Service 状态
 

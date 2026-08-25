@@ -222,6 +222,7 @@ struct DatabaseInstallation: Codable, Identifiable, Sendable {
     let version: String?
     let error: String?
     let sources: [DatabaseInstallationSource]
+    let homebrewFormula: String?
     let listeningState: DatabaseListeningState
 }
 
@@ -540,6 +541,7 @@ struct EnvironmentScanner: Sendable {
         let actualExecutable: String
         var version: String?
         var sources: [DatabaseInstallationSource]
+        var homebrewFormula: String?
         var error: String?
     }
 
@@ -762,6 +764,7 @@ struct EnvironmentScanner: Sendable {
                     version: installation.version,
                     error: installation.error,
                     sources: installation.sources,
+                    homebrewFormula: installation.homebrewFormula,
                     listeningState: listeningState
                 )
             }
@@ -1300,6 +1303,7 @@ struct EnvironmentScanner: Sendable {
             actualExecutable: String,
             version: String?,
             source: DatabaseInstallationSource,
+            homebrewFormula: String? = nil,
             error: String?
         ) {
             mergeDatabaseCandidate(DatabaseCandidate(
@@ -1307,6 +1311,7 @@ struct EnvironmentScanner: Sendable {
                 actualExecutable: actualExecutable,
                 version: version,
                 sources: [source],
+                homebrewFormula: homebrewFormula,
                 error: error
             ), into: &candidates)
         }
@@ -1349,6 +1354,7 @@ struct EnvironmentScanner: Sendable {
                         actualExecutable: actual,
                         version: version,
                         source: .homebrew,
+                        homebrewFormula: formula.formula,
                         error: error
                     )
                 }
@@ -1414,6 +1420,7 @@ struct EnvironmentScanner: Sendable {
                 version: candidate.version,
                 error: candidate.error,
                 sources: candidate.sources,
+                homebrewFormula: candidate.homebrewFormula,
                 listeningState: listeningState
             )
         }
@@ -1459,6 +1466,7 @@ struct EnvironmentScanner: Sendable {
         candidates[index].error = candidates[index].version == nil
             ? candidates[index].error ?? candidate.error
             : nil
+        candidates[index].homebrewFormula = candidates[index].homebrewFormula ?? candidate.homebrewFormula
         let sources = candidates[index].sources + candidate.sources
         candidates[index].sources = DatabaseInstallationSource.allCases.filter(Set(sources).contains)
     }
@@ -1478,6 +1486,7 @@ struct EnvironmentScanner: Sendable {
                 actualExecutable: String,
                 version: String?,
                 source: DatabaseInstallationSource,
+                homebrewFormula: String? = nil,
                 notice: String?
             ) {
                 mergeDatabaseCandidate(DatabaseCandidate(
@@ -1485,6 +1494,7 @@ struct EnvironmentScanner: Sendable {
                     actualExecutable: actualExecutable,
                     version: version,
                     sources: [source],
+                    homebrewFormula: homebrewFormula,
                     error: notice
                 ), into: &candidates)
             }
@@ -1534,6 +1544,7 @@ struct EnvironmentScanner: Sendable {
                             actualExecutable: actual,
                             version: version,
                             source: .homebrew,
+                            homebrewFormula: formula.formula,
                             notice: notice
                         )
                     }
@@ -1603,6 +1614,7 @@ struct EnvironmentScanner: Sendable {
                     version: candidate.version,
                     error: candidate.error,
                     sources: candidate.sources,
+                    homebrewFormula: candidate.homebrewFormula,
                     listeningState: listeningState
                 )
             }
@@ -1664,6 +1676,7 @@ struct EnvironmentScanner: Sendable {
             actualExecutable: String,
             version: String?,
             source: DatabaseInstallationSource,
+            homebrewFormula: String? = nil,
             error: String?
         ) {
             var databaseCandidates = candidates[database, default: []]
@@ -1672,6 +1685,7 @@ struct EnvironmentScanner: Sendable {
                 actualExecutable: actualExecutable,
                 version: version,
                 sources: [source],
+                homebrewFormula: homebrewFormula,
                 error: error
             ), into: &databaseCandidates)
             candidates[database] = databaseCandidates
@@ -1732,6 +1746,7 @@ struct EnvironmentScanner: Sendable {
                             actualExecutable: actual,
                             version: version,
                             source: .homebrew,
+                            homebrewFormula: formula.formula,
                             error: error
                         )
                     }
@@ -1823,6 +1838,7 @@ struct EnvironmentScanner: Sendable {
                     version: candidate.version,
                     error: candidate.error,
                     sources: candidate.sources,
+                    homebrewFormula: candidate.homebrewFormula,
                     listeningState: listeningState
                 )
             }

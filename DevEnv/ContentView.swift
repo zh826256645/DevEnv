@@ -1323,7 +1323,9 @@ struct ContentView: View {
 
     @ViewBuilder
     private func databasePage(_ overviews: [DatabaseInstallationOverview]) -> some View {
+        homebrewServiceFeedback
         databaseMetricsSection(overviews)
+            .onAppear(perform: model.refreshHomebrewServices)
         databaseInstallationsSection(overviews)
     }
 
@@ -1573,50 +1575,100 @@ struct ContentView: View {
         let tint: Color = installation.error == nil
             ? listening.color
             : .orange
+        let homebrewExecutable = model.snapshot?.homebrew.available == true
+            ? model.snapshot?.homebrew.executable
+            : nil
+        let service = homebrewExecutable == nil ? nil : installation.homebrewFormula.flatMap { formula in
+            model.homebrewServiceList?.services.first { $0.formula == formula }
+        }
 
-        return HStack(alignment: .center, spacing: 14) {
-            Image(systemName: installation.error == nil
-                ? listening.symbol
-                : "exclamationmark.circle.fill")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 24)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 14) {
+                Image(systemName: installation.error == nil
+                    ? listening.symbol
+                    : "exclamationmark.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 24)
 
-            Text(installation.version ?? "读取失败")
-                .font(.title3.weight(.semibold))
-                .monospacedDigit()
-                .textSelection(.enabled)
-                .frame(width: 90, alignment: .leading)
+                Text(installation.version ?? "读取失败")
+                    .font(.title3.weight(.semibold))
+                    .monospacedDigit()
+                    .textSelection(.enabled)
+                    .frame(width: 90, alignment: .leading)
 
-            HStack(spacing: 5) {
-                ForEach(installation.sources, id: \.self) { source in
-                    Text(source.displayName)
+                HStack(spacing: 5) {
+                    ForEach(installation.sources, id: \.self) { source in
+                        Text(source.displayName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                    }
+                    Text("监听：\(listening.title)")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(tint)
                         .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 5)
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
                 }
-                Text(listening.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(tint)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
-            }
 
-            VStack(alignment: .leading, spacing: 5) {
-                copyablePath(installation.executable)
-                if let actual = installation.actualExecutable {
-                    copyablePath(actual, prefix: "实际路径")
+                VStack(alignment: .leading, spacing: 5) {
+                    copyablePath(installation.executable)
+                    if let actual = installation.actualExecutable {
+                        copyablePath(actual, prefix: "实际路径")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if installation.error != nil {
+                    helpIcon("该 Database Installation 已被发现，但版本读取失败或可执行文件不可用；可独立确定的 TCP 监听状态不受影响。")
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
 
-            if installation.error != nil {
-                helpIcon("该 Database Installation 已被发现，但版本读取失败或可执行文件不可用；可独立确定的 TCP 监听状态不受影响。")
+            if let formula = installation.homebrewFormula {
+                Divider()
+                HStack(spacing: 10) {
+                    if let service {
+                        Label(
+                            "\(formula) · \(homebrewServiceDetail(service))",
+                            systemImage: "shippingbox.fill"
+                        )
+                        .foregroundStyle(homebrewServiceColor(service.status))
+
+                        Spacer()
+
+                        if model.homebrewServiceActionFormula == service.formula {
+                            ProgressView("正在处理")
+                                .controlSize(.small)
+                                .accessibilityLabel("正在为 \(service.formula) 执行 Homebrew Service 操作")
+                        } else {
+                            ForEach(service.allowedActions, id: \.self) { action in
+                                homebrewServiceActionButton(
+                                    action,
+                                    service: service,
+                                    executable: homebrewExecutable ?? ""
+                                )
+                            }
+                            .disabled(model.isBusy || model.homebrewServiceList?.isStale == true)
+                        }
+                    } else {
+                        Label(
+                            homebrewExecutable == nil || model.homebrewServiceList == nil
+                                ? "\(formula) · Homebrew Service 状态未知"
+                                : "\(formula) · 未提供 Homebrew Service",
+                            systemImage: "shippingbox"
+                        )
+                        .foregroundStyle(
+                            homebrewExecutable == nil || model.homebrewServiceList == nil ? .orange : .secondary
+                        )
+                    }
+                }
+                .font(.caption.weight(.semibold))
+                .padding(.leading, 38)
             }
         }
         .padding(.horizontal, 14)
@@ -1817,26 +1869,7 @@ struct ContentView: View {
         .accessibilityLabel(model.isRefreshingHomebrewServices ? "正在刷新 Homebrew Service" : "刷新 Homebrew Service")
         .disabled(model.isBusy || !snapshot.homebrew.available)
 
-        if let result = model.homebrewServiceActionResult {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: result.kind == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(result.message).fontWeight(.semibold)
-                    if let output = result.output, result.kind != .success {
-                        Text(output).font(.caption.monospaced()).textSelection(.enabled)
-                    }
-                }
-            }
-            .foregroundStyle(result.kind == .success ? Color.green : Color.orange)
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background((result.kind == .success ? Color.green : Color.orange).opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
-        }
-
-        if let list = model.homebrewServiceList, let error = list.error {
-            Label(list.isStale ? "\(error)；继续显示上次成功结果" : error, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-        }
+        homebrewServiceFeedback
 
         if !snapshot.homebrew.available || snapshot.homebrew.executable == nil {
             ContentUnavailableView("Homebrew 不可用", systemImage: "shippingbox")
@@ -1859,6 +1892,30 @@ struct ContentView: View {
                     homebrewServiceRow(service, executable: snapshot.homebrew.executable ?? "")
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var homebrewServiceFeedback: some View {
+        if let result = model.homebrewServiceActionResult {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: result.kind == .success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(result.message).fontWeight(.semibold)
+                    if let output = result.output, result.kind != .success {
+                        Text(output).font(.caption.monospaced()).textSelection(.enabled)
+                    }
+                }
+            }
+            .foregroundStyle(result.kind == .success ? Color.green : Color.orange)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background((result.kind == .success ? Color.green : Color.orange).opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+        }
+
+        if let list = model.homebrewServiceList, let error = list.error {
+            Label(list.isStale ? "\(error)；继续显示上次成功结果" : error, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
         }
     }
 
