@@ -433,6 +433,11 @@ struct ContentView: View {
         }
     }
 
+    private enum ServiceTab: Hashable {
+        case local
+        case homebrew
+    }
+
     private struct AutoRefreshSchedule: Hashable {
         let isEnabled: Bool
         let seconds: Int
@@ -466,6 +471,7 @@ struct ContentView: View {
     @State private var usesForegroundRefreshInterval = NSApplication.shared.isActive
     @State private var environmentCardUpperContentHeight: CGFloat = 0
     @State private var pendingHomebrewServiceAction: PendingHomebrewServiceAction?
+    @State private var selectedServiceTab = ServiceTab.local
     @FocusState private var focusedCopyPath: String?
 
     var body: some View {
@@ -1710,50 +1716,106 @@ struct ContentView: View {
                 )
             }
 
-            homebrewServicesSection(snapshot)
+            serviceTabSwitcher(
+                localCount: groups.count,
+                homebrewCount: model.homebrewServiceList?.services.count ?? 0
+            )
 
-            Text("Local Service 列表")
-                .font(.title3.bold())
-
-            if groups.isEmpty {
-                if let notice = snapshot.localServiceScanNotice {
-                    ContentUnavailableView {
-                        Label("监听读取失败", systemImage: "exclamationmark.triangle")
-                    } description: {
-                        Text("\(notice)。请通过右上角通知查看详情或重新扫描。")
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 110)
-                } else {
-                    ContentUnavailableView("当前没有可见的 TCP 监听服务", systemImage: "network.slash")
+            switch selectedServiceTab {
+            case .local:
+                if groups.isEmpty {
+                    if let notice = snapshot.localServiceScanNotice {
+                        ContentUnavailableView {
+                            Label("监听读取失败", systemImage: "exclamationmark.triangle")
+                        } description: {
+                            Text("\(notice)。请通过右上角通知查看详情或重新扫描。")
+                        }
                         .frame(maxWidth: .infinity, minHeight: 110)
-                }
-            } else {
-                VStack(spacing: 10) {
-                    ForEach(groups) { group in
-                        localServiceRow(group)
+                    } else {
+                        ContentUnavailableView("当前没有可见的 TCP 监听服务", systemImage: "network.slash")
+                            .frame(maxWidth: .infinity, minHeight: 110)
+                    }
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(groups) { group in
+                            localServiceRow(group)
+                        }
                     }
                 }
+            case .homebrew:
+                homebrewServicesSection(snapshot)
             }
         }
         .onAppear(perform: model.refreshHomebrewServices)
     }
 
+    private func serviceTabSwitcher(localCount: Int, homebrewCount: Int) -> some View {
+        HStack(spacing: 4) {
+            serviceTabButton(
+                .local,
+                title: "本地服务",
+                systemImage: "server.rack",
+                count: localCount
+            )
+            serviceTabButton(
+                .homebrew,
+                title: "Homebrew 服务",
+                systemImage: "shippingbox",
+                count: homebrewCount
+            )
+        }
+        .padding(4)
+        .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.primary.opacity(0.10))
+        }
+    }
+
+    private func serviceTabButton(
+        _ tab: ServiceTab,
+        title: String,
+        systemImage: String,
+        count: Int
+    ) -> some View {
+        let isSelected = selectedServiceTab == tab
+        return Button {
+            selectedServiceTab = tab
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                Text(title)
+                    .fontWeight(.semibold)
+                Text(count.formatted())
+                    .font(.caption.bold())
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(isSelected ? Color.white : Color.secondary.opacity(0.12), in: Capsule())
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(isSelected ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title)，\(count) 项")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
     @ViewBuilder
     private func homebrewServicesSection(_ snapshot: MachineSnapshot) -> some View {
-        HStack {
-            Text("Homebrew Service 列表")
-                .font(.title3.bold())
-            Spacer()
-            Button(action: model.refreshHomebrewServices) {
-                if model.isRefreshingHomebrewServices {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Label("刷新", systemImage: "arrow.clockwise")
-                }
+        Button(action: model.refreshHomebrewServices) {
+            if model.isRefreshingHomebrewServices {
+                ProgressView().controlSize(.small)
+            } else {
+                Label("刷新", systemImage: "arrow.clockwise")
             }
-            .accessibilityLabel(model.isRefreshingHomebrewServices ? "正在刷新 Homebrew Service" : "刷新 Homebrew Service")
-            .disabled(model.isBusy || !snapshot.homebrew.available)
         }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityLabel(model.isRefreshingHomebrewServices ? "正在刷新 Homebrew Service" : "刷新 Homebrew Service")
+        .disabled(model.isBusy || !snapshot.homebrew.available)
 
         if let result = model.homebrewServiceActionResult {
             HStack(alignment: .top, spacing: 10) {
