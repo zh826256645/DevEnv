@@ -405,6 +405,7 @@ struct ContentView: View {
 
     private enum Page: CaseIterable, Hashable {
         case overview
+        case projects
         case runtimes
         case databases
         case localServices
@@ -415,6 +416,7 @@ struct ContentView: View {
         var title: String {
             switch self {
             case .overview: "总览"
+            case .projects: "项目"
             case .runtimes: "开发语言"
             case .databases: "数据库"
             case .localServices: "本地服务"
@@ -425,6 +427,7 @@ struct ContentView: View {
         var systemImage: String {
             switch self {
             case .overview: "square.grid.2x2"
+            case .projects: "folder"
             case .runtimes: "terminal"
             case .databases: "cylinder"
             case .localServices: "network"
@@ -454,6 +457,7 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = EnvironmentViewModel()
+    @StateObject private var projectsModel = ProjectsViewModel()
     @State private var selectedPage: Page? = .overview
     @State private var copiedPath: String?
     @State private var hoveredPath: String?
@@ -472,18 +476,12 @@ struct ContentView: View {
     @State private var environmentCardUpperContentHeight: CGFloat = 0
     @State private var pendingHomebrewServiceAction: PendingHomebrewServiceAction?
     @State private var selectedServiceTab = ServiceTab.local
+    @State private var pendingProjectRemoval: ProjectRecord?
+    @State private var isConfirmingProjectStoreReset = false
     @FocusState private var focusedCopyPath: String?
 
     var body: some View {
-        Group {
-            if let snapshot = model.snapshot {
-                navigation(snapshot)
-            } else if model.isScanning {
-                loadingView
-            } else {
-                unavailableView
-            }
-        }
+        navigation(model.snapshot)
         .frame(minWidth: 720, minHeight: 560)
         .toolbar {
             ToolbarItemGroup {
@@ -510,19 +508,27 @@ struct ContentView: View {
                         .onAppear(perform: markCurrentNoticesRead)
                 }
 
-                Button(action: model.scan) {
-                    if model.isBusy {
+                Button {
+                    if selectedPage == .projects {
+                        projectsModel.refreshAvailability()
+                    } else {
+                        model.scan()
+                    }
+                } label: {
+                    if selectedPage == .projects ? projectsModel.isScanning : model.isBusy {
                         ProgressView().controlSize(.small)
                     } else {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
                 .accessibilityLabel(
-                    model.busyDescription ?? "重新扫描"
+                    selectedPage == .projects
+                        ? (projectsModel.isScanning ? "正在扫描项目" : "刷新项目状态")
+                        : (model.busyDescription ?? "重新扫描")
                 )
-                .help(model.busyDescription ?? "重新扫描")
+                .help(selectedPage == .projects ? "刷新项目状态" : (model.busyDescription ?? "重新扫描"))
                 .keyboardShortcut("r", modifiers: .command)
-                .disabled(model.isBusy)
+                .disabled(selectedPage == .projects ? projectsModel.isScanning : model.isBusy)
             }
         }
         .task(id: autoRefreshSchedule) {
@@ -538,6 +544,9 @@ struct ContentView: View {
             }
         }
         .onAppear(perform: updateRefreshActivity)
+        .onDisappear {
+            if selectedPage == .projects { projectsModel.leaveProjects() }
+        }
         .onChange(of: scenePhase) { _, _ in
             updateRefreshActivity()
         }
@@ -565,7 +574,7 @@ struct ContentView: View {
             settingsExitConfirmation
         }
         .alert(
-            pendingHomebrewServiceAction.map { "\($0.action.title) \($0.service.formula)？" } ?? "",
+            homebrewServiceConfirmationTitle,
             isPresented: isConfirmingHomebrewServiceAction,
             presenting: pendingHomebrewServiceAction
         ) { request in
@@ -578,6 +587,24 @@ struct ContentView: View {
             let command = ([request.executable, "services", request.action.rawValue, request.service.formula])
                 .joined(separator: " ")
             Text("\(command)\n\n\(request.action.persistentEffect)")
+        }
+        .alert(
+            projectRemovalConfirmationTitle,
+            isPresented: isConfirmingProjectRemoval,
+            presenting: pendingProjectRemoval
+        ) { project in
+            Button("取消", role: .cancel) {}
+            Button("仅移除记录", role: .destructive) {
+                projectsModel.remove(project)
+            }
+        } message: { _ in
+            Text("只会从 DevEnv 删除这条记录，并加入 Ignored Projects。不会删除、移动或修改原项目文件。")
+        }
+        .alert("重新创建项目记录存储？", isPresented: $isConfirmingProjectStoreReset) {
+            Button("取消", role: .cancel) {}
+            Button("保留备份并重新创建", role: .destructive, action: projectsModel.recreateStore)
+        } message: {
+            Text("当前存储损坏或版本不兼容，已暂停修改。原文件会保留为备份，然后创建空的 project-records.json。")
         }
     }
 
@@ -595,6 +622,22 @@ struct ContentView: View {
         )
     }
 
+    private var homebrewServiceConfirmationTitle: String {
+        guard let pendingHomebrewServiceAction else { return "" }
+        return "\(pendingHomebrewServiceAction.action.title) \(pendingHomebrewServiceAction.service.formula)？"
+    }
+
+    private var projectRemovalConfirmationTitle: String {
+        pendingProjectRemoval.map { "移除 \($0.title)？" } ?? ""
+    }
+
+    private var isConfirmingProjectRemoval: Binding<Bool> {
+        Binding(
+            get: { pendingProjectRemoval != nil },
+            set: { if !$0 { pendingProjectRemoval = nil } }
+        )
+    }
+
     private func updateRefreshActivity() {
         let wasUsingForegroundInterval = usesForegroundRefreshInterval
         usesForegroundRefreshInterval = scenePhase == .active
@@ -608,7 +651,7 @@ struct ContentView: View {
         }
     }
 
-    private func navigation(_ snapshot: MachineSnapshot) -> some View {
+    private func navigation(_ snapshot: MachineSnapshot?) -> some View {
         NavigationSplitView {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
@@ -663,13 +706,24 @@ struct ContentView: View {
         }
     }
 
-    private func page(_ snapshot: MachineSnapshot) -> some View {
-        let page = selectedPage ?? .overview
+    @ViewBuilder
+    private func page(_ snapshot: MachineSnapshot?) -> some View {
+        if selectedPage == .projects {
+            populatedPage(.projects, snapshot: snapshot)
+        } else if let snapshot {
+            populatedPage(selectedPage ?? .overview, snapshot: snapshot)
+        } else if model.isScanning {
+            loadingView
+        } else {
+            unavailableView
+        }
+    }
 
-        return ScrollView {
+    private func populatedPage(_ page: Page, snapshot: MachineSnapshot?) -> some View {
+        ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header(page, snapshot: snapshot)
-                if let scanError = model.scanError {
+                if let scanError = model.scanError, let snapshot, page != .projects {
                     scanErrorBanner(scanError, snapshot: snapshot)
                 }
                 if let dynamicRefreshError = model.dynamicRefreshError,
@@ -679,21 +733,25 @@ struct ContentView: View {
 
                 switch page {
                 case .overview:
-                    overviewMetricsSection(snapshot)
-                    topOverviewSection(snapshot)
-                    environmentSection(snapshot)
+                    if let snapshot {
+                        overviewMetricsSection(snapshot)
+                        topOverviewSection(snapshot)
+                        environmentSection(snapshot)
+                    }
+                case .projects:
+                    projectsPage
                 case .runtimes:
-                    runtimePage(snapshot.runtimes)
+                    if let snapshot { runtimePage(snapshot.runtimes) }
                 case .databases:
-                    databasePage(snapshot.databaseInstallationOverviews)
+                    if let snapshot { databasePage(snapshot.databaseInstallationOverviews) }
                 case .localServices:
-                    localServicesSection(snapshot)
+                    if let snapshot { localServicesSection(snapshot) }
                 case .settings:
                     settingsPage
                 }
             }
             .frame(
-                maxWidth: page == .overview || page == .runtimes || page == .databases || page == .localServices
+                maxWidth: page == .overview || page == .projects || page == .runtimes || page == .databases || page == .localServices
                     ? 1100
                     : 900
             )
@@ -723,7 +781,10 @@ struct ContentView: View {
     }
 
     private func selectPage(_ page: Page) {
+        let previousPage = selectedPage
+        if previousPage == .projects, page != .projects { projectsModel.leaveProjects() }
         selectedPage = page
+        if page == .projects, previousPage != .projects { projectsModel.enterProjects() }
         if page == .settings { settingsDraft = model.autoRefreshSettings }
     }
 
@@ -755,16 +816,16 @@ struct ContentView: View {
         }
     }
 
-    private func header(_ page: Page, snapshot: MachineSnapshot) -> some View {
+    private func header(_ page: Page, snapshot: MachineSnapshot?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(page.title)
                 .font(.largeTitle.bold())
-            if page != .settings {
+            if page != .settings && page != .projects {
                 HStack(spacing: 10) {
                     if page == .databases || page == .localServices {
                         Text(model.dynamicStatusRefreshedAt.map { "最近刷新：\(formatted($0))" } ?? "最近刷新：尚未刷新")
                             .foregroundStyle(.secondary)
-                    } else {
+                    } else if let snapshot {
                         Text("最近扫描：\(formatted(snapshot.scannedAt))")
                             .foregroundStyle(.secondary)
                     }
@@ -777,6 +838,214 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     }
                 }
+            }
+        }
+    }
+
+    private var projectsPage: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Button("添加项目…") { chooseProjectDirectories(forBatchScan: false) }
+                    .buttonStyle(.borderedProminent)
+                Button("扫描目录…") { chooseProjectDirectories(forBatchScan: true) }
+                    .buttonStyle(.bordered)
+                Spacer()
+                Text("\(projectsModel.records.count) 个项目")
+                    .foregroundStyle(.secondary)
+            }
+            .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+
+            if let storageError = projectsModel.storageError {
+                GroupBox {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: "externaldrive.badge.exclamationmark")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("项目记录存储已暂停")
+                                .fontWeight(.semibold)
+                            Text(storageError)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("重新创建存储…") { isConfirmingProjectStoreReset = true }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            if let progress = projectsModel.scanProgress {
+                GroupBox {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.small)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("正在扫描，已发现 \(progress.discoveredCount) 个项目")
+                                .fontWeight(.semibold)
+                            Text(progress.currentPath)
+                                .font(.callout.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer()
+                        Button("取消", action: projectsModel.cancelScan)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("正在扫描项目，已发现 \(progress.discoveredCount) 个，当前目录 \(progress.currentPath)")
+            }
+
+            if let error = projectsModel.operationError {
+                GroupBox {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if let message = projectsModel.resultMessage {
+                Label(message, systemImage: "checkmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            if projectsModel.records.isEmpty {
+                ContentUnavailableView {
+                    Label("尚未添加项目", systemImage: "folder.badge.plus")
+                } description: {
+                    Text("直接添加 Project Root，或扫描一个临时选择的目录来批量发现项目。")
+                } actions: {
+                    Button("添加项目…") { chooseProjectDirectories(forBatchScan: false) }
+                        .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+                }
+                .frame(maxWidth: .infinity, minHeight: 260)
+            } else {
+                LazyVStack(spacing: 10) {
+                    ForEach(projectsModel.records) { project in
+                        projectRecordRow(project)
+                            .onAppear { projectsModel.markDisplayed(project.id) }
+                    }
+                }
+            }
+
+            if !projectsModel.ignoredProjects.isEmpty {
+                GroupBox("Ignored Projects") {
+                    VStack(spacing: 0) {
+                        ForEach(projectsModel.ignoredProjects) { project in
+                            HStack(spacing: 12) {
+                                Image(systemName: "eye.slash")
+                                    .foregroundStyle(.secondary)
+                                Text(project.path)
+                                    .font(.callout.monospaced())
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Button("恢复") { projectsModel.restore(project) }
+                                    .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
+                            }
+                            .padding(.vertical, 8)
+                            if project.id != projectsModel.ignoredProjects.last?.id { Divider() }
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
+            }
+        }
+    }
+
+    private func projectRecordRow(_ project: ProjectRecord) -> some View {
+        let status = projectStatus(project)
+        return HStack(alignment: .top, spacing: 14) {
+            Image(systemName: status.symbol)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(status.color)
+                .frame(width: 38, height: 38)
+                .background(status.color.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(project.title)
+                        .font(.headline)
+                    if project.isNew {
+                        Text("New")
+                            .font(.caption.bold())
+                            .foregroundStyle(.blue)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(.blue.opacity(0.12), in: Capsule())
+                    }
+                    Label(status.title, systemImage: status.symbol)
+                        .font(.caption)
+                        .foregroundStyle(status.color)
+                }
+                Text(project.path)
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                if let detail = status.detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button(role: .destructive) {
+                pendingProjectRemoval = project
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("从 DevEnv 移除 \(project.title)")
+            .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
+        }
+        .padding(14)
+        .background {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.primary.opacity(0.10))
+                }
+        }
+        .opacity(status.isUnavailable ? 0.62 : 1)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func projectStatus(_ project: ProjectRecord) -> (
+        title: String,
+        detail: String?,
+        symbol: String,
+        color: Color,
+        isUnavailable: Bool
+    ) {
+        switch project.availability {
+        case .unknown:
+            ("待刷新", nil, "clock", .secondary, false)
+        case .available:
+            ("待分析项目要求", nil, "folder", .blue, false)
+        case let .unavailable(reason):
+            ("不可用", reason, "folder.badge.questionmark", .secondary, true)
+        }
+    }
+
+    private func chooseProjectDirectories(forBatchScan: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        panel.prompt = forBatchScan ? "扫描" : "添加"
+        panel.message = forBatchScan
+            ? "选择一个或多个临时 Project Search Root；所选扫描目录不会持久化。"
+            : "选择一个或多个目录作为明确的 Project Root。"
+        panel.begin { response in
+            guard response == .OK else { return }
+            if forBatchScan {
+                projectsModel.scan(panel.urls)
+            } else {
+                projectsModel.addDirect(panel.urls)
             }
         }
     }
