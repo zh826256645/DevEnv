@@ -54,6 +54,23 @@ final class ProjectRecordsTests: XCTestCase {
         ].sorted())
     }
 
+    func testComposeYamlVariantsArePrimaryManifests() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let compose = root.appendingPathComponent("compose")
+        let dockerCompose = root.appendingPathComponent("docker-compose")
+        for (directory, name) in [(compose, "compose.yaml"), (dockerCompose, "docker-compose.yaml")] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data().write(to: directory.appendingPathComponent(name))
+        }
+
+        let result = ProjectDiscovery().discover(searchRoots: [root], ignoredPaths: [])
+
+        XCTAssertEqual(result.projectPaths.sorted(), [compose, dockerCompose].map {
+            $0.resolvingSymlinksInPath().standardizedFileURL.path
+        }.sorted())
+    }
+
     func testRecordLifecycleMergesIncrementallyAndOnlyClearsDisplayedNewProjects() {
         let firstDiscovery = Date(timeIntervalSince1970: 100)
         let laterDiscovery = Date(timeIntervalSince1970: 200)

@@ -237,8 +237,8 @@ struct ProjectDiscovery: Sendable {
         "node_modules", "target", "vendor", "venv",
     ]
     private static let primaryManifestNames: Set<String> = [
-        "Cargo.toml", "Gemfile", "build.gradle", "build.gradle.kts", "compose.yml",
-        "docker-compose.yml", "go.mod", "go.work", "package.json", "pom.xml",
+        "Cargo.toml", "Gemfile", "build.gradle", "build.gradle.kts", "compose.yaml", "compose.yml",
+        "docker-compose.yaml", "docker-compose.yml", "go.mod", "go.work", "package.json", "pom.xml",
         "pyproject.toml", "settings.gradle", "settings.gradle.kts",
     ]
 

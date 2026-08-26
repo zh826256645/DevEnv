@@ -139,6 +139,16 @@ struct ProjectRequirementsScanner: Sendable {
     static let excludedDirectories: Set<String> = [
         ".git", ".hg", ".svn", ".venv", "venv", "node_modules", "vendor", ".build", "build", "dist", "target"
     ]
+    private static let primaryManifestNames: Set<String> = [
+        "Cargo.toml", "Gemfile", "build.gradle", "build.gradle.kts", "compose.yaml", "compose.yml",
+        "docker-compose.yaml", "docker-compose.yml", "go.mod", "go.work", "package.json", "pom.xml",
+        "pyproject.toml", "settings.gradle", "settings.gradle.kts",
+    ]
+    private static let versionFileCapabilities: [String: String] = [
+        ".go-version": "go", ".java-version": "java", ".lua-version": "lua", ".node-version": "node",
+        ".nvmrc": "node", ".python-version": "python", ".ruby-version": "ruby",
+    ]
+    private static let runtimeCapabilities: Set<String> = ["node", "python", "go", "java", "rust", "ruby", "lua"]
 
     func scan(projectRoot: URL, machineSnapshot: MachineSnapshot? = nil) -> ProjectRequirementsAnalysis {
         let root = projectRoot.resolvingSymlinksInPath().standardizedFileURL
@@ -160,6 +170,7 @@ struct ProjectRequirementsScanner: Sendable {
             var requirements: [ProjectRequirement] = []
             var notices: [ProjectNotice] = []
             var displayName: String?
+            var hasComposeRequirement = false
             for name in names {
                 let file = directory.appendingPathComponent(name)
                 switch name {
@@ -173,18 +184,68 @@ struct ProjectRequirementsScanner: Sendable {
                     requirements.append(contentsOf: result.requirements)
                     notices.append(contentsOf: result.notices)
                     displayName = displayName ?? result.name
-                default: break
-                }
-            }
-            for (capability, versionFiles) in [("node", [".nvmrc", ".node-version"]), ("python", [".python-version"])] {
-                for name in versionFiles where names.contains(name) {
-                    if let expression = readSmallText(root.appendingPathComponent(relativePath).appendingPathComponent(name)) {
+                case "go.mod", "go.work":
+                    let result = parseGoManifest(file: file, root: root)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case "Cargo.toml":
+                    let result = parseCargoManifest(file: file, root: root)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case "rust-toolchain", "rust-toolchain.toml":
+                    let result = parseRustToolchain(file: file, root: root)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case "pom.xml":
+                    let result = parseMaven(file: file, root: root)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case "build.gradle", "build.gradle.kts":
+                    let result = parseGradle(file: file, root: root)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case "Gemfile":
+                    let result = parseRubyManifest(file: file, root: root, gemspec: false)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case let name where name.hasSuffix(".gemspec"):
+                    let result = parseRubyManifest(file: file, root: root, gemspec: true)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case let name where name.hasSuffix(".rockspec"):
+                    let result = parseLuaRockspec(file: file, root: root)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case ".tool-versions":
+                    let result = parseToolVersions(file: file, root: root)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case "mise.toml", ".mise.toml":
+                    let result = parseMise(file: file, root: root)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
+                case "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml":
+                    if readSmallData(file) == nil {
+                        notices.append(ProjectNotice(
+                            relativePath: self.relativePath(file, from: root), message: "清单不可读或超过 4 MiB"
+                        ))
+                    } else if !hasComposeRequirement {
                         requirements.append(ProjectRequirement(
-                            capability: capability, expression: expression, relativePath: self.relativePath(root.appendingPathComponent(relativePath).appendingPathComponent(name), from: root), field: name
+                            capability: "docker-compose", expression: "*",
+                            relativePath: self.relativePath(file, from: root), field: "compose"
+                        ))
+                        hasComposeRequirement = true
+                    }
+                case let name where Self.versionFileCapabilities[name] != nil:
+                    if let expression = readSmallText(file) {
+                        requirements.append(ProjectRequirement(
+                            capability: Self.versionFileCapabilities[name]!, expression: expression,
+                            relativePath: self.relativePath(file, from: root), field: name
                         ))
                     } else {
-                        notices.append(ProjectNotice(relativePath: self.relativePath(root.appendingPathComponent(relativePath).appendingPathComponent(name), from: root), message: "清单不可读"))
+                        notices.append(ProjectNotice(relativePath: self.relativePath(file, from: root), message: "清单不可读"))
                     }
+                default: break
                 }
             }
             let localPython = discoverVenv(at: directory)
@@ -223,12 +284,20 @@ struct ProjectRequirementsScanner: Sendable {
         var names = Set<String>()
         for entry in entries {
             let name = entry.lastPathComponent
-            if name == "package.json" || name == "pyproject.toml" || name == ".nvmrc" || name == ".node-version" || name == ".python-version" {
+            if Self.primaryManifestNames.contains(name)
+                || Self.versionFileCapabilities[name] != nil
+                || name == "rust-toolchain" || name == "rust-toolchain.toml"
+                || name == ".tool-versions" || name == "mise.toml" || name == ".mise.toml"
+                || name.hasSuffix(".gemspec") || name.hasSuffix(".rockspec") {
                 names.insert(name)
             }
         }
-        if !names.isEmpty {
-            result[relativePath(directory, from: root), default: []].formUnion(names)
+        let relative = relativePath(directory, from: root)
+        let hasPrimaryManifest = names.contains(where: {
+            Self.primaryManifestNames.contains($0) || $0.hasSuffix(".gemspec") || $0.hasSuffix(".rockspec")
+        })
+        if !names.isEmpty && (relative == "." || hasPrimaryManifest) {
+            result[relative, default: []].formUnion(names)
         }
         for entry in entries {
             let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
@@ -311,8 +380,315 @@ struct ProjectRequirementsScanner: Sendable {
         return (name, requirements, [])
     }
 
+    private func parseGoManifest(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file), let text = String(data: data, encoding: .utf8) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        let requirements = text.split(whereSeparator: \.isNewline).compactMap { rawLine -> ProjectRequirement? in
+            let parts = rawLine.split(whereSeparator: \.isWhitespace)
+            guard parts.count >= 2, parts[0] == "go" || parts[0] == "toolchain" else { return nil }
+            let value = String(parts[1]).replacingOccurrences(of: "^go", with: "", options: .regularExpression)
+            return ProjectRequirement(
+                capability: "go", expression: ">=\(value)", relativePath: relative, field: String(parts[0])
+            )
+        }
+        return (requirements, [])
+    }
+
+    private func parseCargoManifest(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file), let text = String(data: data, encoding: .utf8) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        var section = ""
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                section = String(line.dropFirst().dropLast())
+            } else if section == "package", let separator = line.firstIndex(of: "="),
+                      line[..<separator].trimmingCharacters(in: .whitespaces) == "rust-version" {
+                let version = tomlString(String(line[line.index(after: separator)...])) ?? "dynamic"
+                return ([ProjectRequirement(
+                    capability: "rust", expression: ">=\(version)", relativePath: relative,
+                    field: "package.rust-version"
+                )], [])
+            }
+        }
+        return ([], [])
+    }
+
+    private func parseRustToolchain(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file), let text = String(data: data, encoding: .utf8) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        let expression: String?
+        if file.lastPathComponent == "rust-toolchain" {
+            expression = text.split(whereSeparator: \.isNewline).first.map {
+                String($0.split(separator: "#", maxSplits: 1).first ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        } else {
+            expression = text.split(whereSeparator: \.isNewline).compactMap { rawLine -> String? in
+                let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let separator = line.firstIndex(of: "="),
+                      line[..<separator].trimmingCharacters(in: .whitespaces) == "channel" else { return nil }
+                return tomlString(String(line[line.index(after: separator)...])) ?? "dynamic"
+            }.first
+        }
+        return (expression.map {
+            [ProjectRequirement(capability: "rust", expression: $0, relativePath: relative, field: "toolchain.channel")]
+        } ?? [], [])
+    }
+
+    private func parseMaven(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        let collector = MavenXMLCollector()
+        let parser = XMLParser(data: data)
+        parser.delegate = collector
+        parser.shouldResolveExternalEntities = false
+        parser.externalEntityResolvingPolicy = .never
+        guard parser.parse() else {
+            return ([], [ProjectNotice(relativePath: relative, message: "pom.xml 格式无效")])
+        }
+        let fields: [(suffix: String, field: String)] = [
+            (".properties.java.version", "java.version"),
+            (".properties.maven.compiler.release", "maven.compiler.release"),
+            (".properties.maven.compiler.source", "maven.compiler.source"),
+            (".requireJavaVersion.version", "enforcer.requireJavaVersion"),
+        ]
+        var requirements: [ProjectRequirement] = []
+        for value in collector.values {
+            guard let field = fields.first(where: { value.path.hasSuffix($0.suffix) })?.field else { continue }
+            requirements.append(ProjectRequirement(
+                capability: "java", expression: javaMinimumExpression(value.text),
+                relativePath: relative, field: field
+            ))
+        }
+        for value in collector.compilerValues {
+            requirements.append(ProjectRequirement(
+                capability: "java", expression: javaMinimumExpression(value.text), relativePath: relative,
+                field: value.path.hasSuffix(".release") ? "compiler.release" : "compiler.source"
+            ))
+        }
+        if collector.values.contains(where: { $0.path.contains(".parent.") }) {
+            requirements.append(ProjectRequirement(
+                capability: "java", expression: "dynamic", relativePath: relative, field: "parent"
+            ))
+        }
+        return (requirements, [])
+    }
+
+    private func parseGradle(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file), var text = String(data: data, encoding: .utf8) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        text = text.replacingOccurrences(of: #"(?s)/\*.*?\*/"#, with: "", options: .regularExpression)
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).components(separatedBy: "//").first ?? "" }
+            .joined(separator: "\n")
+        var requirements = regexCaptures(
+            #"(?m)(?:^|[\{;])\s*languageVersion\s*(?:=\s*)?JavaLanguageVersion\.of\(\s*([0-9]+(?:\.[0-9]+){0,2})\s*\)"#,
+            in: text
+        ).map {
+            ProjectRequirement(capability: "java", expression: ">=\($0)", relativePath: relative, field: "java.toolchain")
+        }
+        requirements.append(contentsOf: regexCaptures(
+            #"(?:sourceCompatibility|targetCompatibility)\s*(?:=\s*)?(?:JavaVersion\.VERSION_)?[\"']?([0-9]+(?:[_.][0-9]+){0,2})[\"']?"#,
+            in: text
+        ).map {
+            ProjectRequirement(
+                capability: "java", expression: ">=\($0.replacingOccurrences(of: "_", with: "."))",
+                relativePath: relative, field: "java.sourceCompatibility"
+            )
+        })
+        if requirements.isEmpty && (text.contains("JavaLanguageVersion.of(") || text.contains("sourceCompatibility")) {
+            requirements.append(ProjectRequirement(
+                capability: "java", expression: "dynamic", relativePath: relative, field: "java.dynamic"
+            ))
+        }
+        return (requirements, [])
+    }
+
+    private func parseRubyManifest(file: URL, root: URL, gemspec: Bool) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file), let text = String(data: data, encoding: .utf8) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        let pattern = gemspec
+            ? #"(?m)^\s*\w+\.required_ruby_version\s*=\s*[\"']([^\"']+)[\"']"#
+            : #"(?m)^\s*ruby\s+[\"']([^\"']+)[\"']"#
+        let field = gemspec ? "required_ruby_version" : "ruby"
+        if !gemspec, text.range(of: #"\bengine\s*:"#, options: .regularExpression) != nil {
+            return ([ProjectRequirement(
+                capability: "ruby", expression: "dynamic", relativePath: relative, field: field
+            )], [])
+        }
+        var requirements = regexCaptures(pattern, in: text).map {
+            ProjectRequirement(capability: "ruby", expression: $0, relativePath: relative, field: field)
+        }
+        if requirements.isEmpty && regexCaptures(
+            gemspec ? #"(?m)^\s*\w+\.(required_ruby_version)\s*="# : #"(?m)^\s*(ruby)\s+"#,
+            in: text
+        ).isEmpty == false {
+            requirements.append(ProjectRequirement(
+                capability: "ruby", expression: "dynamic", relativePath: relative, field: field
+            ))
+        }
+        return (requirements, [])
+    }
+
+    private func parseLuaRockspec(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file), let rawText = String(data: data, encoding: .utf8) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        let text = rawText.split(whereSeparator: \.isNewline).map {
+            String($0).components(separatedBy: "--").first ?? ""
+        }.joined(separator: "\n")
+        let dependencyTables = regexCaptures(#"(?s)\bdependencies\s*=\s*\{([^}]*)\}"#, in: text)
+        var requirements = dependencyTables.flatMap {
+            regexCaptures(#"[\"']lua\s+([^\"']+)[\"']"#, in: $0)
+        }.map {
+            ProjectRequirement(capability: "lua", expression: $0, relativePath: relative, field: "dependencies.lua")
+        }
+        if requirements.isEmpty && dependencyTables.contains(where: {
+            $0.range(of: #"[\"']lua(?:\s|[\"'])"#, options: .regularExpression) != nil
+        }) {
+            requirements.append(ProjectRequirement(
+                capability: "lua", expression: "dynamic", relativePath: relative, field: "dependencies.lua"
+            ))
+        }
+        return (requirements, [])
+    }
+
+    private func parseToolVersions(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file), let text = String(data: data, encoding: .utf8) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        let requirements = text.split(whereSeparator: \.isNewline).compactMap { rawLine -> ProjectRequirement? in
+            let line = rawLine.split(separator: "#", maxSplits: 1).first ?? ""
+            let parts = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard parts.count >= 2 else { return nil }
+            return ProjectRequirement(
+                capability: canonicalTool(parts[0]), expression: parts.dropFirst().joined(separator: " || "),
+                relativePath: relative, field: ".tool-versions.\(parts[0])"
+            )
+        }
+        return (requirements, [])
+    }
+
+    private func parseMise(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file), let text = String(data: data, encoding: .utf8) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        var inTools = false
+        var requirements: [ProjectRequirement] = []
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                inTools = line == "[tools]"
+                continue
+            }
+            guard inTools, let separator = line.firstIndex(of: "=") else { continue }
+            let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            let rawValue = String(line[line.index(after: separator)...])
+            let versions: [String]
+            if let version = tomlString(rawValue) {
+                versions = [version]
+            } else if let values = tomlStringArray(rawValue) {
+                versions = values
+            } else {
+                continue
+            }
+            guard !key.isEmpty, !versions.isEmpty else { continue }
+            requirements.append(ProjectRequirement(
+                capability: canonicalTool(key), expression: versions.joined(separator: " || "),
+                relativePath: relative, field: "mise.tools.\(key)"
+            ))
+        }
+        return (requirements, [])
+    }
+
+    private func canonicalTool(_ name: String) -> String {
+        switch name.lowercased() {
+        case "node", "nodejs": "node"
+        case "python": "python"
+        case "go", "golang": "go"
+        case "java": "java"
+        case "rust": "rust"
+        case "ruby": "ruby"
+        case "lua": "lua"
+        case "git": "git"
+        default: name.lowercased()
+        }
+    }
+
+    private func tomlStringArray(_ rawValue: String) -> [String]? {
+        let value = tomlValueWithoutComment(rawValue).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.range(
+            of: #"^\[\s*(?:[\"'][^\"']*[\"']\s*(?:,\s*[\"'][^\"']*[\"']\s*)*)?\]$"#,
+            options: .regularExpression
+        ) != nil else { return nil }
+        return regexCaptures(#"[\"']([^\"']*)[\"']"#, in: value)
+    }
+
+    private func tomlValueWithoutComment(_ value: String) -> String {
+        var result = ""
+        var quote: Character?
+        var escaped = false
+        for character in value {
+            if escaped {
+                result.append(character)
+                escaped = false
+            } else if character == "\\", quote == "\"" {
+                result.append(character)
+                escaped = true
+            } else if let currentQuote = quote {
+                result.append(character)
+                if character == currentQuote { quote = nil }
+            } else if character == "#" {
+                break
+            } else {
+                result.append(character)
+                if character == "\"" || character == "'" { quote = character }
+            }
+        }
+        return result
+    }
+
+    private func javaMinimumExpression(_ value: String) -> String {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if (value.hasPrefix("[") || value.hasPrefix("(")), let comma = value.firstIndex(of: ",") {
+            let lower = value[value.index(after: value.startIndex) ..< comma]
+            let upper = value[value.index(after: comma) ..< value.index(before: value.endIndex)]
+            var terms: [String] = []
+            if !lower.isEmpty { terms.append("\(value.first == "[" ? ">=" : ">")\(lower)") }
+            if !upper.isEmpty { terms.append("\(value.last == "]" ? "<=" : "<")\(upper)") }
+            return terms.joined(separator: " ")
+        }
+        return SemanticVersion(value) == nil ? value : ">=\(value)"
+    }
+
+    private func regexCaptures(_ pattern: String, in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard match.numberOfRanges > 1, let range = Range(match.range(at: 1), in: text) else { return nil }
+            return String(text[range])
+        }
+    }
+
     private func tomlString(_ value: String) -> String? {
-        let value = value.split(separator: "#", maxSplits: 1).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+        let value = tomlValueWithoutComment(value).trimmingCharacters(in: .whitespaces)
         guard value.count >= 2, (value.first == "\"" && value.last == "\"") || (value.first == "'" && value.last == "'") else { return nil }
         return String(value.dropFirst().dropLast())
     }
@@ -360,7 +736,7 @@ struct ProjectRequirementsScanner: Sendable {
                 }
                 continue
             }
-            if capability == "packageManager" || ["npm", "yarn", "pnpm", "bun"].contains(capability) {
+            if capability != "git" && !Self.runtimeCapabilities.contains(capability) {
                 for index in indices { evaluated[index].satisfaction = .undetermined }
                 continue
             }
@@ -413,7 +789,12 @@ struct ProjectRequirementsScanner: Sendable {
         if capability == "cpu" {
             return machineSnapshot.system.architecture.map { [($0, "Machine Snapshot")] } ?? []
         }
-        guard capability == "node" || capability == "python" else { return [] }
+        if capability == "git" {
+            guard machineSnapshot.gitCLI.state == .available,
+                  let version = machineSnapshot.gitCLI.version?.firstMatch(of: /\d+(?:\.\d+){0,2}/).map({ String($0.output) }) else { return [] }
+            return [(version, machineSnapshot.gitCLI.executable ?? "Git CLI")]
+        }
+        guard Self.runtimeCapabilities.contains(capability) else { return [] }
         let runtime = machineSnapshot.runtimes.first { $0.id.lowercased() == capability }
         var result = runtime?.installations.compactMap { installation -> (String, String)? in
             guard installation.state == .discovered, let version = installation.version else { return nil }
@@ -433,7 +814,15 @@ struct ProjectRequirementsScanner: Sendable {
         machineSnapshot: MachineSnapshot,
         localPythonInstallations: [ProjectLocalRuntimeInstallation]
     ) -> Bool {
-        guard capability == "node" || capability == "python" else { return false }
+        if capability == "git" {
+            switch machineSnapshot.gitCLI.state {
+            case .unavailable: return false
+            case .failed: return true
+            case .available:
+                return machineSnapshot.gitCLI.version?.firstMatch(of: /\d+(?:\.\d+){0,2}/) == nil
+            }
+        }
+        guard Self.runtimeCapabilities.contains(capability) else { return false }
         if machineSnapshot.runtimes.first(where: { $0.id.lowercased() == capability })?.installations.contains(where: { $0.version == nil }) == true {
             return true
         }
@@ -487,7 +876,11 @@ private struct StaticVersionConstraint: Sendable {
     let isUnsupported: Bool
 
     init(_ expression: String) {
-        self.expression = expression.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.expression = expression.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
+            of: #"([<>=~^!]+)\s+([0-9v])"#,
+            with: "$1$2",
+            options: .regularExpression
+        )
         let rawAlternatives = self.expression.components(separatedBy: "||")
         var parsed: [[(String, SemanticVersion)]] = []
         var samples: [String] = []
@@ -563,5 +956,59 @@ private struct StaticVersionConstraint: Sendable {
         if rhs.precision == 1 { return lhs.major == rhs.major }
         if rhs.precision == 2 { return lhs.major == rhs.major && lhs.minor == rhs.minor }
         return lhs == rhs
+    }
+}
+
+private final class MavenXMLCollector: NSObject, XMLParserDelegate {
+    private(set) var values: [(path: String, text: String)] = []
+    private(set) var compilerValues: [(path: String, text: String)] = []
+    private var elements: [String] = []
+    private var text = ""
+    private var pluginArtifactID: String?
+    private var pluginValues: [(path: String, text: String)]?
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        if elementName == "plugin", pluginValues == nil {
+            pluginArtifactID = nil
+            pluginValues = []
+        }
+        elements.append(elementName)
+        text = ""
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        text += string
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let entry = (path: elements.joined(separator: "."), text: value)
+        if !value.isEmpty {
+            values.append(entry)
+            pluginValues?.append(entry)
+            if elements.suffix(2).elementsEqual(["plugin", "artifactId"]) { pluginArtifactID = value }
+        }
+        if elementName == "plugin", let pluginValues {
+            if pluginArtifactID == "maven-compiler-plugin" {
+                compilerValues.append(contentsOf: pluginValues.filter {
+                    $0.path.hasSuffix(".configuration.release") || $0.path.hasSuffix(".configuration.source")
+                })
+            }
+            self.pluginValues = nil
+            pluginArtifactID = nil
+        }
+        elements.removeLast()
+        text = ""
     }
 }
