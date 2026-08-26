@@ -31,6 +31,15 @@ struct ProjectNotice: Codable, Equatable, Sendable, Identifiable {
 struct ProjectRequirementMatch: Codable, Equatable, Sendable {
     let version: String
     let path: String
+    let source: String?
+    let isEffective: Bool
+
+    init(version: String, path: String, source: String? = nil, isEffective: Bool = false) {
+        self.version = version
+        self.path = path
+        self.source = source
+        self.isEffective = isEffective
+    }
 }
 
 struct ProjectRequirement: Codable, Equatable, Sendable, Identifiable {
@@ -553,15 +562,24 @@ struct ProjectRequirementsScanner: Sendable {
         ).map {
             ProjectRequirement(capability: "java", expression: ">=\($0)", relativePath: relative, field: "java.toolchain")
         }
-        requirements.append(contentsOf: regexCaptures(
-            #"(?:sourceCompatibility|targetCompatibility)\s*(?:=\s*)?(?:JavaVersion\.VERSION_)?[\"']?([0-9]+(?:[_.][0-9]+){0,2})[\"']?"#,
-            in: text
-        ).map {
-            ProjectRequirement(
-                capability: "java", expression: ">=\($0.replacingOccurrences(of: "_", with: "."))",
-                relativePath: relative, field: "java.sourceCompatibility"
-            )
-        })
+        let compatibilitySuffix = #"\s*(?:=\s*)?(?:JavaVersion\.VERSION_)?[\"']?([0-9]+(?:[_.][0-9]+){0,2})[\"']?"#
+        let sourceVersions = Set(regexCaptures("sourceCompatibility" + compatibilitySuffix, in: text))
+        let targetVersions = Set(regexCaptures("targetCompatibility" + compatibilitySuffix, in: text))
+        for version in sourceVersions.union(targetVersions).sorted() {
+            let field = if sourceVersions.contains(version), targetVersions.contains(version) {
+                "java.sourceCompatibility + java.targetCompatibility"
+            } else if sourceVersions.contains(version) {
+                "java.sourceCompatibility"
+            } else {
+                "java.targetCompatibility"
+            }
+            requirements.append(ProjectRequirement(
+                capability: "java",
+                expression: ">=\(version.replacingOccurrences(of: "_", with: "."))",
+                relativePath: relative,
+                field: field
+            ))
+        }
         if requirements.isEmpty && (text.contains("JavaLanguageVersion.of(") || text.contains("sourceCompatibility")) {
             requirements.append(ProjectRequirement(
                 capability: "java", expression: "dynamic", relativePath: relative, field: "java.dynamic"
@@ -838,7 +856,14 @@ struct ProjectRequirementsScanner: Sendable {
                 : alternatives
             for index in indices {
                 evaluated[index].satisfaction = state
-                evaluated[index].matches = matches.map { ProjectRequirementMatch(version: $0.version, path: $0.path) }
+                evaluated[index].matches = matches.map {
+                    ProjectRequirementMatch(
+                        version: $0.version,
+                        path: $0.path,
+                        source: $0.source,
+                        isEffective: $0.isEffective
+                    )
+                }
                 evaluated[index].evidence = matches.isEmpty ? evidence : []
             }
         }
@@ -863,28 +888,38 @@ struct ProjectRequirementsScanner: Sendable {
         return allowed.isEmpty || allowed.contains { actual.contains($0.lowercased()) }
     }
 
-    private func candidates(for capability: String, machineSnapshot: MachineSnapshot, localPythonInstallations: [ProjectLocalRuntimeInstallation]) -> [(version: String, path: String)] {
+    private func candidates(
+        for capability: String,
+        machineSnapshot: MachineSnapshot,
+        localPythonInstallations: [ProjectLocalRuntimeInstallation]
+    ) -> [(version: String, path: String, source: String?, isEffective: Bool)] {
         if capability == "os" {
-            return [(machineSnapshot.system.macOSVersion ?? "darwin", "Machine Snapshot")]
+            return [(machineSnapshot.system.macOSVersion ?? "darwin", "Machine Snapshot", nil, true)]
         }
         if capability == "cpu" {
-            return machineSnapshot.system.architecture.map { [($0, "Machine Snapshot")] } ?? []
+            return machineSnapshot.system.architecture.map { [($0, "Machine Snapshot", nil, true)] } ?? []
         }
         if capability == "git" {
             guard machineSnapshot.gitCLI.state == .available,
                   let version = machineSnapshot.gitCLI.version?.firstMatch(of: /\d+(?:\.\d+){0,2}/).map({ String($0.output) }) else { return [] }
-            return [(version, machineSnapshot.gitCLI.executable ?? "Git CLI")]
+            return [(version, machineSnapshot.gitCLI.executable ?? "Git CLI", nil, true)]
         }
         guard Self.runtimeCapabilities.contains(capability) else { return [] }
-        let runtime = machineSnapshot.runtimes.first { $0.id.lowercased() == capability }
-        var result = runtime?.installations.compactMap { installation -> (String, String)? in
+        var result = machineSnapshot.runtimes
+            .first { $0.id.lowercased() == capability }?
+            .installations.compactMap { installation -> (String, String, String?, Bool)? in
             guard installation.state == .discovered, let version = installation.version else { return nil }
-            return (version, installation.executable)
+            return (
+                version,
+                installation.executable,
+                installation.sources.first?.displayName,
+                installation.isEffective
+            )
         } ?? []
         if capability == "python" {
             result.append(contentsOf: localPythonInstallations.compactMap { installation in
                 guard installation.isUsable, let version = installation.version else { return nil }
-                return (version, installation.executable)
+                return (version, installation.executable, "Virtual Environment", false)
             })
         }
         return result

@@ -398,6 +398,36 @@ struct ProjectDiscovery: Sendable {
         }
     }
 
+    func isGitRepository(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return false
+        }
+        return nearestContainingGitRoot(for: URL(fileURLWithPath: path, isDirectory: true)) != nil
+    }
+
+    func currentGitBranch(_ path: String) -> String? {
+        guard let root = nearestContainingGitRoot(for: URL(fileURLWithPath: path, isDirectory: true)) else {
+            return nil
+        }
+        let marker = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent(".git")
+        var isDirectory: ObjCBool = false
+        FileManager.default.fileExists(atPath: marker.path, isDirectory: &isDirectory)
+        let gitDirectory: URL
+        if isDirectory.boolValue {
+            gitDirectory = marker
+        } else {
+            guard let contents = try? String(contentsOf: marker, encoding: .utf8),
+                  contents.hasPrefix("gitdir: ") else { return nil }
+            let path = contents.dropFirst("gitdir: ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            gitDirectory = URL(fileURLWithPath: path, relativeTo: marker.deletingLastPathComponent())
+                .standardizedFileURL
+        }
+        guard let head = try? String(contentsOf: gitDirectory.appendingPathComponent("HEAD"), encoding: .utf8),
+              head.hasPrefix("ref: refs/heads/") else { return nil }
+        return head.dropFirst("ref: refs/heads/".count).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func isPrimaryManifest(_ name: String) -> Bool {
         Self.primaryManifestNames.contains(name)
             || name.hasSuffix(".gemspec")

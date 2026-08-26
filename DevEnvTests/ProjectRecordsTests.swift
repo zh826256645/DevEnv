@@ -199,6 +199,24 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(document.records.first { $0.path == manifestChild }?.boundary, .explicit)
     }
 
+    func testExplicitBoundaryStillDetectsGitRepositoryAndCurrentBranch() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent(".git"),
+            withIntermediateDirectories: true
+        )
+        try Data("ref: refs/heads/feature/current\n".utf8)
+            .write(to: root.appendingPathComponent(".git/HEAD"))
+        var document = ProjectRecordDocument()
+        document.addDirect([root.path])
+        let project = try XCTUnwrap(document.records.first)
+
+        XCTAssertEqual(project.boundary, .explicit)
+        XCTAssertTrue(ProjectDiscovery().isGitRepository(project.path))
+        XCTAssertEqual(ProjectDiscovery().currentGitBranch(project.path), "feature/current")
+    }
+
     func testIgnoredProjectRestoresItsOriginalBoundary() {
         var document = ProjectRecordDocument()
         document.addDirect(["/Projects/explicit"], at: Date(timeIntervalSince1970: 1))

@@ -6,6 +6,7 @@ struct DevEnvApp: App {
         WindowGroup {
             ContentView()
         }
-        .defaultSize(width: 860, height: 720)
+        .windowToolbarStyle(.unifiedCompact)
+        .defaultSize(width: 1280, height: 820)
     }
 }

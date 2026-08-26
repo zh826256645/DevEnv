@@ -18,3 +18,8 @@ Uses the default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready
 ### Domain docs
 
 Single-context layout: root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
+### UI assets
+
+- UI 中已有的 Logo 必须统一复用项目现有资源；Git、Runtime 等已有 Logo 禁止使用 SF Symbols、文字或自绘图形替代。仅在确认项目中不存在对应资源时才可新增。
+- 同一 Logo 在不同功能页面必须复用统一的品牌色、圆角底板和内边距样式；允许整体尺寸随页面层级等比例调整，不得单独覆写为另一套视觉。
