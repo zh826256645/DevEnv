@@ -511,6 +511,7 @@ struct ContentView: View {
                 Button {
                     if selectedPage == .projects {
                         projectsModel.refreshAvailability()
+                        projectsModel.refreshRequirements(machineSnapshot: model.snapshot)
                     } else {
                         model.scan()
                     }
@@ -567,6 +568,9 @@ struct ContentView: View {
         }
         .onChange(of: model.snapshot?.scannedAt) {
             readNoticeIdentities.removeAll()
+            if selectedPage == .projects {
+                projectsModel.refreshRequirements(machineSnapshot: model.snapshot)
+            }
         }
         .sheet(isPresented: $isShowingSettingsExitConfirmation, onDismiss: {
             pendingPage = nil
@@ -784,7 +788,10 @@ struct ContentView: View {
         let previousPage = selectedPage
         if previousPage == .projects, page != .projects { projectsModel.leaveProjects() }
         selectedPage = page
-        if page == .projects, previousPage != .projects { projectsModel.enterProjects() }
+        if page == .projects, previousPage != .projects {
+            projectsModel.enterProjects()
+            projectsModel.refreshRequirements(machineSnapshot: model.snapshot)
+        }
         if page == .settings { settingsDraft = model.autoRefreshSettings }
     }
 
@@ -989,6 +996,9 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if let analysis = projectsModel.analyses[project.id] {
+                    projectRequirementsSummary(analysis)
+                }
             }
             Spacer()
             Button(role: .destructive) {
@@ -1011,6 +1021,66 @@ struct ContentView: View {
         }
         .opacity(status.isUnavailable ? 0.62 : 1)
         .accessibilityElement(children: .contain)
+    }
+
+    private func projectRequirementsSummary(_ analysis: ProjectRequirementsAnalysis) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Requirements：\(projectSummaryTitle(analysis.summary))")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            ForEach(analysis.components) { component in
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(component.relativePath)
+                        .font(.caption.monospaced())
+                    if let manifestName = component.manifestName {
+                        Text(manifestName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(projectSummaryTitle(component.summary))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if !component.manifestNames.isEmpty {
+                        Text(component.manifestNames.joined(separator: ", "))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                ForEach(component.requirements) { requirement in
+                    let matches = requirement.matches.map { "\($0.version) @ \($0.path)" }.joined(separator: ", ")
+                    Text("• \(requirement.capability) \(requirement.expression) · \(requirement.relativePath) · \(requirement.field) · \(projectRequirementStateTitle(requirement.satisfaction))\(matches.isEmpty ? "" : " · \(matches)")")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            ForEach(analysis.notices) { notice in
+                Text("⚠ \(notice.relativePath)：\(notice.message)")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(.top, 3)
+    }
+
+    private func projectSummaryTitle(_ summary: ProjectRequirementsSummary) -> String {
+        switch summary {
+        case .satisfied: "已满足"
+        case .unsatisfied: "未满足"
+        case .undetermined: "无法判断"
+        case .declarationConflict: "声明冲突"
+        case .undeclared: "未声明要求"
+        case .unavailable: "不可用"
+        }
+    }
+
+    private func projectRequirementStateTitle(_ state: ProjectRequirementSatisfactionState) -> String {
+        switch state {
+        case .satisfied: "已满足"
+        case .unsatisfied: "未满足"
+        case .undetermined: "无法判断"
+        case .declarationConflict: "声明冲突"
+        }
     }
 
     private func projectStatus(_ project: ProjectRecord) -> (

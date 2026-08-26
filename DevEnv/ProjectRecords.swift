@@ -411,6 +411,7 @@ final class ProjectsViewModel: ObservableObject {
     @Published private(set) var resultMessage: String?
     @Published private(set) var operationError: String?
     @Published private(set) var storageError: String?
+    @Published private(set) var analyses: [String: ProjectRequirementsAnalysis] = [:]
 
     var records: [ProjectRecord] {
         document.records.sorted { lhs, rhs in
@@ -433,6 +434,8 @@ final class ProjectsViewModel: ObservableObject {
     private var scanTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var displayedNewProjectIDs: Set<String> = []
+    private var requirementsTask: Task<Void, Never>?
+    private var machineSnapshot: MachineSnapshot?
 
     init(store: ProjectRecordStore = ProjectRecordStore(), discovery: ProjectDiscovery = ProjectDiscovery()) {
         self.store = store
@@ -468,6 +471,7 @@ final class ProjectsViewModel: ObservableObject {
         document.addDirect(paths)
         persist()
         refreshAvailability()
+        refreshRequirements(machineSnapshot: machineSnapshot)
         resultMessage = "已添加 \(paths.count) 个项目"
     }
 
@@ -504,6 +508,24 @@ final class ProjectsViewModel: ObservableObject {
         refreshAvailability(paths: document.records.map(\.path))
     }
 
+    func refreshRequirements(machineSnapshot: MachineSnapshot?) {
+        requirementsTask?.cancel()
+        self.machineSnapshot = machineSnapshot
+        let paths = document.records.map(\.path)
+        let scanner = ProjectRequirementsScanner()
+        requirementsTask = Task.detached(priority: .utility) { [weak self] in
+            var values: [String: ProjectRequirementsAnalysis] = [:]
+            for path in paths {
+                guard !Task.isCancelled else { return }
+                values[path] = scanner.scan(
+                    projectRoot: URL(fileURLWithPath: path, isDirectory: true),
+                    machineSnapshot: machineSnapshot
+                )
+            }
+            await self?.applyRequirements(values)
+        }
+    }
+
     func remove(_ project: ProjectRecord) {
         guard !mutationsArePaused, !isScanning else { return }
         document.remove(projectID: project.id)
@@ -516,6 +538,7 @@ final class ProjectsViewModel: ObservableObject {
         document.restore(path: ignoredProject.path)
         persist()
         refreshAvailability()
+        refreshRequirements(machineSnapshot: machineSnapshot)
     }
 
     func recreateStore() {
@@ -552,10 +575,16 @@ final class ProjectsViewModel: ObservableObject {
         refreshTask = nil
     }
 
+    private func applyRequirements(_ values: [String: ProjectRequirementsAnalysis]) {
+        analyses.merge(values) { _, new in new }
+        requirementsTask = nil
+    }
+
     private func finishScan(_ result: ProjectDiscoveryResult) {
         document.mergeDiscovered(result.projectPaths, gitProjectPaths: result.gitProjectPaths)
         persist()
         refreshAvailability()
+        refreshRequirements(machineSnapshot: machineSnapshot)
         scanProgress = nil
         scanTask = nil
         if !result.errors.isEmpty {
