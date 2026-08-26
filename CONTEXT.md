@@ -9,8 +9,16 @@ DevEnv 帮助 macOS 开发者理解本机的开发工具状态，并将其与项
 _Avoid_: Environment, Development Environment
 
 **Project Requirements**:
-一个项目明确声明的系统条件、运行时、开发工具、外部服务或容器运行条件，而不是本机的实际状态；不包含由包管理器解析的库依赖。
+一个项目声明的系统条件、运行时、开发工具、外部服务或容器运行条件，而不是本机的实际状态；库依赖本身不作为 Project Requirement，但直接声明的数据库客户端库可以作为 Project Database Requirement 的推定证据。
 _Avoid_: Project Environment
+
+**Project Database Requirement**:
+一个 Project Component 直接声明或由直接依赖的已知数据库客户端库推定的数据库服务端软件类型与可选版本约束；客户端库版本以及动态或未解析的服务端版本均不构成服务端版本约束，也不从传递依赖推定。是否满足只取决于匹配的 Database Installation，Database Listening State 仅作为补充证据，不表示连接、鉴权、Schema 或数据库健康。
+_Avoid_: Database Health Requirement, Database Availability Requirement
+
+**MySQL-compatible Database Requirement**:
+由同时适用于 MySQL 与 MariaDB 的直接客户端依赖推定的 Project Database Requirement；任一类型的 Database Installation 均可满足它，明确声明的 MySQL 或 MariaDB 要求仍保持各自类型。
+_Avoid_: MySQL Requirement, MariaDB Requirement
 
 **Project Root**:
 一个项目的规范目录边界：优先采用包含所选目录的最近 Git 根；没有 Git 时，由项目清单或用户直接选择确定。嵌套 Git 根和用户明确选择的嵌套边界各自形成 Project Root，父项目不吸收其清单。
