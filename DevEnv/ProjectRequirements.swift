@@ -33,12 +33,20 @@ struct ProjectRequirementMatch: Codable, Equatable, Sendable {
     let path: String
     let source: String?
     let isEffective: Bool
+    let listeningState: DatabaseListeningState?
 
-    init(version: String, path: String, source: String? = nil, isEffective: Bool = false) {
+    init(
+        version: String,
+        path: String,
+        source: String? = nil,
+        isEffective: Bool = false,
+        listeningState: DatabaseListeningState? = nil
+    ) {
         self.version = version
         self.path = path
         self.source = source
         self.isEffective = isEffective
+        self.listeningState = listeningState
     }
 }
 
@@ -154,13 +162,16 @@ struct ProjectRequirementsScanner: Sendable {
     private static let primaryManifestNames: Set<String> = [
         "Cargo.toml", "Gemfile", "build.gradle", "build.gradle.kts", "compose.yaml", "compose.yml",
         "docker-compose.yaml", "docker-compose.yml", "go.mod", "go.work", "package.json", "pom.xml",
-        "pyproject.toml", "settings.gradle", "settings.gradle.kts",
+        "pyproject.toml", "requirements.in", "settings.gradle", "settings.gradle.kts",
     ]
     private static let versionFileCapabilities: [String: String] = [
         ".go-version": "go", ".java-version": "java", ".lua-version": "lua", ".node-version": "node",
         ".nvmrc": "node", ".python-version": "python", ".ruby-version": "ruby",
     ]
     private static let runtimeCapabilities: Set<String> = ["node", "python", "go", "java", "rust", "ruby", "lua"]
+    private static let databaseCapabilities: Set<String> = [
+        "postgresql", "mysql", "mariadb", "mongodb", "redis", "mysql-compatible",
+    ]
 
     func scan(
         projectRoot: URL,
@@ -191,7 +202,8 @@ struct ProjectRequirementsScanner: Sendable {
             var requirements: [ProjectRequirement] = []
             var notices: [ProjectNotice] = []
             var displayName: String?
-            var hasComposeRequirement = false
+            let selectedComposeName = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"]
+                .first { names.contains($0) }
             for name in names {
                 let file = directory.appendingPathComponent(name)
                 switch name {
@@ -205,6 +217,10 @@ struct ProjectRequirementsScanner: Sendable {
                     requirements.append(contentsOf: result.requirements)
                     notices.append(contentsOf: result.notices)
                     displayName = displayName ?? result.name
+                case "requirements.in":
+                    let result = parseRequirementsIn(file: file, root: root)
+                    requirements.append(contentsOf: result.requirements)
+                    notices.append(contentsOf: result.notices)
                 case "go.mod", "go.work":
                     let result = parseGoManifest(file: file, root: root)
                     requirements.append(contentsOf: result.requirements)
@@ -246,16 +262,17 @@ struct ProjectRequirementsScanner: Sendable {
                     requirements.append(contentsOf: result.requirements)
                     notices.append(contentsOf: result.notices)
                 case "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml":
+                    guard name == selectedComposeName else { continue }
                     if readSmallData(file) == nil {
                         notices.append(ProjectNotice(
                             relativePath: self.relativePath(file, from: root), message: "清单不可读或超过 4 MiB"
                         ))
-                    } else if !hasComposeRequirement {
+                    } else {
                         requirements.append(ProjectRequirement(
                             capability: "docker-compose", expression: "*",
                             relativePath: self.relativePath(file, from: root), field: "compose"
                         ))
-                        hasComposeRequirement = true
+                        requirements.append(contentsOf: parseCompose(file: file, root: root))
                     }
                 case let name where Self.versionFileCapabilities[name] != nil:
                     if let expression = readSmallText(file) {
@@ -412,6 +429,19 @@ struct ProjectRequirementsScanner: Sendable {
             if let value = object[key] as? String { add(key, value, key) }
             if let values = object[key] as? [String] { add(key, values.joined(separator: " || "), key) }
         }
+        for section in ["dependencies", "devDependencies"] {
+            guard let dependencies = object[section] as? [String: Any] else { continue }
+            for package in dependencies.keys.sorted() {
+                if let requirement = databaseRequirement(
+                    package: package,
+                    ecosystem: "node",
+                    relativePath: relative,
+                    field: "\(section).\(package)"
+                ) {
+                    requirements.append(requirement)
+                }
+            }
+        }
         return (object["name"] as? String, requirements, [])
     }
 
@@ -439,9 +469,60 @@ struct ProjectRequirementsScanner: Sendable {
                 requirements.append(ProjectRequirement(capability: "python", expression: expression, relativePath: relative, field: "tool.poetry.dependencies.python"))
             } else if (section == "project" || section == "tool.poetry") && key == "name" {
                 name = expression
+            } else if section == "tool.poetry.dependencies"
+                || section == "tool.poetry.dev-dependencies"
+                || section == "tool.poetry.group.dev.dependencies"
+                || section == "tool.poetry.group.test.dependencies" {
+                if key != "python", let requirement = databaseRequirement(
+                    package: key,
+                    ecosystem: "python",
+                    relativePath: relative,
+                    field: "\(section).\(key)"
+                ) {
+                    requirements.append(requirement)
+                }
             }
         }
+        var projectSection = ""
+        var inProjectSection = false
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                inProjectSection = line == "[project]"
+            } else if inProjectSection {
+                projectSection += "\n" + line
+            }
+        }
+        for declaration in tomlArray(named: "dependencies", in: projectSection) ?? [] {
+            guard let package = dependencyPackageName(declaration, ecosystem: "python"),
+                  let requirement = databaseRequirement(
+                    package: package,
+                    ecosystem: "python",
+                    relativePath: relative,
+                    field: "project.dependencies.\(package)"
+                  ) else { continue }
+            requirements.append(requirement)
+        }
         return (name, requirements, [])
+    }
+
+    private func parseRequirementsIn(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
+        let relative = relativePath(file, from: root)
+        guard let data = readSmallData(file), let text = String(data: data, encoding: .utf8) else {
+            return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
+        }
+        let requirements = text.split(whereSeparator: \.isNewline).compactMap { rawLine -> ProjectRequirement? in
+            let line = rawLine.split(separator: "#", maxSplits: 1).first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !line.isEmpty, !line.hasPrefix("-"),
+                  let package = dependencyPackageName(line, ecosystem: "python") else { return nil }
+            return databaseRequirement(
+                package: package,
+                ecosystem: "python",
+                relativePath: relative,
+                field: "dependency.\(package)"
+            )
+        }
+        return (requirements, [])
     }
 
     private func parseGoManifest(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
@@ -449,13 +530,33 @@ struct ProjectRequirementsScanner: Sendable {
         guard let data = readSmallData(file), let text = String(data: data, encoding: .utf8) else {
             return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
         }
-        let requirements = text.split(whereSeparator: \.isNewline).compactMap { rawLine -> ProjectRequirement? in
+        var requirements = text.split(whereSeparator: \.isNewline).compactMap { rawLine -> ProjectRequirement? in
             let parts = rawLine.split(whereSeparator: \.isWhitespace)
             guard parts.count >= 2, parts[0] == "go" || parts[0] == "toolchain" else { return nil }
             let value = String(parts[1]).replacingOccurrences(of: "^go", with: "", options: .regularExpression)
             return ProjectRequirement(
                 capability: "go", expression: ">=\(value)", relativePath: relative, field: String(parts[0])
             )
+        }
+        var inRequireBlock = false
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line == "require (" { inRequireBlock = true; continue }
+            if inRequireBlock, line == ")" { inRequireBlock = false; continue }
+            guard !line.contains("// indirect") else { continue }
+            let parts = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            let package: String?
+            if inRequireBlock, parts.count >= 2 { package = parts[0] }
+            else if parts.count >= 3, parts[0] == "require" { package = parts[1] }
+            else { package = nil }
+            guard let package,
+                  let requirement = databaseRequirement(
+                    package: package,
+                    ecosystem: "go",
+                    relativePath: relative,
+                    field: "require.\(package)"
+                  ) else { continue }
+            requirements.append(requirement)
         }
         return (requirements, [])
     }
@@ -466,6 +567,7 @@ struct ProjectRequirementsScanner: Sendable {
             return ([], [ProjectNotice(relativePath: relative, message: "清单不可读或超过 4 MiB")])
         }
         var section = ""
+        var requirements: [ProjectRequirement] = []
         for rawLine in text.split(whereSeparator: \.isNewline) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("[") && line.hasSuffix("]") {
@@ -473,13 +575,26 @@ struct ProjectRequirementsScanner: Sendable {
             } else if section == "package", let separator = line.firstIndex(of: "="),
                       line[..<separator].trimmingCharacters(in: .whitespaces) == "rust-version" {
                 let version = tomlString(String(line[line.index(after: separator)...])) ?? "dynamic"
-                return ([ProjectRequirement(
+                requirements.append(ProjectRequirement(
                     capability: "rust", expression: ">=\(version)", relativePath: relative,
                     field: "package.rust-version"
-                )], [])
+                ))
+            } else if section == "dependencies" || section == "dev-dependencies",
+                      let separator = line.firstIndex(of: "=") {
+                let package = line[..<separator].trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                let value = line[line.index(after: separator)...]
+                guard value.range(of: #"\b(?:optional|workspace)\s*=\s*true\b"#, options: .regularExpression) == nil,
+                      let requirement = databaseRequirement(
+                        package: package,
+                        ecosystem: "rust",
+                        relativePath: relative,
+                        field: "\(section).\(package)"
+                      ) else { continue }
+                requirements.append(requirement)
             }
         }
-        return ([], [])
+        return (requirements, [])
     }
 
     private func parseRustToolchain(file: URL, root: URL) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
@@ -544,6 +659,29 @@ struct ProjectRequirementsScanner: Sendable {
                 capability: "java", expression: "dynamic", relativePath: relative, field: "parent"
             ))
         }
+        var dependencyXML = String(data: data, encoding: .utf8) ?? ""
+        for pattern in [
+            #"(?s)<dependencyManagement\b.*?</dependencyManagement>"#,
+            #"(?s)<profiles\b.*?</profiles>"#,
+            #"(?s)<build\b.*?</build>"#,
+        ] {
+            dependencyXML = dependencyXML.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        for block in regexCaptures(#"(?s)<dependency\b[^>]*>(.*?)</dependency>"#, in: dependencyXML) {
+            guard firstRegexCapture(#"<groupId>\s*([^<]+)\s*</groupId>"#, in: block).map({ !$0.contains("${") }) == true,
+                  let group = firstRegexCapture(#"<groupId>\s*([^<]+)\s*</groupId>"#, in: block),
+                  let artifact = firstRegexCapture(#"<artifactId>\s*([^<]+)\s*</artifactId>"#, in: block),
+                  firstRegexCapture(#"<optional>\s*([^<]+)\s*</optional>"#, in: block)?.lowercased() != "true" else { continue }
+            let scope = firstRegexCapture(#"<scope>\s*([^<]+)\s*</scope>"#, in: block)?.lowercased() ?? "compile"
+            guard ["compile", "runtime", "test"].contains(scope),
+                  let requirement = databaseRequirement(
+                    package: "\(group):\(artifact)",
+                    ecosystem: "java",
+                    relativePath: relative,
+                    field: "dependencies.\(group):\(artifact)"
+                  ) else { continue }
+            requirements.append(requirement)
+        }
         return (requirements, [])
     }
 
@@ -556,6 +694,7 @@ struct ProjectRequirementsScanner: Sendable {
             .split(whereSeparator: \.isNewline)
             .map { String($0).components(separatedBy: "//").first ?? "" }
             .joined(separator: "\n")
+        text = removingConditionalGradleBlocks(text)
         var requirements = regexCaptures(
             #"(?m)(?:^|[\{;])\s*languageVersion\s*(?:=\s*)?JavaLanguageVersion\.of\(\s*([0-9]+(?:\.[0-9]+){0,2})\s*\)"#,
             in: text
@@ -585,7 +724,40 @@ struct ProjectRequirementsScanner: Sendable {
                 capability: "java", expression: "dynamic", relativePath: relative, field: "java.dynamic"
             ))
         }
+        let dependencyPattern = #"(?m)^\s*(?:api|implementation|runtimeOnly|testImplementation|testRuntimeOnly|compile|runtime|testCompile)\s*(?:\(\s*)?[\"']([^\"']+)[\"']"#
+        for coordinate in regexCaptures(dependencyPattern, in: text) {
+            let parts = coordinate.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count >= 3,
+                  let requirement = databaseRequirement(
+                    package: "\(parts[0]):\(parts[1])",
+                    ecosystem: "java",
+                    relativePath: relative,
+                    field: "dependencies.\(parts[0]):\(parts[1])"
+                  ) else { continue }
+            requirements.append(requirement)
+        }
         return (requirements, [])
+    }
+
+    private func removingConditionalGradleBlocks(_ text: String) -> String {
+        // ponytail: line-level literal parsing; replace only if supported Gradle syntax expands beyond static blocks.
+        var depth = 0
+        var conditionalDepth: Int?
+        var result: [String] = []
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = String(rawLine)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let opens = line.filter { $0 == "{" }.count
+            let closes = line.filter { $0 == "}" }.count
+            if conditionalDepth == nil,
+               trimmed.range(of: #"^(?:if|when)\b.*\{"#, options: .regularExpression) != nil {
+                conditionalDepth = depth + max(opens, 1)
+            }
+            if conditionalDepth == nil { result.append(line) }
+            depth += opens - closes
+            if let boundary = conditionalDepth, depth < boundary { conditionalDepth = nil }
+        }
+        return result.joined(separator: "\n")
     }
 
     private func parseRubyManifest(file: URL, root: URL, gemspec: Bool) -> (requirements: [ProjectRequirement], notices: [ProjectNotice]) {
@@ -613,6 +785,51 @@ struct ProjectRequirementsScanner: Sendable {
                 capability: "ruby", expression: "dynamic", relativePath: relative, field: field
             ))
         }
+        if gemspec {
+            for match in regexCapturePairs(
+                #"(?m)^\s*\w+\.(add_dependency|add_runtime_dependency|add_development_dependency)\s*[\( ]\s*[\"']([^\"']+)[\"']"#,
+                in: text
+            ) {
+                if let requirement = databaseRequirement(
+                    package: match.1,
+                    ecosystem: "ruby",
+                    relativePath: relative,
+                    field: "\(match.0).\(match.1)"
+                ) {
+                    requirements.append(requirement)
+                }
+            }
+        } else {
+            var depth = 0
+            var allowedGroupDepth: Int?
+            for rawLine in text.split(whereSeparator: \.isNewline) {
+                let line = String(rawLine).components(separatedBy: "#").first?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if line == "end" {
+                    if allowedGroupDepth == depth { allowedGroupDepth = nil }
+                    depth = max(0, depth - 1)
+                    continue
+                }
+                if line.hasPrefix("group "), line.hasSuffix(" do") {
+                    depth += 1
+                    if line.contains(":development") || line.contains(":test") { allowedGroupDepth = depth }
+                    continue
+                }
+                if line.hasPrefix("if ") || line.hasPrefix("unless ") || line.hasSuffix(" do") {
+                    depth += 1
+                    continue
+                }
+                guard depth == 0 || allowedGroupDepth == depth,
+                      let package = firstRegexCapture(#"^gem\s*[\( ]\s*[\"']([^\"']+)[\"']"#, in: line),
+                      let requirement = databaseRequirement(
+                        package: package,
+                        ecosystem: "ruby",
+                        relativePath: relative,
+                        field: "gem.\(package)"
+                      ) else { continue }
+                requirements.append(requirement)
+            }
+        }
         return (requirements, [])
     }
 
@@ -624,7 +841,7 @@ struct ProjectRequirementsScanner: Sendable {
         let text = rawText.split(whereSeparator: \.isNewline).map {
             String($0).components(separatedBy: "--").first ?? ""
         }.joined(separator: "\n")
-        let dependencyTables = regexCaptures(#"(?s)\bdependencies\s*=\s*\{([^}]*)\}"#, in: text)
+        let dependencyTables = regexCaptures(#"(?s)(?:\bdependencies|\bbuild_dependencies|\btest_dependencies)\s*=\s*\{([^}]*)\}"#, in: text)
         var requirements = dependencyTables.flatMap {
             regexCaptures(#"[\"']lua\s+([^\"']+)[\"']"#, in: $0)
         }.map {
@@ -636,6 +853,19 @@ struct ProjectRequirementsScanner: Sendable {
             requirements.append(ProjectRequirement(
                 capability: "lua", expression: "dynamic", relativePath: relative, field: "dependencies.lua"
             ))
+        }
+        for table in dependencyTables {
+            for declaration in regexCaptures(#"[\"']([^\"']+)[\"']"#, in: table) {
+                guard let package = declaration.split(whereSeparator: \.isWhitespace).first.map(String.init),
+                      package.lowercased() != "lua",
+                      let requirement = databaseRequirement(
+                        package: package,
+                        ecosystem: "lua",
+                        relativePath: relative,
+                        field: "dependency.\(package)"
+                      ) else { continue }
+                requirements.append(requirement)
+            }
         }
         return (requirements, [])
     }
@@ -649,8 +879,10 @@ struct ProjectRequirementsScanner: Sendable {
             let line = rawLine.split(separator: "#", maxSplits: 1).first ?? ""
             let parts = line.split(whereSeparator: \.isWhitespace).map(String.init)
             guard parts.count >= 2 else { return nil }
+            let capability = canonicalTool(parts[0])
             return ProjectRequirement(
-                capability: canonicalTool(parts[0]), expression: parts.dropFirst().joined(separator: " || "),
+                capability: capability,
+                expression: toolExpression(capability: capability, versions: Array(parts.dropFirst())),
                 relativePath: relative, field: ".tool-versions.\(parts[0])"
             )
         }
@@ -683,12 +915,97 @@ struct ProjectRequirementsScanner: Sendable {
                 continue
             }
             guard !key.isEmpty, !versions.isEmpty else { continue }
+            let capability = canonicalTool(key)
             requirements.append(ProjectRequirement(
-                capability: canonicalTool(key), expression: versions.joined(separator: " || "),
+                capability: capability,
+                expression: toolExpression(capability: capability, versions: versions),
                 relativePath: relative, field: "mise.tools.\(key)"
             ))
         }
         return (requirements, [])
+    }
+
+    private func parseCompose(file: URL, root: URL) -> [ProjectRequirement] {
+        guard let data = readSmallData(file), let text = String(data: data, encoding: .utf8) else { return [] }
+        struct Service {
+            let name: String
+            var image: String?
+            var hasProfiles = false
+        }
+        var servicesIndent: Int?
+        var serviceIndent: Int?
+        var services: [Service] = []
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let raw = String(rawLine)
+            let indent = raw.prefix(while: { $0 == " " }).count
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            if servicesIndent == nil {
+                if line == "services:" { servicesIndent = indent }
+                continue
+            }
+            guard indent > servicesIndent! else { break }
+            if line.hasSuffix(":"), !line.contains(" "), serviceIndent == nil || indent == serviceIndent {
+                serviceIndent = indent
+                services.append(Service(name: String(line.dropLast())))
+                continue
+            }
+            guard let serviceIndent, indent > serviceIndent, !services.isEmpty else { continue }
+            if line.hasPrefix("image:"), let value = yamlScalar(String(line.dropFirst("image:".count))) {
+                services[services.count - 1].image = value
+            } else if line.hasPrefix("profiles:") {
+                services[services.count - 1].hasProfiles = true
+            }
+        }
+        let relative = relativePath(file, from: root)
+        return services.compactMap { service in
+            guard !service.hasProfiles, let image = service.image,
+                  let declaration = databaseImageDeclaration(image) else { return nil }
+            return ProjectRequirement(
+                capability: declaration.capability,
+                expression: declaration.version,
+                relativePath: relative,
+                field: "services.\(service.name).image"
+            )
+        }
+    }
+
+    private func yamlScalar(_ raw: String) -> String? {
+        let value = tomlValueWithoutComment(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.hasPrefix("*"), !value.hasPrefix("&"),
+              !value.hasPrefix("[") && !value.hasPrefix("{") else { return nil }
+        if value.count >= 2,
+           (value.first == "\"" && value.last == "\"") || (value.first == "'" && value.last == "'") {
+            return String(value.dropFirst().dropLast())
+        }
+        return value.contains(where: \.isWhitespace) ? nil : value
+    }
+
+    private func databaseImageDeclaration(_ image: String) -> (capability: String, version: String)? {
+        let withoutDigest = image.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
+        let repositoryAndTag = String(withoutDigest[0])
+        let slash = repositoryAndTag.lastIndex(of: "/")
+        let colon = repositoryAndTag.lastIndex(of: ":")
+        let hasTag = colon.map { slash == nil || $0 > slash! } == true
+        let repository = hasTag ? String(repositoryAndTag[..<colon!]) : repositoryAndTag
+        guard !repository.contains("$") else { return nil }
+        let tag = hasTag ? String(repositoryAndTag[repositoryAndTag.index(after: colon!)...]) : nil
+        let basename = repository.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
+        let capability: String
+        switch basename {
+        case "postgres": capability = "postgresql"
+        case "mysql": capability = "mysql"
+        case "mariadb": capability = "mariadb"
+        case "mongo": capability = "mongodb"
+        case "redis": capability = "redis"
+        default: return nil
+        }
+        let version = withoutDigest.count > 1 ? "*" : tag.flatMap(serverVersion) ?? "*"
+        return (capability, version)
+    }
+
+    private func serverVersion(_ value: String) -> String? {
+        firstRegexCapture(#"^([0-9]+(?:\.[0-9]+){0,2})(?:-|$)"#, in: value)
     }
 
     private func canonicalTool(_ name: String) -> String {
@@ -701,17 +1018,136 @@ struct ProjectRequirementsScanner: Sendable {
         case "ruby": "ruby"
         case "lua": "lua"
         case "git": "git"
+        case "postgres", "postgresql": "postgresql"
+        case "mysql": "mysql"
+        case "mariadb": "mariadb"
+        case "mongo", "mongodb": "mongodb"
+        case "redis": "redis"
         default: name.lowercased()
         }
     }
 
+    private func toolExpression(capability: String, versions: [String]) -> String {
+        guard Self.databaseCapabilities.contains(capability) else { return versions.joined(separator: " || ") }
+        let staticVersions = versions.compactMap(serverVersion)
+        return staticVersions.count == versions.count ? staticVersions.joined(separator: " || ") : "*"
+    }
+
+    private func dependencyPackageName(_ declaration: String, ecosystem: String) -> String? {
+        guard !declaration.contains(";") else { return nil }
+        let package = declaration.prefix {
+            $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "." || $0 == "@" || $0 == "/"
+        }
+        guard !package.isEmpty else { return nil }
+        return normalizedPackage(String(package), ecosystem: ecosystem)
+    }
+
+    private func databaseRequirement(
+        package: String,
+        ecosystem: String,
+        relativePath: String,
+        field: String
+    ) -> ProjectRequirement? {
+        guard let capability = databaseCapability(for: package, ecosystem: ecosystem) else { return nil }
+        return ProjectRequirement(
+            capability: capability,
+            expression: "*",
+            relativePath: relativePath,
+            field: field
+        )
+    }
+
+    private func databaseCapability(for package: String, ecosystem: String) -> String? {
+        let package = normalizedPackage(package, ecosystem: ecosystem)
+        let postgres: Set<String>
+        let mysql: Set<String>
+        let mongodb: Set<String>
+        let redis: Set<String>
+        switch ecosystem {
+        case "node":
+            postgres = ["pg", "postgres"]
+            mysql = ["mysql", "mysql2", "mariadb"]
+            mongodb = ["mongodb", "mongoose"]
+            redis = ["redis", "ioredis", "@redis/client", "redis-om"]
+        case "python":
+            postgres = ["postgres", "psycopg", "psycopg2", "psycopg2-binary", "asyncpg", "pg8000"]
+            mysql = ["mariadb", "mysqlclient", "pymysql", "mysql-connector-python", "aiomysql", "asyncmy"]
+            mongodb = ["pymongo", "motor", "mongoengine", "beanie", "odmantic"]
+            redis = ["redis", "aioredis", "redis-om"]
+        case "go":
+            postgres = ["github.com/lib/pq", "github.com/jackc/pgx"]
+            mysql = ["github.com/go-sql-driver/mysql"]
+            mongodb = ["go.mongodb.org/mongo-driver"]
+            redis = ["github.com/redis/go-redis", "github.com/go-redis/redis"]
+        case "java":
+            postgres = ["org.postgresql:postgresql", "org.postgresql:r2dbc-postgresql"]
+            mysql = ["com.mysql:mysql-connector-j", "mysql:mysql-connector-java", "org.mariadb.jdbc:mariadb-java-client"]
+            mongodb = [
+                "org.mongodb:mongodb-driver", "org.mongodb:mongodb-driver-sync",
+                "org.mongodb:mongodb-driver-reactivestreams", "org.mongodb:mongodb-driver-core",
+                "org.mongodb:mongo-java-driver",
+            ]
+            redis = ["redis.clients:jedis", "io.lettuce:lettuce-core", "org.redisson:redisson"]
+        case "rust":
+            postgres = ["postgres", "tokio-postgres"]
+            mysql = ["mysql", "mysql-async"]
+            mongodb = ["mongodb"]
+            redis = ["redis"]
+        case "ruby":
+            postgres = ["pg"]
+            mysql = ["mysql2"]
+            mongodb = ["mongo", "mongoid"]
+            redis = ["redis"]
+        case "lua":
+            postgres = ["luasql-postgres"]
+            mysql = ["luasql-mysql"]
+            mongodb = []
+            redis = ["lua-resty-redis"]
+        default: return nil
+        }
+        if postgres.contains(package) { return "postgresql" }
+        if mysql.contains(package) { return "mysql-compatible" }
+        if mongodb.contains(package) { return "mongodb" }
+        if redis.contains(package) { return "redis" }
+        return nil
+    }
+
+    private func normalizedPackage(_ package: String, ecosystem: String) -> String {
+        var value = package.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if ecosystem == "python" { value = value.replacingOccurrences(of: "_", with: "-").replacingOccurrences(of: ".", with: "-") }
+        if ecosystem == "rust" { value = value.replacingOccurrences(of: "_", with: "-") }
+        if ecosystem == "go" { value = value.replacingOccurrences(of: #"/v[0-9]+$"#, with: "", options: .regularExpression) }
+        return value
+    }
+
     private func tomlStringArray(_ rawValue: String) -> [String]? {
-        let value = tomlValueWithoutComment(rawValue).trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = rawValue.split(whereSeparator: \.isNewline)
+            .map { tomlValueWithoutComment(String($0)) }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.range(
             of: #"^\[\s*(?:[\"'][^\"']*[\"']\s*(?:,\s*[\"'][^\"']*[\"']\s*)*)?\]$"#,
             options: .regularExpression
         ) != nil else { return nil }
         return regexCaptures(#"[\"']([^\"']*)[\"']"#, in: value)
+    }
+
+    private func tomlArray(named name: String, in text: String) -> [String]? {
+        guard let nameRange = text.range(of: name),
+              let equals = text[nameRange.upperBound...].firstIndex(of: "="),
+              let start = text[equals...].firstIndex(of: "[") else { return nil }
+        var quote: Character?
+        var escaped = false
+        for index in text.indices[text.index(after: start)...] {
+            let character = text[index]
+            if escaped { escaped = false }
+            else if character == "\\", quote == "\"" { escaped = true }
+            else if let current = quote {
+                if character == current { quote = nil }
+            } else if character == "\"" || character == "'" { quote = character }
+            else if character == "]" { return tomlStringArray(String(text[start ... index])) }
+        }
+        return nil
     }
 
     private func tomlValueWithoutComment(_ value: String) -> String {
@@ -757,6 +1193,21 @@ struct ProjectRequirementsScanner: Sendable {
         return regex.matches(in: text, range: range).compactMap { match in
             guard match.numberOfRanges > 1, let range = Range(match.range(at: 1), in: text) else { return nil }
             return String(text[range])
+        }
+    }
+
+    private func firstRegexCapture(_ pattern: String, in text: String) -> String? {
+        regexCaptures(pattern, in: text).first?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func regexCapturePairs(_ pattern: String, in text: String) -> [(String, String)] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard match.numberOfRanges > 2,
+                  let first = Range(match.range(at: 1), in: text),
+                  let second = Range(match.range(at: 2), in: text) else { return nil }
+            return (String(text[first]), String(text[second]))
         }
     }
 
@@ -816,7 +1267,9 @@ struct ProjectRequirementsScanner: Sendable {
                 }
                 continue
             }
-            if capability != "git" && !Self.runtimeCapabilities.contains(capability) {
+            if capability != "git"
+                && !Self.runtimeCapabilities.contains(capability)
+                && !Self.databaseCapabilities.contains(capability) {
                 for index in indices {
                     evaluated[index].satisfaction = .undetermined
                     evaluated[index].matches = []
@@ -861,7 +1314,8 @@ struct ProjectRequirementsScanner: Sendable {
                         version: $0.version,
                         path: $0.path,
                         source: $0.source,
-                        isEffective: $0.isEffective
+                        isEffective: $0.isEffective,
+                        listeningState: $0.listeningState
                     )
                 }
                 evaluated[index].evidence = matches.isEmpty ? evidence : []
@@ -888,38 +1342,58 @@ struct ProjectRequirementsScanner: Sendable {
         return allowed.isEmpty || allowed.contains { actual.contains($0.lowercased()) }
     }
 
+    private func databaseIDs(for capability: String) -> [String] {
+        capability == "mysql-compatible" ? ["mysql", "mariadb"] : [capability]
+    }
+
     private func candidates(
         for capability: String,
         machineSnapshot: MachineSnapshot,
         localPythonInstallations: [ProjectLocalRuntimeInstallation]
-    ) -> [(version: String, path: String, source: String?, isEffective: Bool)] {
+    ) -> [(version: String, path: String, source: String?, isEffective: Bool, listeningState: DatabaseListeningState?)] {
         if capability == "os" {
-            return [(machineSnapshot.system.macOSVersion ?? "darwin", "Machine Snapshot", nil, true)]
+            return [(machineSnapshot.system.macOSVersion ?? "darwin", "Machine Snapshot", nil, true, nil)]
         }
         if capability == "cpu" {
-            return machineSnapshot.system.architecture.map { [($0, "Machine Snapshot", nil, true)] } ?? []
+            return machineSnapshot.system.architecture.map { [($0, "Machine Snapshot", nil, true, nil)] } ?? []
         }
         if capability == "git" {
             guard machineSnapshot.gitCLI.state == .available,
                   let version = machineSnapshot.gitCLI.version?.firstMatch(of: /\d+(?:\.\d+){0,2}/).map({ String($0.output) }) else { return [] }
-            return [(version, machineSnapshot.gitCLI.executable ?? "Git CLI", nil, true)]
+            return [(version, machineSnapshot.gitCLI.executable ?? "Git CLI", nil, true, nil)]
+        }
+        if Self.databaseCapabilities.contains(capability) {
+            let ids = databaseIDs(for: capability)
+            return machineSnapshot.databaseInstallationOverviews
+                .filter { ids.contains($0.id.lowercased()) }
+                .flatMap(\.installations)
+                .map { installation in
+                    return (
+                        installation.version ?? "版本不可读",
+                        installation.executable,
+                        installation.sources.map(\.displayName).joined(separator: " + "),
+                        false,
+                        installation.listeningState
+                    )
+                }
         }
         guard Self.runtimeCapabilities.contains(capability) else { return [] }
         var result = machineSnapshot.runtimes
             .first { $0.id.lowercased() == capability }?
-            .installations.compactMap { installation -> (String, String, String?, Bool)? in
+            .installations.compactMap { installation -> (String, String, String?, Bool, DatabaseListeningState?)? in
             guard installation.state == .discovered, let version = installation.version else { return nil }
             return (
                 version,
                 installation.executable,
                 installation.sources.first?.displayName,
-                installation.isEffective
+                installation.isEffective,
+                nil
             )
         } ?? []
         if capability == "python" {
             result.append(contentsOf: localPythonInstallations.compactMap { installation in
                 guard installation.isUsable, let version = installation.version else { return nil }
-                return (version, installation.executable, "Virtual Environment", false)
+                return (version, installation.executable, "Virtual Environment", false, nil)
             })
         }
         return result
@@ -938,6 +1412,13 @@ struct ProjectRequirementsScanner: Sendable {
                 return machineSnapshot.gitCLI.version?.firstMatch(of: /\d+(?:\.\d+){0,2}/) == nil
             }
         }
+        if Self.databaseCapabilities.contains(capability) {
+            let ids = databaseIDs(for: capability)
+            let overviews = machineSnapshot.databaseInstallationOverviews.filter { ids.contains($0.id.lowercased()) }
+            return overviews.count < ids.count
+                || overviews.contains { $0.discoveryState == .unknown }
+                || overviews.flatMap(\.installations).contains { $0.version == nil }
+        }
         guard Self.runtimeCapabilities.contains(capability) else { return false }
         if machineSnapshot.runtimes.first(where: { $0.id.lowercased() == capability })?.installations.contains(where: { $0.version == nil }) == true {
             return true
@@ -954,6 +1435,28 @@ struct ProjectRequirementsScanner: Sendable {
             let version = machineSnapshot.gitCLI.version ?? "版本不可读"
             let path = machineSnapshot.gitCLI.executable ?? "Git CLI"
             return ["\(version) · \(path) · \(machineSnapshot.gitCLI.state.rawValue)"]
+        }
+        if Self.databaseCapabilities.contains(capability) {
+            let ids = databaseIDs(for: capability)
+            var evidence: [String] = []
+            for id in ids {
+                guard let overview = machineSnapshot.databaseInstallationOverviews.first(where: {
+                    $0.id.lowercased() == id
+                }) else {
+                    evidence.append("\(id)：Machine Snapshot 证据不足")
+                    continue
+                }
+                if overview.installations.isEmpty {
+                    evidence.append(overview.discoveryState == .unknown
+                        ? "\(overview.name)：Database Provider 发现状态未知"
+                        : "\(overview.name)：未发现 Database Installation")
+                } else {
+                    evidence.append(contentsOf: overview.installations.map {
+                        "\($0.version ?? "版本不可读") · \($0.executable) · \($0.sources.map(\.displayName).joined(separator: " + ")) · \($0.listeningState.rawValue)"
+                    })
+                }
+            }
+            return evidence
         }
         var evidence = machineSnapshot.runtimes
             .first { $0.id.lowercased() == capability }?
@@ -1027,8 +1530,12 @@ private struct StaticVersionConstraint: Sendable {
         for raw in rawAlternatives {
             let value = raw.trimmingCharacters(in: .whitespaces)
             if value.isEmpty { unsupported = true; continue }
-            if value == "*" || value.lowercased() == "latest" || value.contains("${") || value.contains("workspace:") {
-                if value != "*" { unsupported = true }
+            if value == "*" {
+                parsed.append([])
+                continue
+            }
+            if value.lowercased() == "latest" || value.contains("${") || value.contains("workspace:") {
+                unsupported = true
                 continue
             }
             var terms: [(String, SemanticVersion)] = []
@@ -1068,8 +1575,8 @@ private struct StaticVersionConstraint: Sendable {
     }
 
     func matches(_ value: String) -> Bool {
-        guard let candidate = SemanticVersion(value) else { return false }
         if expression == "*" { return true }
+        guard let candidate = SemanticVersion(value) else { return false }
         return alternatives.contains { terms in
             terms.allSatisfy { term in
                 switch term.0 {

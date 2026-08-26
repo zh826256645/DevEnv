@@ -257,7 +257,7 @@ struct ProjectDiscovery: Sendable {
     private static let primaryManifestNames: Set<String> = [
         "Cargo.toml", "Gemfile", "build.gradle", "build.gradle.kts", "compose.yaml", "compose.yml",
         "docker-compose.yaml", "docker-compose.yml", "go.mod", "go.work", "package.json", "pom.xml",
-        "pyproject.toml", "settings.gradle", "settings.gradle.kts",
+        "pyproject.toml", "requirements.in", "settings.gradle", "settings.gradle.kts",
     ]
 
     func discover(

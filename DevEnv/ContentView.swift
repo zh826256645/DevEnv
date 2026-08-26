@@ -1498,7 +1498,14 @@ struct ContentView: View {
                                 Spacer()
                                 VStack(alignment: .trailing, spacing: 3) {
                                     Text("\(projectCapabilityTitle(requirement.capability)) \(match.version)")
-                                    Text("优先级：\(match.isEffective ? "高" : "中")")
+                                    if let listeningState = match.listeningState {
+                                        let listening = databaseListeningStyle(listeningState)
+                                        Label(listening.title, systemImage: listening.symbol)
+                                            .foregroundStyle(listening.color)
+                                            .accessibilityLabel("Database Listening State：\(listening.title)")
+                                    } else {
+                                        Text("优先级：\(match.isEffective ? "高" : "中")")
+                                    }
                                 }
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -1526,6 +1533,14 @@ struct ContentView: View {
     private func projectCapabilityIcon(_ capability: String) -> some View {
         if let brand = runtimeBrand(capability) {
             runtimeLogo(brand)
+        } else if capability == "mysql-compatible" {
+            HStack(spacing: 4) {
+                databaseLogo("mysql", size: 22, padding: 4)
+                databaseLogo("mariadb", size: 22, padding: 4)
+            }
+            .frame(width: 48, height: 48)
+        } else if ["postgresql", "mysql", "mariadb", "mongodb", "redis"].contains(capability) {
+            databaseLogo(capability, size: 48, padding: 8)
         } else {
             Image(systemName: capability == "docker-compose" ? "shippingbox.fill" : "terminal.fill")
                 .font(.system(size: 21, weight: .medium))
@@ -1544,6 +1559,12 @@ struct ContentView: View {
         case "rust": "Rust"
         case "ruby": "Ruby"
         case "lua": "Lua"
+        case "postgresql": "PostgreSQL"
+        case "mysql": "MySQL"
+        case "mariadb": "MariaDB"
+        case "mongodb": "MongoDB"
+        case "redis": "Redis"
+        case "mysql-compatible": "MySQL 兼容数据库要求"
         default: capability
         }
     }
@@ -2417,7 +2438,16 @@ struct ContentView: View {
         padding: CGFloat,
         usesNeutralBackground: Bool = false
     ) -> some View {
-        let appearance: (asset: String, color: Color) = switch database.id {
+        databaseLogo(database.id, size: size, padding: padding, usesNeutralBackground: usesNeutralBackground)
+    }
+
+    private func databaseLogo(
+        _ id: String,
+        size: CGFloat,
+        padding: CGFloat,
+        usesNeutralBackground: Bool = false
+    ) -> some View {
+        let appearance: (asset: String, color: Color) = switch id {
         case "mysql": ("ServiceMySQLLogo", Color(red: 0.27, green: 0.47, blue: 0.63))
         case "mariadb": ("ServiceMariaDBLogo", Color(red: 0, green: 0.36, blue: 0.43))
         case "mongodb": ("ServiceMongoDBLogo", Color(red: 0.29, green: 0.66, blue: 0.34))

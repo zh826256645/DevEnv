@@ -71,6 +71,18 @@ final class ProjectRecordsTests: XCTestCase {
         }.sorted())
     }
 
+    func testRequirementsInIsAPrimaryManifest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("python-project")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try Data("redis\n".utf8).write(to: project.appendingPathComponent("requirements.in"))
+
+        let result = ProjectDiscovery().discover(searchRoots: [root], ignoredPaths: [])
+
+        XCTAssertEqual(result.projectPaths, [project.resolvingSymlinksInPath().standardizedFileURL.path])
+    }
+
     func testRecordLifecycleMergesIncrementallyAndOnlyClearsDisplayedNewProjects() {
         let firstDiscovery = Date(timeIntervalSince1970: 100)
         let laterDiscovery = Date(timeIntervalSince1970: 200)
