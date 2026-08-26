@@ -80,6 +80,25 @@ struct ProjectRequirement: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+struct ProjectRequirementDeclaration: Codable, Equatable, Sendable, Identifiable {
+    let expression: String
+    let relativePath: String
+    let field: String
+
+    var id: String { "\(relativePath):\(field):\(expression)" }
+}
+
+struct ProjectCapabilityRequirement: Codable, Equatable, Sendable, Identifiable {
+    let capability: String
+    let expression: String
+    let declarations: [ProjectRequirementDeclaration]
+    let satisfaction: ProjectRequirementSatisfactionState
+    let matches: [ProjectRequirementMatch]
+    let evidence: [String]
+
+    var id: String { capability }
+}
+
 struct ProjectLocalRuntimeInstallation: Codable, Equatable, Sendable, Identifiable {
     let id: String
     let executable: String
@@ -130,18 +149,32 @@ struct ProjectComponent: Codable, Equatable, Sendable, Identifiable {
 struct ProjectRequirementsAnalysis: Codable, Equatable, Sendable {
     let rootPath: String
     let components: [ProjectComponent]
+    let requirements: [ProjectCapabilityRequirement]
     let notices: [ProjectNotice]
     let summary: ProjectRequirementsSummary
 
-    init(rootPath: String, components: [ProjectComponent], notices: [ProjectNotice] = []) {
+    init(
+        rootPath: String,
+        components: [ProjectComponent],
+        requirements: [ProjectCapabilityRequirement],
+        notices: [ProjectNotice] = []
+    ) {
         self.rootPath = rootPath
         self.components = components
+        self.requirements = requirements
         self.notices = notices
         guard !components.isEmpty else {
             summary = notices.isEmpty ? .undeclared : .unavailable
             return
         }
-        let states = components.map(\.summary)
+        let states = requirements.map { requirement in
+            switch requirement.satisfaction {
+            case .satisfied: ProjectRequirementsSummary.satisfied
+            case .unsatisfied: .unsatisfied
+            case .undetermined: .undetermined
+            case .declarationConflict: .declarationConflict
+            }
+        } + components.filter(\.requirements.isEmpty).map(\.summary)
         if states.contains(.declarationConflict) { summary = .declarationConflict }
         else if states.contains(.unsatisfied) { summary = .unsatisfied }
         else if states.contains(.undetermined) { summary = .undetermined }
@@ -183,6 +216,7 @@ struct ProjectRequirementsScanner: Sendable {
             return ProjectRequirementsAnalysis(
                 rootPath: root.path,
                 components: [],
+                requirements: [],
                 notices: [ProjectNotice(relativePath: ".", message: "Project Root 不可用")]
             )
         }
@@ -306,7 +340,12 @@ struct ProjectRequirementsScanner: Sendable {
             components.append(component)
             rootNotices.append(contentsOf: notices)
         }
-        return ProjectRequirementsAnalysis(rootPath: root.path, components: components, notices: rootNotices)
+        return ProjectRequirementsAnalysis(
+            rootPath: root.path,
+            components: components,
+            requirements: evaluateProjectRequirements(components, machineSnapshot: machineSnapshot),
+            notices: rootNotices
+        )
     }
 
     func recalculate(
@@ -335,8 +374,83 @@ struct ProjectRequirementsScanner: Sendable {
         return ProjectRequirementsAnalysis(
             rootPath: analysis.rootPath,
             components: components,
+            requirements: evaluateProjectRequirements(components, machineSnapshot: machineSnapshot),
             notices: analysis.notices
         )
+    }
+
+    private func evaluateProjectRequirements(
+        _ components: [ProjectComponent],
+        machineSnapshot: MachineSnapshot?
+    ) -> [ProjectCapabilityRequirement] {
+        let requirements = components.flatMap(\.requirements)
+        let localPythonInstallations = components.flatMap(\.localPythonInstallations)
+        var capabilities: [String] = []
+        var grouped: [String: [ProjectRequirement]] = [:]
+        for requirement in requirements {
+            if grouped[requirement.capability] == nil { capabilities.append(requirement.capability) }
+            grouped[requirement.capability, default: []].append(requirement)
+        }
+        return capabilities.compactMap { capability in
+            guard let declarations = grouped[capability] else { return nil }
+            let databaseExpression = Self.databaseCapabilities.contains(capability)
+                ? lowestDatabaseExpression(declarations.map(\.expression))
+                : nil
+            let evaluated = evaluate(
+                requirements: databaseExpression.map {
+                    [ProjectRequirement(
+                        capability: capability,
+                        expression: $0,
+                        relativePath: declarations[0].relativePath,
+                        field: declarations[0].field
+                    )]
+                } ?? declarations,
+                localPythonInstallations: localPythonInstallations,
+                machineSnapshot: machineSnapshot
+            )
+            guard let result = evaluated.requirements.first else { return nil }
+            var seenPaths: Set<String> = []
+            return ProjectCapabilityRequirement(
+                capability: capability,
+                expression: databaseExpression ?? mergedExpression(declarations),
+                declarations: declarations.map {
+                    ProjectRequirementDeclaration(
+                        expression: $0.expression,
+                        relativePath: $0.relativePath,
+                        field: $0.field
+                    )
+                },
+                satisfaction: result.satisfaction,
+                matches: result.matches.filter { seenPaths.insert($0.path).inserted },
+                evidence: result.evidence
+            )
+        }
+    }
+
+    private func lowestDatabaseExpression(_ expressions: [String]) -> String? {
+        let concrete = expressions.filter { $0 != "*" }
+        guard !concrete.isEmpty else { return "*" }
+        let alternatives = concrete.flatMap {
+            $0.components(separatedBy: "||").map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+        let versions = alternatives.compactMap(SemanticVersion.init)
+        guard versions.count == alternatives.count, let minimum = versions.min() else { return nil }
+        return ">=\(minimum.normalized)"
+    }
+
+    private func mergedExpression(_ requirements: [ProjectRequirement]) -> String {
+        let expressions = requirements.map(\.expression).reduce(into: [String]()) { result, expression in
+            if expression != "*", !result.contains(expression) { result.append(expression) }
+        }
+        guard !expressions.isEmpty else { return "*" }
+        guard expressions.count > 1 else { return expressions[0] }
+        let constraints = expressions.map(StaticVersionConstraint.init)
+        if let line = expressions.first(where: { expression in
+            SemanticVersion(expression) != nil && constraints.allSatisfy { $0.matches(expression) }
+        }) {
+            return line
+        }
+        return expressions.joined(separator: " ∩ ")
     }
 
     private func isDirectory(_ url: URL) -> Bool {
@@ -1508,6 +1622,14 @@ private struct SemanticVersion: Comparable {
 
     static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
         (lhs.major, lhs.minor, lhs.patch) < (rhs.major, rhs.minor, rhs.patch)
+    }
+
+    var normalized: String {
+        switch precision {
+        case 1: "\(major)"
+        case 2: "\(major).\(minor)"
+        default: "\(major).\(minor).\(patch)"
+        }
     }
 }
 

@@ -671,7 +671,7 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 Project Database Requirement 来自受支持清单中的直接客户端依赖、数据库工具声明和默认 Compose 文件，并只与 Machine Snapshot 中 PostgreSQL、MySQL、MariaDB、MongoDB 或 Redis 对应的 Database Installation 比较；客户端版本与监听状态不作为满足条件。
 
-Project Requirements 会与当前 Machine Environment 及 Python Component 的 `.venv` 比较，展示声明证据、匹配安装和“已满足”“未满足”“无法判断”或“声明冲突”；项目汇总另外区分“未声明要求”和“不可用”。该结果不声称项目一定能够运行，也不包含安装、修复或启动环境。
+Project Requirements 会在整个 Project Root 内按 Machine Environment 能力归并后，与当前 Machine Environment 及 Python Component 的 `.venv` 比较；数据库裸版本取最低声明版本作为最低门槛，其他版本约束必须能够同时满足。每项归并结果展示全部声明来源、匹配安装和“已满足”“未满足”“无法判断”或“声明冲突”，项目汇总另外区分“未声明要求”和“不可用”。该结果不声称项目一定能够运行，也不包含安装、修复或启动环境。
 
 Projects 页面提供可搜索的项目列表与 Component 详情；进入页面时逐项刷新并保留旧内容，失败时显示本次会话的过期结果。Machine Snapshot 更新只重新计算已有声明，不重复读取未变化的项目文件。
 

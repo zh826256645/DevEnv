@@ -1301,7 +1301,7 @@ struct ContentView: View {
         analysis: ProjectRequirementsAnalysis?
     ) -> some View {
         let manifests = Array(Set(analysis?.components.flatMap(\.manifestNames) ?? [])).sorted()
-        let requirements = analysis?.components.flatMap(\.requirements) ?? []
+        let requirements = analysis?.requirements ?? []
         let capabilities = Array(Set(requirements.map { projectCapabilityTitle($0.capability) })).sorted()
         let unsatisfiedCount = requirements.filter { $0.satisfaction == .unsatisfied }.count
         let discovery = ProjectDiscovery()
@@ -1393,7 +1393,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private func projectAnalysisDetail(_ analysis: ProjectRequirementsAnalysis) -> some View {
-        let requirements = analysis.components.flatMap(\.requirements)
+        let requirements = analysis.requirements
         if analysis.components.isEmpty || requirements.isEmpty {
             Label("未声明受支持的 Project Requirements", systemImage: "doc.text")
                 .foregroundStyle(.secondary)
@@ -1415,7 +1415,7 @@ struct ContentView: View {
         }
     }
 
-    private func projectRequirementDetail(_ requirement: ProjectRequirement) -> some View {
+    private func projectRequirementDetail(_ requirement: ProjectCapabilityRequirement) -> some View {
         let isExpanded = expandedProjectRequirementID == requirement.id
         return VStack(spacing: 0) {
             Button {
@@ -1426,13 +1426,9 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(projectCapabilityTitle(requirement.capability))
                             .font(.headline)
-                        Text("要求：\(requirement.expression)")
+                        Text("要求：\(requirement.expression)（\(requirement.declarations.count) 个声明）")
                             .font(.callout)
                             .foregroundStyle(.secondary)
-                        Text("来源：\(requirement.relativePath) · \(requirement.field)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
                     }
                     Spacer()
                     Label(
@@ -1452,12 +1448,31 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .accessibilityLabel(
                 "\(projectCapabilityTitle(requirement.capability))，要求 \(requirement.expression)，"
+                    + "\(requirement.declarations.count) 个声明，"
                     + "\(projectRequirementStateTitle(requirement.satisfaction))，"
                     + (isExpanded ? "收起详情" : "展开详情")
             )
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 8) {
+                    Text("声明来源（\(requirement.declarations.count)）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(requirement.declarations) { declaration in
+                        HStack(spacing: 12) {
+                            Text(declaration.expression)
+                                .font(.headline)
+                            Text("\(declaration.relativePath) · \(declaration.field)")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 9))
+                    }
                     Text("匹配环境（\(requirement.matches.count)）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1641,7 +1656,7 @@ struct ContentView: View {
         case .satisfied: "Machine Snapshot 已满足该声明"
         case .unsatisfied: "未找到满足声明的可用安装"
         case .undetermined: "Machine Environment 证据不足，无法判断"
-        case .declarationConflict: "同一 Project Component 的声明无法由单个安装同时满足"
+        case .declarationConflict: "项目中的声明无法由单个安装同时满足"
         }
     }
 

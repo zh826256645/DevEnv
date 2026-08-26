@@ -33,11 +33,15 @@ _Avoid_: Project Snapshot, Project Files
 _Avoid_: Deleted Project, Unavailable Project
 
 **Project Component**:
-Project Root 内由自身目录中的项目清单声明独立 Project Requirements 的组成部分；同一项目的不同 Component 可以要求同类 Runtime 的不同版本。
+Project Root 内由自身目录中的项目清单声明独立 Project Requirements 的组成部分；这些声明会在 Project Root 层按 Machine Environment 能力归并，同类 Runtime 的不相容版本形成 Project Requirement Conflict。
 _Avoid_: Project, Package
 
+**Project Capability Requirement**:
+一个 Project Root 内对同一项 Machine Environment 能力的全部 Project Requirements 归并结果；它保留每条声明来源，并以一个 Requirement Satisfaction State 表示项目级匹配结论。数据库裸版本取最低声明版本作为最低门槛，其他版本约束必须能够同时满足。
+_Avoid_: Merged Requirement, Requirement Card
+
 **Project Requirement Conflict**:
-同一 Project Component 对同一项 Machine Environment 能力存在无法同时满足的多份声明。
+同一 Project Root 对同一项 Machine Environment 能力存在无法按该能力的归并规则得到可满足版本的多份声明。
 _Avoid_: Runtime Conflict, Version Conflict
 
 **Project Notice**:

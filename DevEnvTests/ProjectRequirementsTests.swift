@@ -3,6 +3,47 @@ import XCTest
 @testable import DevEnv
 
 final class ProjectRequirementsTests: XCTestCase {
+    func testGroupsRequirementsAcrossComponentsAndUsesLowestDatabaseVersion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let backend = root.appendingPathComponent("backend")
+        try FileManager.default.createDirectory(at: backend, withIntermediateDirectories: true)
+        try Data("postgres 15 16\n".utf8).write(to: root.appendingPathComponent(".tool-versions"))
+        try Data("services:\n  old-db:\n    image: postgres:15\n  new-db:\n    image: postgres:16\n".utf8)
+            .write(to: root.appendingPathComponent("compose.yaml"))
+        try Data("3.13\n".utf8).write(to: backend.appendingPathComponent(".python-version"))
+        try Data("""
+        [project]
+        requires-python = ">=3.13"
+        dependencies = ["psycopg[binary]"]
+        """.utf8).write(to: backend.appendingPathComponent("pyproject.toml"))
+
+        let analysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(
+                python: [runtimeInstallation(path: "/opt/python", version: "3.13.4")],
+                databases: [
+                    databaseOverview(
+                        id: "postgresql",
+                        installations: [databaseInstallation(path: "/opt/postgres", version: "15.9")]
+                    ),
+                ]
+            )
+        )
+
+        XCTAssertEqual(analysis.requirements.count, 3)
+        let python = try XCTUnwrap(analysis.requirements.first { $0.capability == "python" })
+        XCTAssertEqual(python.expression, "3.13")
+        XCTAssertEqual(python.declarations.count, 2)
+        XCTAssertEqual(python.satisfaction, .satisfied)
+
+        let postgresql = try XCTUnwrap(analysis.requirements.first { $0.capability == "postgresql" })
+        XCTAssertEqual(postgresql.expression, ">=15")
+        XCTAssertEqual(postgresql.declarations.map(\.expression), ["15 || 16", "15", "16", "*"])
+        XCTAssertEqual(postgresql.satisfaction, .satisfied)
+        XCTAssertEqual(postgresql.matches.map(\.version), ["15.9"])
+    }
+
     func testScansComponentsAndUsesComponentVenvAsPythonEvidence() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -113,9 +154,12 @@ final class ProjectRequirementsTests: XCTestCase {
         try Data(repeating: 0x20, count: ProjectRequirementsScanner.maxManifestBytes + 1)
             .write(to: broken.appendingPathComponent("package.json"))
 
-        let analysis = ProjectRequirementsScanner().scan(projectRoot: root, machineSnapshot: snapshot(python: []))
+        let analysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(python: [runtimeInstallation(path: "/opt/python", version: "3.11.9")])
+        )
 
-        XCTAssertEqual(analysis.components.first { $0.relativePath == "api" }?.summary, .undetermined)
+        XCTAssertEqual(analysis.components.first { $0.relativePath == "api" }?.summary, .satisfied)
         XCTAssertEqual(analysis.components.first { $0.relativePath == "broken" }?.summary, .undetermined)
         XCTAssertEqual(analysis.summary, .undetermined)
         XCTAssertEqual(analysis.notices.first?.message, "清单不可读或超过 4 MiB")
