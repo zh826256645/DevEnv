@@ -41,6 +41,7 @@ struct ProjectRequirement: Codable, Equatable, Sendable, Identifiable {
     let field: String
     var satisfaction: ProjectRequirementSatisfactionState
     var matches: [ProjectRequirementMatch]
+    var evidence: [String]
 
     init(
         capability: String,
@@ -48,7 +49,8 @@ struct ProjectRequirement: Codable, Equatable, Sendable, Identifiable {
         relativePath: String,
         field: String,
         satisfaction: ProjectRequirementSatisfactionState = .undetermined,
-        matches: [ProjectRequirementMatch] = []
+        matches: [ProjectRequirementMatch] = [],
+        evidence: [String] = []
     ) {
         self.capability = capability
         self.expression = expression
@@ -56,6 +58,7 @@ struct ProjectRequirement: Codable, Equatable, Sendable, Identifiable {
         self.field = field
         self.satisfaction = satisfaction
         self.matches = matches
+        self.evidence = evidence
         id = "\(relativePath):\(field):\(capability):\(expression)"
     }
 }
@@ -254,7 +257,7 @@ struct ProjectRequirementsScanner: Sendable {
                 localPythonInstallations: localPython,
                 machineSnapshot: machineSnapshot
             )
-            let componentSummary = requirements.isEmpty && !notices.isEmpty ? .unavailable : evaluated.summary
+            let componentSummary = requirements.isEmpty && !notices.isEmpty ? .undetermined : evaluated.summary
             let component = ProjectComponent(
                 rootPath: root.path,
                 relativePath: relativePath,
@@ -269,6 +272,36 @@ struct ProjectRequirementsScanner: Sendable {
             rootNotices.append(contentsOf: notices)
         }
         return ProjectRequirementsAnalysis(rootPath: root.path, components: components, notices: rootNotices)
+    }
+
+    func recalculate(
+        _ analysis: ProjectRequirementsAnalysis,
+        machineSnapshot: MachineSnapshot?
+    ) -> ProjectRequirementsAnalysis {
+        let components = analysis.components.map { component in
+            let evaluated = evaluate(
+                requirements: component.requirements,
+                localPythonInstallations: component.localPythonInstallations,
+                machineSnapshot: machineSnapshot
+            )
+            return ProjectComponent(
+                rootPath: analysis.rootPath,
+                relativePath: component.relativePath,
+                manifestNames: component.manifestNames,
+                displayName: component.manifestName,
+                requirements: evaluated.requirements,
+                notices: component.notices,
+                localPythonInstallations: component.localPythonInstallations,
+                summary: component.requirements.isEmpty && !component.notices.isEmpty
+                    ? .undetermined
+                    : evaluated.summary
+            )
+        }
+        return ProjectRequirementsAnalysis(
+            rootPath: analysis.rootPath,
+            components: components,
+            notices: analysis.notices
+        )
     }
 
     private func isDirectory(_ url: URL) -> Bool {
@@ -718,7 +751,13 @@ struct ProjectRequirementsScanner: Sendable {
     ) -> (requirements: [ProjectRequirement], summary: ProjectRequirementsSummary) {
         guard !requirements.isEmpty else { return ([], .undeclared) }
         guard let machineSnapshot else {
-            return (requirements.map { var value = $0; value.satisfaction = .undetermined; return value }, .undetermined)
+            return (requirements.map {
+                var value = $0
+                value.satisfaction = .undetermined
+                value.matches = []
+                value.evidence = ["尚无 Machine Snapshot"]
+                return value
+            }, .undetermined)
         }
         var evaluated = requirements
         var groups: [String: [Int]] = [:]
@@ -733,16 +772,25 @@ struct ProjectRequirementsScanner: Sendable {
                 for index in indices {
                     evaluated[index].satisfaction = state
                     evaluated[index].matches = possible ? [ProjectRequirementMatch(version: actual.first ?? "", path: "Machine Snapshot")] : []
+                    evaluated[index].evidence = possible ? [] : ["Machine Snapshot：\(actual.joined(separator: ", "))"]
                 }
                 continue
             }
             if capability != "git" && !Self.runtimeCapabilities.contains(capability) {
-                for index in indices { evaluated[index].satisfaction = .undetermined }
+                for index in indices {
+                    evaluated[index].satisfaction = .undetermined
+                    evaluated[index].matches = []
+                    evaluated[index].evidence = ["Machine Environment 尚未建模 \(capability)"]
+                }
                 continue
             }
             let constraints = indices.map { StaticVersionConstraint(evaluated[$0].expression) }
             if constraints.contains(where: { $0.isUnsupported }) {
-                for index in indices { evaluated[index].satisfaction = .undetermined }
+                for index in indices {
+                    evaluated[index].satisfaction = .undetermined
+                    evaluated[index].matches = []
+                    evaluated[index].evidence = ["原始表达式无法静态比较"]
+                }
                 continue
             }
             let candidates = candidates(for: capability, machineSnapshot: machineSnapshot, localPythonInstallations: localPythonInstallations)
@@ -756,9 +804,20 @@ struct ProjectRequirementsScanner: Sendable {
                     machineSnapshot: machineSnapshot,
                     localPythonInstallations: localPythonInstallations
                 ) ? .undetermined : .unsatisfied
+            let alternatives = discoveredEvidence(
+                for: capability,
+                machineSnapshot: machineSnapshot,
+                localPythonInstallations: localPythonInstallations
+            )
+            let evidence = state == .declarationConflict
+                ? indices.map {
+                    "冲突声明：\(evaluated[$0].relativePath) · \(evaluated[$0].field) · \(evaluated[$0].expression)"
+                } + alternatives
+                : alternatives
             for index in indices {
                 evaluated[index].satisfaction = state
                 evaluated[index].matches = matches.map { ProjectRequirementMatch(version: $0.version, path: $0.path) }
+                evaluated[index].evidence = matches.isEmpty ? evidence : []
             }
         }
         let states = evaluated.map(\.satisfaction)
@@ -827,6 +886,29 @@ struct ProjectRequirementsScanner: Sendable {
             return true
         }
         return capability == "python" && localPythonInstallations.contains { $0.version == nil }
+    }
+
+    private func discoveredEvidence(
+        for capability: String,
+        machineSnapshot: MachineSnapshot,
+        localPythonInstallations: [ProjectLocalRuntimeInstallation]
+    ) -> [String] {
+        if capability == "git" {
+            let version = machineSnapshot.gitCLI.version ?? "版本不可读"
+            let path = machineSnapshot.gitCLI.executable ?? "Git CLI"
+            return ["\(version) · \(path) · \(machineSnapshot.gitCLI.state.rawValue)"]
+        }
+        var evidence = machineSnapshot.runtimes
+            .first { $0.id.lowercased() == capability }?
+            .installations.map {
+                "\($0.version ?? "版本不可读") · \($0.executable) · \($0.state.rawValue)"
+            } ?? []
+        if capability == "python" {
+            evidence.append(contentsOf: localPythonInstallations.map {
+                "\($0.version ?? "版本不可读") · \($0.executable) · \($0.isUsable ? "project-local" : "不可用")"
+            })
+        }
+        return evidence.isEmpty ? ["未发现相关 Machine Environment 证据"] : evidence
     }
 
     private func constraintsIntersectionIsPossible(_ constraints: [StaticVersionConstraint]) -> Bool {

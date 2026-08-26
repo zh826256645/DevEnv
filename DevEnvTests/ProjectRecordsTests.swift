@@ -334,4 +334,107 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertFalse(model.mutationsArePaused)
         XCTAssertEqual(model.records.count, 1)
     }
+
+    @MainActor
+    func testProjectSearchMatchesTitleAndPathWithoutChangingListOrder() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let alpha = directory.appendingPathComponent("Alpha")
+        let beta = directory.appendingPathComponent("nested/beta")
+        try FileManager.default.createDirectory(at: alpha, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: beta, withIntermediateDirectories: true)
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument()
+        document.addDirect([beta.path, alpha.path])
+        document.clearNew(displayedProjectIDs: Set(document.records.map(\.id)))
+        try store.save(document)
+        let model = ProjectsViewModel(store: store)
+
+        model.enterProjects()
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(model.records(matching: "ALP").map(\.title), ["Alpha"])
+        XCTAssertEqual(model.records(matching: "nested").map(\.title), ["beta"])
+        XCTAssertEqual(model.records(matching: "").map(\.title), ["Alpha", "beta"])
+    }
+
+    @MainActor
+    func testUnavailableRefreshKeepsLastAnalysisAndMarksItStale() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let project = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try Data("{\"engines\":{\"node\":\">=22\"}}".utf8)
+            .write(to: project.appendingPathComponent("package.json"))
+        let model = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+        model.addDirect([project])
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let previous = try XCTUnwrap(model.analyses[project.path])
+
+        try FileManager.default.removeItem(at: project)
+        model.refreshProjects()
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(model.analyses[project.path], previous)
+        XCTAssertTrue(model.staleProjectIDs.contains(project.path))
+        XCTAssertEqual(model.summary(for: try XCTUnwrap(model.records.first)), .unavailable)
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @MainActor
+    func testRemovingRecordWhileItRefreshesCannotRestoreTransientAnalysis() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let project = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try Data("{\"engines\":{\"node\":\"22\"}}".utf8)
+            .write(to: project.appendingPathComponent("package.json"))
+        let model = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+
+        model.addDirect([project])
+        model.remove(try XCTUnwrap(model.records.first))
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertNil(model.analyses[project.path])
+        XCTAssertTrue(model.records.isEmpty)
+    }
+
+    @MainActor
+    func testFailedManifestRefreshKeepsLastSuccessfulAnalysisAndPublishesNotice() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let project = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let manifest = project.appendingPathComponent("package.json")
+        try Data("{\"engines\":{\"node\":\"22\"}}".utf8).write(to: manifest)
+        let model = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+        model.addDirect([project])
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let previous = try XCTUnwrap(model.analyses[project.path])
+
+        try Data("{".utf8).write(to: manifest)
+        model.refreshProjects()
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(model.analyses[project.path], previous)
+        XCTAssertTrue(model.staleProjectIDs.contains(project.path))
+        XCTAssertEqual(model.projectNotices[project.path]?.first?.message, "package.json 格式无效")
+    }
 }

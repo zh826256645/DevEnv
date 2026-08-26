@@ -48,6 +48,7 @@ final class ProjectRequirementsTests: XCTestCase {
         XCTAssertEqual(analysis.components.first { $0.relativePath == "." }?.summary, .declarationConflict)
         XCTAssertEqual(analysis.summary, .declarationConflict)
         XCTAssertEqual(analysis.notices.first?.relativePath, "broken/package.json")
+        XCTAssertTrue(analysis.components[0].requirements[0].evidence.contains { $0.contains(".python-version") })
     }
 
     func testMachineSnapshotAbsenceUnknownVersionsAndUnusableKnownVersionsUseDistinctStates() throws {
@@ -59,16 +60,20 @@ final class ProjectRequirementsTests: XCTestCase {
         XCTAssertEqual(ProjectRequirementsScanner().scan(projectRoot: root).summary, .undetermined)
 
         let unknown = runtimeInstallation(path: "/broken/node", version: nil, state: .failed)
-        XCTAssertEqual(
-            ProjectRequirementsScanner().scan(projectRoot: root, machineSnapshot: snapshot(node: [unknown])).summary,
-            .undetermined
+        let unknownAnalysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(node: [unknown])
         )
+        XCTAssertEqual(unknownAnalysis.summary, .undetermined)
+        XCTAssertTrue(unknownAnalysis.components[0].requirements[0].evidence.contains { $0.contains("/broken/node") })
 
         let unusable = runtimeInstallation(path: "/missing/node", version: "22.0.0", state: .unavailable)
-        XCTAssertEqual(
-            ProjectRequirementsScanner().scan(projectRoot: root, machineSnapshot: snapshot(node: [unusable])).summary,
-            .unsatisfied
+        let unusableAnalysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(node: [unusable])
         )
+        XCTAssertEqual(unusableAnalysis.summary, .unsatisfied)
+        XCTAssertTrue(unusableAnalysis.components[0].requirements[0].evidence.contains { $0.contains("/missing/node") })
     }
 
     func testAlternativeLinesMultipleInstallationsAndEffectiveRuntimeDoNotLeakAcrossComponents() throws {
@@ -108,7 +113,7 @@ final class ProjectRequirementsTests: XCTestCase {
         let analysis = ProjectRequirementsScanner().scan(projectRoot: root, machineSnapshot: snapshot(python: []))
 
         XCTAssertEqual(analysis.components.first { $0.relativePath == "api" }?.summary, .undetermined)
-        XCTAssertEqual(analysis.components.first { $0.relativePath == "broken" }?.summary, .unavailable)
+        XCTAssertEqual(analysis.components.first { $0.relativePath == "broken" }?.summary, .undetermined)
         XCTAssertEqual(analysis.summary, .undetermined)
         XCTAssertEqual(analysis.notices.first?.message, "清单不可读或超过 4 MiB")
     }
@@ -318,6 +323,23 @@ final class ProjectRequirementsTests: XCTestCase {
         }
 
         XCTAssertEqual(model.analyses[root.path]?.summary, .satisfied)
+    }
+
+    func testMachineSnapshotRecalculationDoesNotRereadProjectFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let manifest = root.appendingPathComponent("package.json")
+        try Data("{\"engines\":{\"node\":\"22\"}}".utf8).write(to: manifest)
+        let scanner = ProjectRequirementsScanner()
+        let initial = scanner.scan(projectRoot: root, machineSnapshot: snapshot(node: []))
+
+        try FileManager.default.removeItem(at: manifest)
+        let recalculated = scanner.recalculate(initial, machineSnapshot: snapshot())
+
+        XCTAssertEqual(recalculated.components.first?.requirements.first?.expression, "22")
+        XCTAssertEqual(recalculated.summary, .satisfied)
+        XCTAssertEqual(scanner.scan(projectRoot: root, machineSnapshot: snapshot()).summary, .undeclared)
     }
 
     private func runtimeInstallation(

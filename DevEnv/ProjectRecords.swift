@@ -412,6 +412,9 @@ final class ProjectsViewModel: ObservableObject {
     @Published private(set) var operationError: String?
     @Published private(set) var storageError: String?
     @Published private(set) var analyses: [String: ProjectRequirementsAnalysis] = [:]
+    @Published private(set) var projectNotices: [String: [ProjectNotice]] = [:]
+    @Published private(set) var staleProjectIDs: Set<String> = []
+    @Published private(set) var refreshingProjectIDs: Set<String> = []
 
     var records: [ProjectRecord] {
         document.records.sorted { lhs, rhs in
@@ -427,14 +430,15 @@ final class ProjectsViewModel: ObservableObject {
     }
     var ignoredProjects: [IgnoredProject] { document.ignoredProjects }
     var isScanning: Bool { scanTask != nil }
+    var isRefreshingProjects: Bool { refreshTask != nil }
     var mutationsArePaused: Bool { storageError != nil }
 
     private let store: ProjectRecordStore
     private let discovery: ProjectDiscovery
     private var scanTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var refreshGeneration = UUID()
     private var displayedNewProjectIDs: Set<String> = []
-    private var requirementsTask: Task<Void, Never>?
     private var machineSnapshot: MachineSnapshot?
 
     init(store: ProjectRecordStore = ProjectRecordStore(), discovery: ProjectDiscovery = ProjectDiscovery()) {
@@ -450,7 +454,7 @@ final class ProjectsViewModel: ObservableObject {
 
     func enterProjects() {
         displayedNewProjectIDs.removeAll()
-        refreshAvailability()
+        refreshProjects()
     }
 
     func leaveProjects() {
@@ -465,18 +469,32 @@ final class ProjectsViewModel: ObservableObject {
         }
     }
 
+    func records(matching searchText: String) -> [ProjectRecord] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return records }
+        return records.filter {
+            $0.title.localizedCaseInsensitiveContains(query)
+                || $0.path.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    func summary(for project: ProjectRecord) -> ProjectRequirementsSummary? {
+        if case .unavailable = project.availability { return .unavailable }
+        return analyses[project.id]?.summary
+    }
+
     func addDirect(_ urls: [URL]) {
         guard !mutationsArePaused, !isScanning else { return }
         let paths = discovery.directProjectPaths(urls)
         document.addDirect(paths)
         persist()
-        refreshAvailability()
-        refreshRequirements(machineSnapshot: machineSnapshot)
+        refreshProjects()
         resultMessage = "已添加 \(paths.count) 个项目"
     }
 
     func scan(_ urls: [URL]) {
         guard !mutationsArePaused, !isScanning else { return }
+        cancelProjectRefresh()
         operationError = nil
         resultMessage = nil
         scanProgress = ProjectScanProgress(currentPath: urls.first?.path ?? "", discoveredCount: 0)
@@ -504,25 +522,45 @@ final class ProjectsViewModel: ObservableObject {
         scanTask?.cancel()
     }
 
-    func refreshAvailability() {
-        refreshAvailability(paths: document.records.map(\.path))
+    func refreshRequirements(machineSnapshot: MachineSnapshot?) {
+        self.machineSnapshot = machineSnapshot
+        let scanner = ProjectRequirementsScanner()
+        analyses = analyses.mapValues {
+            scanner.recalculate($0, machineSnapshot: machineSnapshot)
+        }
     }
 
-    func refreshRequirements(machineSnapshot: MachineSnapshot?) {
-        requirementsTask?.cancel()
-        self.machineSnapshot = machineSnapshot
+    func refreshProjects() {
+        guard !isScanning else { return }
+        cancelProjectRefresh()
         let paths = document.records.map(\.path)
+        guard !paths.isEmpty else { return }
+        let generation = UUID()
+        refreshGeneration = generation
+        refreshingProjectIDs = Set(paths)
+        let discovery = discovery
         let scanner = ProjectRequirementsScanner()
-        requirementsTask = Task.detached(priority: .utility) { [weak self] in
-            var values: [String: ProjectRequirementsAnalysis] = [:]
+        let model = self
+        refreshTask = Task.detached(priority: .utility) {
             for path in paths {
-                guard !Task.isCancelled else { return }
-                values[path] = scanner.scan(
-                    projectRoot: URL(fileURLWithPath: path, isDirectory: true),
-                    machineSnapshot: machineSnapshot
+                guard !Task.isCancelled else {
+                    await model.finishProjectRefresh(generation: generation, cancelled: true)
+                    return
+                }
+                let availability = discovery.availability(of: path)
+                let analysis: ProjectRequirementsAnalysis? = if availability == .available {
+                    scanner.scan(projectRoot: URL(fileURLWithPath: path, isDirectory: true))
+                } else {
+                    nil
+                }
+                await model.applyProjectRefresh(
+                    path: path,
+                    availability: availability,
+                    analysis: analysis,
+                    generation: generation
                 )
             }
-            await self?.applyRequirements(values)
+            await model.finishProjectRefresh(generation: generation, cancelled: false)
         }
     }
 
@@ -530,6 +568,10 @@ final class ProjectsViewModel: ObservableObject {
         guard !mutationsArePaused, !isScanning else { return }
         document.remove(projectID: project.id)
         displayedNewProjectIDs.remove(project.id)
+        analyses.removeValue(forKey: project.id)
+        projectNotices.removeValue(forKey: project.id)
+        staleProjectIDs.remove(project.id)
+        refreshingProjectIDs.remove(project.id)
         persist()
     }
 
@@ -537,14 +579,17 @@ final class ProjectsViewModel: ObservableObject {
         guard !mutationsArePaused, !isScanning else { return }
         document.restore(path: ignoredProject.path)
         persist()
-        refreshAvailability()
-        refreshRequirements(machineSnapshot: machineSnapshot)
+        refreshProjects()
     }
 
     func recreateStore() {
         do {
             let backupURL = try store.recreatePreservingBackup()
             document = ProjectRecordDocument()
+            analyses = [:]
+            projectNotices = [:]
+            staleProjectIDs = []
+            refreshingProjectIDs = []
             storageError = nil
             operationError = nil
             resultMessage = backupURL.map { "已重新创建存储，原文件备份于 \($0.path)" } ?? "已创建新的项目记录存储"
@@ -553,40 +598,60 @@ final class ProjectsViewModel: ObservableObject {
         }
     }
 
-    private func refreshAvailability(paths: [String]) {
-        refreshTask?.cancel()
-        let discovery = discovery
-        refreshTask = Task.detached(priority: .utility) { [weak self] in
-            var values: [String: ProjectAvailability] = [:]
-            for path in paths {
-                guard !Task.isCancelled else { return }
-                values[path] = discovery.availability(of: path)
+    private func applyProjectRefresh(
+        path: String,
+        availability: ProjectAvailability,
+        analysis: ProjectRequirementsAnalysis?,
+        generation: UUID
+    ) {
+        guard generation == refreshGeneration else { return }
+        guard let index = document.records.firstIndex(where: { $0.path == path }) else { return }
+        document.records[index].availability = availability
+        if let analysis, analysis.notices.isEmpty {
+            analyses[path] = ProjectRequirementsScanner().recalculate(
+                analysis,
+                machineSnapshot: machineSnapshot
+            )
+            projectNotices.removeValue(forKey: path)
+            staleProjectIDs.remove(path)
+        } else if let analysis {
+            projectNotices[path] = analysis.notices
+            if analyses[path] == nil {
+                analyses[path] = ProjectRequirementsScanner().recalculate(
+                    analysis,
+                    machineSnapshot: machineSnapshot
+                )
             }
-            await self?.applyAvailability(values)
+            staleProjectIDs.insert(path)
+        } else if analyses[path] != nil {
+            staleProjectIDs.insert(path)
         }
+        refreshingProjectIDs.remove(path)
     }
 
-    private func applyAvailability(_ values: [String: ProjectAvailability]) {
-        for index in document.records.indices {
-            if let availability = values[document.records[index].path] {
-                document.records[index].availability = availability
-            }
+    private func finishProjectRefresh(generation: UUID, cancelled: Bool) {
+        guard generation == refreshGeneration else { return }
+        if cancelled {
+            staleProjectIDs.formUnion(refreshingProjectIDs.filter { analyses[$0] != nil })
         }
+        refreshingProjectIDs.removeAll()
         refreshTask = nil
     }
 
-    private func applyRequirements(_ values: [String: ProjectRequirementsAnalysis]) {
-        analyses.merge(values) { _, new in new }
-        requirementsTask = nil
+    private func cancelProjectRefresh() {
+        refreshGeneration = UUID()
+        refreshTask?.cancel()
+        refreshTask = nil
+        staleProjectIDs.formUnion(refreshingProjectIDs.filter { analyses[$0] != nil })
+        refreshingProjectIDs.removeAll()
     }
 
     private func finishScan(_ result: ProjectDiscoveryResult) {
         document.mergeDiscovered(result.projectPaths, gitProjectPaths: result.gitProjectPaths)
         persist()
-        refreshAvailability()
-        refreshRequirements(machineSnapshot: machineSnapshot)
         scanProgress = nil
         scanTask = nil
+        refreshProjects()
         if !result.errors.isEmpty {
             operationError = result.errors.joined(separator: "\n")
         }
