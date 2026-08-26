@@ -476,7 +476,9 @@ struct ContentView: View {
     @State private var environmentCardUpperContentHeight: CGFloat = 0
     @State private var pendingHomebrewServiceAction: PendingHomebrewServiceAction?
     @State private var selectedServiceTab = ServiceTab.local
-    @State private var pendingProjectRemoval: ProjectRecord?
+    @State private var isSelectingProjects = false
+    @State private var selectedProjectIDs: Set<String> = []
+    @State private var pendingProjectRemovalIDs: Set<String> = []
     @State private var isConfirmingProjectStoreReset = false
     @State private var selectedProjectID: String?
     @State private var projectSearchText = ""
@@ -605,19 +607,22 @@ struct ContentView: View {
         }
         .alert(
             projectRemovalConfirmationTitle,
-            isPresented: isConfirmingProjectRemoval,
-            presenting: pendingProjectRemoval
-        ) { project in
+            isPresented: isConfirmingProjectRemoval
+        ) {
             Button("取消", role: .cancel) {}
-            Button("仅移除记录", role: .destructive) {
-                projectsModel.remove(project)
-                if selectedProjectID == project.id {
-                    selectedProjectID = projectsModel.records.first?.id
-                }
+            Button("确认删除", role: .destructive) {
+                let projectIDs = pendingProjectRemovalIDs
+                let succeeded = projectsModel.remove(projectIDs: projectIDs) != nil
+                pendingProjectRemovalIDs.removeAll()
+                guard succeeded else { return }
+                selectedProjectIDs.removeAll()
+                isSelectingProjects = false
+                selectFirstProjectIfNeeded()
                 projectSearchIsFocused = true
             }
-        } message: { _ in
-            Text("只会从 DevEnv 删除这条记录，并加入 Ignored Projects。不会删除、移动或修改原项目文件。")
+        } message: {
+            let summary = projectsModel.removalSummary(for: pendingProjectRemovalIDs)
+            Text("将移除 \(summary.projectCount) 个项目记录并清除 \(summary.ignoredProjectCount) 个忽略记录？不会删除、移动或修改原项目文件。项目记录会进入 Ignored Projects；忽略记录会从 DevEnv 中移除。")
         }
         .alert("重新创建项目记录存储？", isPresented: $isConfirmingProjectStoreReset) {
             Button("取消", role: .cancel) {}
@@ -651,13 +656,14 @@ struct ContentView: View {
     }
 
     private var projectRemovalConfirmationTitle: String {
-        pendingProjectRemoval.map { "移除 \($0.title)？" } ?? ""
+        let count = pendingProjectRemovalIDs.count
+        return count == 1 ? "移除项目记录？" : "批量移除项目记录？"
     }
 
     private var isConfirmingProjectRemoval: Binding<Bool> {
         Binding(
-            get: { pendingProjectRemoval != nil },
-            set: { if !$0 { pendingProjectRemoval = nil } }
+            get: { !pendingProjectRemovalIDs.isEmpty },
+            set: { if !$0 { pendingProjectRemovalIDs.removeAll() } }
         )
     }
 
@@ -890,6 +896,25 @@ struct ContentView: View {
                 Button("扫描目录…") { chooseProjectDirectories(forBatchScan: true) }
                     .buttonStyle(.bordered)
                     .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+                if isSelectingProjects {
+                    Button("取消") {
+                        selectedProjectIDs.removeAll()
+                        isSelectingProjects = false
+                    }
+                    Button("全选") { selectedProjectIDs = visibleProjectRecordIDs }
+                        .disabled(selectedProjectIDs == visibleProjectRecordIDs)
+                    Button("删除（\(selectedProjectIDs.count)）", role: .destructive) {
+                        pendingProjectRemovalIDs = selectedProjectIDs
+                    }
+                    .disabled(
+                        selectedProjectIDs.isEmpty
+                            || projectsModel.mutationsArePaused
+                            || projectsModel.isScanning
+                    )
+                } else {
+                    Button("多选") { isSelectingProjects = true }
+                        .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+                }
                 Spacer()
                 Text("\(projectsModel.records.count) 个项目")
                     .foregroundStyle(.secondary)
@@ -993,9 +1018,17 @@ struct ContentView: View {
             List(selection: $selectedProjectID) {
                 Section("Projects") {
                     ForEach(projectsModel.records(matching: projectSearchText)) { project in
-                        projectListRow(project)
-                            .tag(project.id)
-                            .onAppear { projectsModel.markDisplayed(project.id) }
+                        HStack(spacing: 8) {
+                            if isSelectingProjects {
+                                Toggle("", isOn: projectSelectionBinding(project.id))
+                                    .labelsHidden()
+                                    .toggleStyle(.checkbox)
+                                    .accessibilityLabel("选择 \(project.title)")
+                            }
+                            projectListRow(project)
+                        }
+                        .tag(project.id)
+                        .onAppear { projectsModel.markDisplayed(project.id) }
                     }
                     if !projectSearchText.isEmpty && projectsModel.records(matching: projectSearchText).isEmpty {
                         Text("没有匹配的项目")
@@ -1006,6 +1039,12 @@ struct ContentView: View {
                     Section("Ignored Projects") {
                         ForEach(projectsModel.ignoredProjects) { project in
                             HStack(spacing: 12) {
+                                if isSelectingProjects {
+                                    Toggle("", isOn: projectSelectionBinding(project.id))
+                                        .labelsHidden()
+                                        .toggleStyle(.checkbox)
+                                        .accessibilityLabel("选择 \(project.path)")
+                                }
                                 Image(systemName: "eye.slash")
                                     .foregroundStyle(.secondary)
                                 Text(project.path)
@@ -1013,14 +1052,17 @@ struct ContentView: View {
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                 Spacer()
-                                Button("恢复") {
-                                    projectsModel.restore(project)
-                                    selectedProjectID = project.path
-                                    projectSearchIsFocused = true
-                                }
-                                .accessibilityLabel("恢复 \(project.path)")
+                                if !isSelectingProjects {
+                                    Button("恢复") {
+                                        projectsModel.restore(project)
+                                        selectedProjectID = project.path
+                                        projectSearchIsFocused = true
+                                    }
+                                    .accessibilityLabel("恢复 \(project.path)")
                                     .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
+                                }
                             }
+                            .tag(project.id)
                         }
                     }
                 }
@@ -1143,6 +1185,26 @@ struct ContentView: View {
         return projectsModel.records.first { $0.id == selectedProjectID }
     }
 
+    private var visibleProjectRecordIDs: Set<String> {
+        Set(
+            projectsModel.records(matching: projectSearchText).map(\.id)
+                + projectsModel.ignoredProjects.map(\.id)
+        )
+    }
+
+    private func projectSelectionBinding(_ projectID: String) -> Binding<Bool> {
+        Binding(
+            get: { selectedProjectIDs.contains(projectID) },
+            set: { isSelected in
+                if isSelected {
+                    selectedProjectIDs.insert(projectID)
+                } else {
+                    selectedProjectIDs.remove(projectID)
+                }
+            }
+        )
+    }
+
     private func projectDetailHeader(_ project: ProjectRecord) -> some View {
         let summary = projectsModel.summary(for: project)
         return VStack(alignment: .leading, spacing: 8) {
@@ -1152,14 +1214,16 @@ struct ContentView: View {
                 Label(summary.map(projectSummaryTitle) ?? "待刷新", systemImage: projectSummarySymbol(summary))
                     .foregroundStyle(projectSummaryColor(summary))
                 Spacer()
-                Button(role: .destructive) {
-                    pendingProjectRemoval = project
-                } label: {
-                    Image(systemName: "trash")
+                if !isSelectingProjects {
+                    Button(role: .destructive) {
+                        pendingProjectRemovalIDs = [project.id]
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .accessibilityLabel("从 DevEnv 移除 \(project.title)")
+                    .help("移除记录")
+                    .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
                 }
-                .accessibilityLabel("从 DevEnv 移除 \(project.title)")
-                .help("移除记录")
-                .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
             }
             Text(project.path)
                 .font(.callout.monospaced())
