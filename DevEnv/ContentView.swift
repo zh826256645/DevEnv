@@ -405,6 +405,7 @@ struct ContentView: View {
 
     private enum Page: CaseIterable, Hashable {
         case overview
+        case projects
         case runtimes
         case databases
         case localServices
@@ -415,6 +416,7 @@ struct ContentView: View {
         var title: String {
             switch self {
             case .overview: "总览"
+            case .projects: "项目"
             case .runtimes: "开发语言"
             case .databases: "数据库"
             case .localServices: "本地服务"
@@ -425,6 +427,7 @@ struct ContentView: View {
         var systemImage: String {
             switch self {
             case .overview: "square.grid.2x2"
+            case .projects: "folder"
             case .runtimes: "terminal"
             case .databases: "cylinder"
             case .localServices: "network"
@@ -454,6 +457,7 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = EnvironmentViewModel()
+    @StateObject private var projectsModel = ProjectsViewModel()
     @State private var selectedPage: Page? = .overview
     @State private var copiedPath: String?
     @State private var hoveredPath: String?
@@ -472,18 +476,16 @@ struct ContentView: View {
     @State private var environmentCardUpperContentHeight: CGFloat = 0
     @State private var pendingHomebrewServiceAction: PendingHomebrewServiceAction?
     @State private var selectedServiceTab = ServiceTab.local
+    @State private var pendingProjectRemoval: ProjectRecord?
+    @State private var isConfirmingProjectStoreReset = false
+    @State private var selectedProjectID: String?
+    @State private var projectSearchText = ""
     @FocusState private var focusedCopyPath: String?
+    @FocusState private var projectSearchIsFocused: Bool
+    @FocusState private var projectAddIsFocused: Bool
 
     var body: some View {
-        Group {
-            if let snapshot = model.snapshot {
-                navigation(snapshot)
-            } else if model.isScanning {
-                loadingView
-            } else {
-                unavailableView
-            }
-        }
+        navigation(model.snapshot)
         .frame(minWidth: 720, minHeight: 560)
         .toolbar {
             ToolbarItemGroup {
@@ -510,19 +512,35 @@ struct ContentView: View {
                         .onAppear(perform: markCurrentNoticesRead)
                 }
 
-                Button(action: model.scan) {
-                    if model.isBusy {
+                Button {
+                    if selectedPage == .projects {
+                        projectsModel.refreshProjects()
+                    } else {
+                        model.scan()
+                    }
+                } label: {
+                    if selectedPage == .projects
+                        ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                        : model.isBusy {
                         ProgressView().controlSize(.small)
                     } else {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
                 .accessibilityLabel(
-                    model.busyDescription ?? "重新扫描"
+                    selectedPage == .projects
+                        ? (projectsModel.isScanning || projectsModel.isRefreshingProjects
+                            ? "正在刷新项目"
+                            : "刷新项目")
+                        : (model.busyDescription ?? "重新扫描")
                 )
-                .help(model.busyDescription ?? "重新扫描")
+                .help(selectedPage == .projects ? "刷新项目状态" : (model.busyDescription ?? "重新扫描"))
                 .keyboardShortcut("r", modifiers: .command)
-                .disabled(model.isBusy)
+                .disabled(
+                    selectedPage == .projects
+                        ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                        : model.isBusy
+                )
             }
         }
         .task(id: autoRefreshSchedule) {
@@ -538,6 +556,9 @@ struct ContentView: View {
             }
         }
         .onAppear(perform: updateRefreshActivity)
+        .onDisappear {
+            if selectedPage == .projects { projectsModel.leaveProjects() }
+        }
         .onChange(of: scenePhase) { _, _ in
             updateRefreshActivity()
         }
@@ -558,6 +579,9 @@ struct ContentView: View {
         }
         .onChange(of: model.snapshot?.scannedAt) {
             readNoticeIdentities.removeAll()
+            if selectedPage == .projects {
+                projectsModel.refreshRequirements(machineSnapshot: model.snapshot)
+            }
         }
         .sheet(isPresented: $isShowingSettingsExitConfirmation, onDismiss: {
             pendingPage = nil
@@ -565,7 +589,7 @@ struct ContentView: View {
             settingsExitConfirmation
         }
         .alert(
-            pendingHomebrewServiceAction.map { "\($0.action.title) \($0.service.formula)？" } ?? "",
+            homebrewServiceConfirmationTitle,
             isPresented: isConfirmingHomebrewServiceAction,
             presenting: pendingHomebrewServiceAction
         ) { request in
@@ -578,6 +602,32 @@ struct ContentView: View {
             let command = ([request.executable, "services", request.action.rawValue, request.service.formula])
                 .joined(separator: " ")
             Text("\(command)\n\n\(request.action.persistentEffect)")
+        }
+        .alert(
+            projectRemovalConfirmationTitle,
+            isPresented: isConfirmingProjectRemoval,
+            presenting: pendingProjectRemoval
+        ) { project in
+            Button("取消", role: .cancel) {}
+            Button("仅移除记录", role: .destructive) {
+                projectsModel.remove(project)
+                if selectedProjectID == project.id {
+                    selectedProjectID = projectsModel.records.first?.id
+                }
+                projectSearchIsFocused = true
+            }
+        } message: { _ in
+            Text("只会从 DevEnv 删除这条记录，并加入 Ignored Projects。不会删除、移动或修改原项目文件。")
+        }
+        .alert("重新创建项目记录存储？", isPresented: $isConfirmingProjectStoreReset) {
+            Button("取消", role: .cancel) {}
+            Button("保留备份并重新创建", role: .destructive) {
+                projectsModel.recreateStore()
+                selectedProjectID = nil
+                projectAddIsFocused = true
+            }
+        } message: {
+            Text("当前存储损坏或版本不兼容，已暂停修改。原文件会保留为备份，然后创建空的 project-records.json。")
         }
     }
 
@@ -595,6 +645,22 @@ struct ContentView: View {
         )
     }
 
+    private var homebrewServiceConfirmationTitle: String {
+        guard let pendingHomebrewServiceAction else { return "" }
+        return "\(pendingHomebrewServiceAction.action.title) \(pendingHomebrewServiceAction.service.formula)？"
+    }
+
+    private var projectRemovalConfirmationTitle: String {
+        pendingProjectRemoval.map { "移除 \($0.title)？" } ?? ""
+    }
+
+    private var isConfirmingProjectRemoval: Binding<Bool> {
+        Binding(
+            get: { pendingProjectRemoval != nil },
+            set: { if !$0 { pendingProjectRemoval = nil } }
+        )
+    }
+
     private func updateRefreshActivity() {
         let wasUsingForegroundInterval = usesForegroundRefreshInterval
         usesForegroundRefreshInterval = scenePhase == .active
@@ -608,7 +674,7 @@ struct ContentView: View {
         }
     }
 
-    private func navigation(_ snapshot: MachineSnapshot) -> some View {
+    private func navigation(_ snapshot: MachineSnapshot?) -> some View {
         NavigationSplitView {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
@@ -663,13 +729,34 @@ struct ContentView: View {
         }
     }
 
-    private func page(_ snapshot: MachineSnapshot) -> some View {
-        let page = selectedPage ?? .overview
+    @ViewBuilder
+    private func page(_ snapshot: MachineSnapshot?) -> some View {
+        if selectedPage == .projects {
+            populatedPage(.projects, snapshot: snapshot)
+        } else if let snapshot {
+            populatedPage(selectedPage ?? .overview, snapshot: snapshot)
+        } else if model.isScanning {
+            loadingView
+        } else {
+            unavailableView
+        }
+    }
 
-        return ScrollView {
+    @ViewBuilder
+    private func populatedPage(_ page: Page, snapshot: MachineSnapshot?) -> some View {
+        if page == .projects {
+            VStack(alignment: .leading, spacing: 16) {
+                header(page, snapshot: snapshot)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 24)
+                projectsPage
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header(page, snapshot: snapshot)
-                if let scanError = model.scanError {
+                if let scanError = model.scanError, let snapshot, page != .projects {
                     scanErrorBanner(scanError, snapshot: snapshot)
                 }
                 if let dynamicRefreshError = model.dynamicRefreshError,
@@ -679,28 +766,33 @@ struct ContentView: View {
 
                 switch page {
                 case .overview:
-                    overviewMetricsSection(snapshot)
-                    topOverviewSection(snapshot)
-                    environmentSection(snapshot)
+                    if let snapshot {
+                        overviewMetricsSection(snapshot)
+                        topOverviewSection(snapshot)
+                        environmentSection(snapshot)
+                    }
+                case .projects:
+                    EmptyView()
                 case .runtimes:
-                    runtimePage(snapshot.runtimes)
+                    if let snapshot { runtimePage(snapshot.runtimes) }
                 case .databases:
-                    databasePage(snapshot.databaseInstallationOverviews)
+                    if let snapshot { databasePage(snapshot.databaseInstallationOverviews) }
                 case .localServices:
-                    localServicesSection(snapshot)
+                    if let snapshot { localServicesSection(snapshot) }
                 case .settings:
                     settingsPage
                 }
             }
             .frame(
-                maxWidth: page == .overview || page == .runtimes || page == .databases || page == .localServices
+                maxWidth: page == .overview || page == .projects || page == .runtimes || page == .databases || page == .localServices
                     ? 1100
                     : 900
             )
             .frame(maxWidth: .infinity)
             .padding(28)
+            }
+            .id(page)
         }
-        .id(page)
     }
 
     private var pageSelection: Binding<Page?> {
@@ -723,7 +815,14 @@ struct ContentView: View {
     }
 
     private func selectPage(_ page: Page) {
+        let previousPage = selectedPage
+        if previousPage == .projects, page != .projects { projectsModel.leaveProjects() }
         selectedPage = page
+        if page == .projects, previousPage != .projects {
+            projectsModel.enterProjects()
+            projectsModel.refreshRequirements(machineSnapshot: model.snapshot)
+            DispatchQueue.main.async { projectSearchIsFocused = true }
+        }
         if page == .settings { settingsDraft = model.autoRefreshSettings }
     }
 
@@ -755,16 +854,16 @@ struct ContentView: View {
         }
     }
 
-    private func header(_ page: Page, snapshot: MachineSnapshot) -> some View {
+    private func header(_ page: Page, snapshot: MachineSnapshot?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(page.title)
                 .font(.largeTitle.bold())
-            if page != .settings {
+            if page != .settings && page != .projects {
                 HStack(spacing: 10) {
                     if page == .databases || page == .localServices {
                         Text(model.dynamicStatusRefreshedAt.map { "最近刷新：\(formatted($0))" } ?? "最近刷新：尚未刷新")
                             .foregroundStyle(.secondary)
-                    } else {
+                    } else if let snapshot {
                         Text("最近扫描：\(formatted(snapshot.scannedAt))")
                             .foregroundStyle(.secondary)
                     }
@@ -777,6 +876,499 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     }
                 }
+            }
+        }
+    }
+
+    private var projectsPage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Button("添加项目…") { chooseProjectDirectories(forBatchScan: false) }
+                    .buttonStyle(.borderedProminent)
+                    .focused($projectAddIsFocused)
+                    .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+                Button("扫描目录…") { chooseProjectDirectories(forBatchScan: true) }
+                    .buttonStyle(.bordered)
+                    .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+                Spacer()
+                Text("\(projectsModel.records.count) 个项目")
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+            .padding(.horizontal, 28)
+
+            if let storageError = projectsModel.storageError {
+                GroupBox {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: "externaldrive.badge.exclamationmark")
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("项目记录存储已暂停")
+                                .fontWeight(.semibold)
+                            Text(storageError)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("重新创建存储…") { isConfirmingProjectStoreReset = true }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 28)
+            }
+
+            if let progress = projectsModel.scanProgress {
+                GroupBox {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.small)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("正在扫描，已发现 \(progress.discoveredCount) 个项目")
+                                .fontWeight(.semibold)
+                            Text(progress.currentPath)
+                                .font(.callout.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer()
+                        Button("取消", action: projectsModel.cancelScan)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("正在扫描项目，已发现 \(progress.discoveredCount) 个，当前目录 \(progress.currentPath)")
+                .padding(.horizontal, 28)
+            }
+
+            if let error = projectsModel.operationError {
+                GroupBox {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .accessibilityLabel("项目操作失败，\(error)")
+                .padding(.horizontal, 28)
+            } else if let message = projectsModel.resultMessage {
+                Label(message, systemImage: "checkmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(message)
+                    .padding(.horizontal, 28)
+            }
+
+            if projectsModel.records.isEmpty && projectsModel.ignoredProjects.isEmpty {
+                ContentUnavailableView {
+                    Label("尚未添加项目", systemImage: "folder.badge.plus")
+                } description: {
+                    Text("直接添加 Project Root，或扫描一个临时选择的目录来批量发现项目。")
+                } actions: {
+                    Button("添加项目…") { chooseProjectDirectories(forBatchScan: false) }
+                        .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HSplitView {
+                    projectList
+                        .frame(minWidth: 220, idealWidth: 300, maxWidth: 380)
+                    projectDetail
+                        .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .accessibilityElement(children: .contain)
+            }
+        }
+        .onAppear(perform: selectFirstProjectIfNeeded)
+        .onChange(of: projectsModel.records.map(\.id)) { _, _ in
+            selectFirstProjectIfNeeded()
+        }
+    }
+
+    private var projectList: some View {
+        VStack(spacing: 8) {
+            TextField("搜索标题或路径", text: $projectSearchText)
+                .textFieldStyle(.roundedBorder)
+                .focused($projectSearchIsFocused)
+                .accessibilityLabel("搜索项目标题或路径")
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+            List(selection: $selectedProjectID) {
+                Section("Projects") {
+                    ForEach(projectsModel.records(matching: projectSearchText)) { project in
+                        projectListRow(project)
+                            .tag(project.id)
+                            .onAppear { projectsModel.markDisplayed(project.id) }
+                    }
+                    if !projectSearchText.isEmpty && projectsModel.records(matching: projectSearchText).isEmpty {
+                        Text("没有匹配的项目")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if !projectsModel.ignoredProjects.isEmpty {
+                    Section("Ignored Projects") {
+                        ForEach(projectsModel.ignoredProjects) { project in
+                            HStack(spacing: 12) {
+                                Image(systemName: "eye.slash")
+                                    .foregroundStyle(.secondary)
+                                Text(project.path)
+                                    .font(.callout.monospaced())
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Button("恢复") {
+                                    projectsModel.restore(project)
+                                    selectedProjectID = project.path
+                                    projectSearchIsFocused = true
+                                }
+                                .accessibilityLabel("恢复 \(project.path)")
+                                    .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.inset)
+        }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
+    }
+
+    private func projectListRow(_ project: ProjectRecord) -> some View {
+        let status = projectStatus(project)
+        let summary = projectsModel.summary(for: project)
+        return HStack(alignment: .top, spacing: 10) {
+            Image(systemName: status.symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(status.color)
+                .frame(width: 24, height: 24)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(project.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                    if project.isNew {
+                        Text("New")
+                            .font(.caption.bold())
+                            .foregroundStyle(.blue)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(.blue.opacity(0.12), in: Capsule())
+                    }
+                    Spacer(minLength: 4)
+                    if projectsModel.refreshingProjectIDs.contains(project.id) {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .accessibilityLabel("正在刷新 \(project.title)")
+                    }
+                }
+                Text(project.path)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                HStack(spacing: 5) {
+                    Image(systemName: projectSummarySymbol(summary))
+                    Text(summary.map(projectSummaryTitle) ?? "待刷新")
+                    if projectsModel.staleProjectIDs.contains(project.id) {
+                        Text("过期")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(projectSummaryColor(summary))
+            }
+        }
+        .opacity(status.isUnavailable ? 0.62 : 1)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(project.title)，\(project.path)，\(project.isNew ? "New，" : "")"
+                + "\(summary.map(projectSummaryTitle) ?? "待刷新")"
+                + "\(projectsModel.staleProjectIDs.contains(project.id) ? "，结果已过期" : "")"
+        )
+    }
+
+    @ViewBuilder
+    private var projectDetail: some View {
+        if let project = selectedProject {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    projectDetailHeader(project)
+                    if case let .unavailable(reason) = project.availability {
+                        Label("项目不可用：\(reason)", systemImage: "folder.badge.questionmark")
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    if projectsModel.staleProjectIDs.contains(project.id) {
+                        Label("当前路径刷新失败；以下为本次会话最后一次成功结果，已过期。", systemImage: "clock.badge.exclamationmark")
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("项目结果已过期，显示本次会话最后一次成功结果")
+                    }
+                    if projectsModel.refreshingProjectIDs.contains(project.id) {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("正在刷新项目要求…")
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                    ForEach(projectsModel.projectNotices[project.id] ?? []) { notice in
+                        Label("\(notice.relativePath)：\(notice.message)", systemImage: "exclamationmark.triangle")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("Project Notice，\(notice.relativePath)，\(notice.message)")
+                    }
+                    if let analysis = projectsModel.analyses[project.id] {
+                        projectAnalysisDetail(analysis)
+                    } else if !projectsModel.refreshingProjectIDs.contains(project.id) {
+                        ContentUnavailableView {
+                            Label("没有项目要求结果", systemImage: "doc.text.magnifyingglass")
+                        } description: {
+                            Text("刷新项目后将在此展示声明与 Machine Environment 证据。")
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(24)
+            }
+        } else {
+            ContentUnavailableView {
+                Label("选择一个项目", systemImage: "sidebar.left")
+            } description: {
+                Text("从列表中选择项目以查看声明来源和 Machine Environment 证据。")
+            }
+        }
+    }
+
+    private var selectedProject: ProjectRecord? {
+        guard let selectedProjectID else { return nil }
+        return projectsModel.records.first { $0.id == selectedProjectID }
+    }
+
+    private func projectDetailHeader(_ project: ProjectRecord) -> some View {
+        let summary = projectsModel.summary(for: project)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(project.title)
+                    .font(.title2.bold())
+                Label(summary.map(projectSummaryTitle) ?? "待刷新", systemImage: projectSummarySymbol(summary))
+                    .foregroundStyle(projectSummaryColor(summary))
+                Spacer()
+                Button(role: .destructive) {
+                    pendingProjectRemoval = project
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .accessibilityLabel("从 DevEnv 移除 \(project.title)")
+                .help("移除记录")
+                .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
+            }
+            Text(project.path)
+                .font(.callout.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .accessibilityLabel("项目路径 \(project.path)")
+            if project.isNew {
+                Label("New，本次发现的新项目", systemImage: "sparkles")
+                    .font(.callout)
+                    .foregroundStyle(.blue)
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func projectAnalysisDetail(_ analysis: ProjectRequirementsAnalysis) -> some View {
+        if analysis.components.isEmpty {
+            Label("未声明受支持的 Project Requirements", systemImage: "doc.text")
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(analysis.components) { component in
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if component.requirements.isEmpty {
+                            Text("此 Component 未声明受支持的要求")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(component.requirements) { requirement in
+                            projectRequirementDetail(requirement)
+                            if requirement.id != component.requirements.last?.id { Divider() }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+                } label: {
+                    HStack {
+                        Text(component.relativePath)
+                            .font(.headline.monospaced())
+                        if let manifestName = component.manifestName {
+                            Text(manifestName).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(projectSummaryTitle(component.summary))
+                            .foregroundStyle(projectSummaryColor(component.summary))
+                    }
+                }
+            }
+        }
+    }
+
+    private func projectRequirementDetail(_ requirement: ProjectRequirement) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(requirement.capability)
+                    .font(.headline)
+                Spacer()
+                Label(
+                    projectRequirementStateTitle(requirement.satisfaction),
+                    systemImage: projectRequirementStateSymbol(requirement.satisfaction)
+                )
+                .foregroundStyle(projectRequirementStateColor(requirement.satisfaction))
+            }
+            LabeledContent("原始表达式") {
+                Text(requirement.expression).font(.body.monospaced())
+            }
+            LabeledContent("声明来源") {
+                Text("\(requirement.relativePath) · \(requirement.field)")
+                    .font(.callout.monospaced())
+                    .textSelection(.enabled)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Machine Environment 证据")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if requirement.matches.isEmpty {
+                    if requirement.evidence.isEmpty {
+                        Text(projectRequirementEvidenceFallback(requirement.satisfaction))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(requirement.evidence, id: \.self) { evidence in
+                            Text(evidence)
+                                .font(.callout.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                } else {
+                    ForEach(requirement.matches, id: \.path) { match in
+                        Label("\(match.version) · \(match.path)", systemImage: "checkmark.circle")
+                            .font(.callout.monospaced())
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            "\(requirement.capability)，原始表达式 \(requirement.expression)，声明来源 \(requirement.relativePath) \(requirement.field)，"
+                + projectRequirementStateTitle(requirement.satisfaction)
+        )
+    }
+
+    private func projectSummaryTitle(_ summary: ProjectRequirementsSummary) -> String {
+        switch summary {
+        case .satisfied: "已满足"
+        case .unsatisfied: "未满足"
+        case .undetermined: "无法判断"
+        case .declarationConflict: "声明冲突"
+        case .undeclared: "未声明要求"
+        case .unavailable: "不可用"
+        }
+    }
+
+    private func projectRequirementStateTitle(_ state: ProjectRequirementSatisfactionState) -> String {
+        switch state {
+        case .satisfied: "已满足"
+        case .unsatisfied: "未满足"
+        case .undetermined: "无法判断"
+        case .declarationConflict: "声明冲突"
+        }
+    }
+
+    private func projectSummarySymbol(_ summary: ProjectRequirementsSummary?) -> String {
+        switch summary {
+        case .satisfied: "checkmark.circle"
+        case .unsatisfied: "xmark.circle"
+        case .undetermined: "questionmark.circle"
+        case .declarationConflict: "exclamationmark.triangle"
+        case .undeclared: "doc.text"
+        case .unavailable: "folder.badge.questionmark"
+        case nil: "clock"
+        }
+    }
+
+    private func projectSummaryColor(_ summary: ProjectRequirementsSummary?) -> Color {
+        switch summary {
+        case .satisfied: .green
+        case .unsatisfied: .red
+        case .undetermined, .undeclared, .unavailable, nil: .secondary
+        case .declarationConflict: .orange
+        }
+    }
+
+    private func projectRequirementStateSymbol(_ state: ProjectRequirementSatisfactionState) -> String {
+        switch state {
+        case .satisfied: "checkmark.circle"
+        case .unsatisfied: "xmark.circle"
+        case .undetermined: "questionmark.circle"
+        case .declarationConflict: "exclamationmark.triangle"
+        }
+    }
+
+    private func projectRequirementStateColor(_ state: ProjectRequirementSatisfactionState) -> Color {
+        switch state {
+        case .satisfied: .green
+        case .unsatisfied: .red
+        case .undetermined: .secondary
+        case .declarationConflict: .orange
+        }
+    }
+
+    private func projectRequirementEvidenceFallback(_ state: ProjectRequirementSatisfactionState) -> String {
+        switch state {
+        case .satisfied: "Machine Snapshot 已满足该声明"
+        case .unsatisfied: "未找到满足声明的可用安装"
+        case .undetermined: "Machine Environment 证据不足，无法判断"
+        case .declarationConflict: "同一 Project Component 的声明无法由单个安装同时满足"
+        }
+    }
+
+    private func selectFirstProjectIfNeeded() {
+        if let selectedProjectID, projectsModel.records.contains(where: { $0.id == selectedProjectID }) {
+            return
+        }
+        selectedProjectID = projectsModel.records.first?.id
+    }
+
+    private func projectStatus(_ project: ProjectRecord) -> (
+        symbol: String,
+        color: Color,
+        isUnavailable: Bool
+    ) {
+        switch project.availability {
+        case .unknown:
+            ("clock", .secondary, false)
+        case .available:
+            ("folder", .blue, false)
+        case .unavailable:
+            ("folder.badge.questionmark", .secondary, true)
+        }
+    }
+
+    private func chooseProjectDirectories(forBatchScan: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        panel.prompt = forBatchScan ? "扫描" : "添加"
+        panel.message = forBatchScan
+            ? "选择一个或多个临时 Project Search Root；所选扫描目录不会持久化。"
+            : "选择一个或多个目录作为明确的 Project Root。"
+        panel.begin { response in
+            guard response == .OK else { return }
+            if forBatchScan {
+                projectsModel.scan(panel.urls)
+            } else {
+                projectsModel.addDirect(panel.urls)
             }
         }
     }

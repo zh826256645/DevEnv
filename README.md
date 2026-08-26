@@ -661,27 +661,21 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 ---
 
-### v0.4
+### v0.4（核心功能已完成，暂未发布）
 
-**Projects**
+**Projects（已完成）**
 
-自动识别：
+允许用户直接添加 Project Root，或通过一次性的 Project Search Root 批量发现项目。DevEnv 会持久化 Project Record，以增量扫描更新可用状态和 `New` 标记，并允许只从 DevEnv 移除或恢复项目记录，不修改原目录。
 
-* `package.json`
-* `.node-version`
-* `.nvmrc`
-* `.tool-versions`
-* `mise.toml`
-* `pyproject.toml`
-* `.python-version`
-* `go.mod`
-* `Cargo.toml`
-* `docker-compose.yml`
-* `compose.yml`
+按 Project Component 静态读取 Node.js、Python、Go、Java、Rust、Ruby 与 Lua 的项目清单和版本文件，并支持 `.tool-versions`、`mise.toml`、`.mise.toml`、Compose 文件、包管理器以及 `package.json` 的系统与架构条件。项目代码、Shell 配置和动态清单表达式不会被执行。
+
+Project Requirements 会与当前 Machine Environment 及 Python Component 的 `.venv` 比较，展示声明证据、匹配安装和“已满足”“未满足”“无法判断”或“声明冲突”；项目汇总另外区分“未声明要求”和“不可用”。该结果不声称项目一定能够运行，也不包含安装、修复或启动环境。
+
+Projects 页面提供可搜索的项目列表与 Component 详情；进入页面时逐项刷新并保留旧内容，失败时显示本次会话的过期结果。Machine Snapshot 更新只重新计算已有声明，不重复读取未变化的项目文件。
 
 解决：
 
-> 这个项目需要什么环境？
+> 这个项目需要什么环境，当前 Mac 是否已经具备？
 
 ---
 
