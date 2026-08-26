@@ -418,7 +418,11 @@ final class ProjectRequirementsTests: XCTestCase {
             ("node", "package.json", #"{"dependencies":{"pg":"8","redis-tool":"1"},"devDependencies":{"mongoose":"9"},"optionalDependencies":{"redis":"5"},"peerDependencies":{"mysql2":"3"}}"#),
             ("python", "pyproject.toml", """
             [project]
-            dependencies = ["psycopg[binary]>=3", "motor", "SQLAlchemy"]
+            dependencies = [
+                "psycopg[binary]>=3",
+                "motor",
+                "SQLAlchemy",
+            ]
             [project.optional-dependencies]
             cache = ["redis"]
             [tool.poetry.dependencies]

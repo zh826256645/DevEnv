@@ -1126,7 +1126,7 @@ struct ProjectRequirementsScanner: Sendable {
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.range(
-            of: #"^\[\s*(?:[\"'][^\"']*[\"']\s*(?:,\s*[\"'][^\"']*[\"']\s*)*)?\]$"#,
+            of: #"^\[\s*(?:[\"'][^\"']*[\"'](?:\s*,\s*[\"'][^\"']*[\"'])*\s*,?)?\s*\]$"#,
             options: .regularExpression
         ) != nil else { return nil }
         return regexCaptures(#"[\"']([^\"']*)[\"']"#, in: value)
