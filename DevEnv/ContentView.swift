@@ -476,9 +476,12 @@ struct ContentView: View {
     @State private var environmentCardUpperContentHeight: CGFloat = 0
     @State private var pendingHomebrewServiceAction: PendingHomebrewServiceAction?
     @State private var selectedServiceTab = ServiceTab.local
-    @State private var pendingProjectRemoval: ProjectRecord?
+    @State private var isSelectingProjects = false
+    @State private var selectedProjectIDs: Set<String> = []
+    @State private var pendingProjectRemovalIDs: Set<String> = []
     @State private var isConfirmingProjectStoreReset = false
     @State private var selectedProjectID: String?
+    @State private var expandedProjectRequirementID: String?
     @State private var projectSearchText = ""
     @FocusState private var focusedCopyPath: String?
     @FocusState private var projectSearchIsFocused: Bool
@@ -605,19 +608,22 @@ struct ContentView: View {
         }
         .alert(
             projectRemovalConfirmationTitle,
-            isPresented: isConfirmingProjectRemoval,
-            presenting: pendingProjectRemoval
-        ) { project in
+            isPresented: isConfirmingProjectRemoval
+        ) {
             Button("取消", role: .cancel) {}
-            Button("仅移除记录", role: .destructive) {
-                projectsModel.remove(project)
-                if selectedProjectID == project.id {
-                    selectedProjectID = projectsModel.records.first?.id
-                }
+            Button("确认删除", role: .destructive) {
+                let projectIDs = pendingProjectRemovalIDs
+                let succeeded = projectsModel.remove(projectIDs: projectIDs) != nil
+                pendingProjectRemovalIDs.removeAll()
+                guard succeeded else { return }
+                selectedProjectIDs.removeAll()
+                isSelectingProjects = false
+                selectFirstProjectIfNeeded()
                 projectSearchIsFocused = true
             }
-        } message: { _ in
-            Text("只会从 DevEnv 删除这条记录，并加入 Ignored Projects。不会删除、移动或修改原项目文件。")
+        } message: {
+            let summary = projectsModel.removalSummary(for: pendingProjectRemovalIDs)
+            Text("将移除 \(summary.projectCount) 个项目记录并清除 \(summary.ignoredProjectCount) 个忽略记录？不会删除、移动或修改原项目文件。项目记录会进入 Ignored Projects；忽略记录会从 DevEnv 中移除。")
         }
         .alert("重新创建项目记录存储？", isPresented: $isConfirmingProjectStoreReset) {
             Button("取消", role: .cancel) {}
@@ -651,13 +657,14 @@ struct ContentView: View {
     }
 
     private var projectRemovalConfirmationTitle: String {
-        pendingProjectRemoval.map { "移除 \($0.title)？" } ?? ""
+        let count = pendingProjectRemovalIDs.count
+        return count == 1 ? "移除项目记录？" : "批量移除项目记录？"
     }
 
     private var isConfirmingProjectRemoval: Binding<Bool> {
         Binding(
-            get: { pendingProjectRemoval != nil },
-            set: { if !$0 { pendingProjectRemoval = nil } }
+            get: { !pendingProjectRemovalIDs.isEmpty },
+            set: { if !$0 { pendingProjectRemovalIDs.removeAll() } }
         )
     }
 
@@ -727,6 +734,7 @@ struct ContentView: View {
         } detail: {
             page(snapshot)
         }
+        .navigationTitle("")
     }
 
     @ViewBuilder
@@ -745,13 +753,8 @@ struct ContentView: View {
     @ViewBuilder
     private func populatedPage(_ page: Page, snapshot: MachineSnapshot?) -> some View {
         if page == .projects {
-            VStack(alignment: .leading, spacing: 16) {
-                header(page, snapshot: snapshot)
-                    .padding(.horizontal, 28)
-                    .padding(.top, 24)
-                projectsPage
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            projectsPage
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -881,21 +884,48 @@ struct ContentView: View {
     }
 
     private var projectsPage: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Button("添加项目…") { chooseProjectDirectories(forBatchScan: false) }
-                    .buttonStyle(.borderedProminent)
-                    .focused($projectAddIsFocused)
-                    .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("项目")
+                        .font(.title2.bold())
+                    Text("\(projectsModel.records.count) 个项目  ·  本次新增 \(projectsModel.records.filter(\.isNew).count) 个")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 20)
+                Button { chooseProjectDirectories(forBatchScan: false) } label: {
+                    Label("添加项目", systemImage: "plus")
+                }
+                .focused($projectAddIsFocused)
+                .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
                 Button("扫描目录…") { chooseProjectDirectories(forBatchScan: true) }
-                    .buttonStyle(.bordered)
                     .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
-                Spacer()
-                Text("\(projectsModel.records.count) 个项目")
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
+                if isSelectingProjects {
+                    Button("取消") {
+                        selectedProjectIDs.removeAll()
+                        isSelectingProjects = false
+                    }
+                    Button("全选") { selectedProjectIDs = visibleProjectRecordIDs }
+                        .disabled(selectedProjectIDs == visibleProjectRecordIDs)
+                    Button("删除（\(selectedProjectIDs.count)）", role: .destructive) {
+                        pendingProjectRemovalIDs = selectedProjectIDs
+                    }
+                    .disabled(
+                        selectedProjectIDs.isEmpty
+                            || projectsModel.mutationsArePaused
+                            || projectsModel.isScanning
+                    )
+                } else {
+                    Button("多选") { isSelectingProjects = true }
+                        .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+                }
             }
+            .controlSize(.regular)
             .padding(.horizontal, 28)
+            .padding(.vertical, 17)
+
+            Divider()
 
             if let storageError = projectsModel.storageError {
                 GroupBox {
@@ -915,6 +945,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.horizontal, 28)
+                .padding(.top, 12)
             }
 
             if let progress = projectsModel.scanProgress {
@@ -938,6 +969,7 @@ struct ContentView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("正在扫描项目，已发现 \(progress.discoveredCount) 个，当前目录 \(progress.currentPath)")
                 .padding(.horizontal, 28)
+                .padding(.top, 12)
             }
 
             if let error = projectsModel.operationError {
@@ -948,12 +980,14 @@ struct ContentView: View {
                 }
                 .accessibilityLabel("项目操作失败，\(error)")
                 .padding(.horizontal, 28)
+                .padding(.top, 12)
             } else if let message = projectsModel.resultMessage {
                 Label(message, systemImage: "checkmark.circle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel(message)
                     .padding(.horizontal, 28)
+                    .padding(.top, 10)
             }
 
             if projectsModel.records.isEmpty && projectsModel.ignoredProjects.isEmpty {
@@ -969,9 +1003,10 @@ struct ContentView: View {
             } else {
                 HSplitView {
                     projectList
-                        .frame(minWidth: 220, idealWidth: 300, maxWidth: 380)
+                        .frame(minWidth: 220, idealWidth: 250, maxWidth: 360)
                     projectDetail
                         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
+                        .layoutPriority(1)
                 }
                 .accessibilityElement(children: .contain)
             }
@@ -980,22 +1015,33 @@ struct ContentView: View {
         .onChange(of: projectsModel.records.map(\.id)) { _, _ in
             selectFirstProjectIfNeeded()
         }
+        .onChange(of: selectedProjectID) { _, _ in
+            expandedProjectRequirementID = nil
+        }
     }
 
     private var projectList: some View {
-        VStack(spacing: 8) {
-            TextField("搜索标题或路径", text: $projectSearchText)
+        VStack(spacing: 0) {
+            TextField("搜索项目或路径", text: $projectSearchText)
                 .textFieldStyle(.roundedBorder)
                 .focused($projectSearchIsFocused)
                 .accessibilityLabel("搜索项目标题或路径")
-                .padding(.horizontal, 10)
-                .padding(.top, 10)
+                .padding(16)
             List(selection: $selectedProjectID) {
-                Section("Projects") {
+                Section("项目列表") {
                     ForEach(projectsModel.records(matching: projectSearchText)) { project in
-                        projectListRow(project)
-                            .tag(project.id)
-                            .onAppear { projectsModel.markDisplayed(project.id) }
+                        HStack(spacing: 8) {
+                            if isSelectingProjects {
+                                Toggle("", isOn: projectSelectionBinding(project.id))
+                                    .labelsHidden()
+                                    .toggleStyle(.checkbox)
+                                    .accessibilityLabel("选择 \(project.title)")
+                            }
+                            projectListRow(project)
+                        }
+                        .tag(project.id)
+                        .padding(.vertical, 4)
+                        .onAppear { projectsModel.markDisplayed(project.id) }
                     }
                     if !projectSearchText.isEmpty && projectsModel.records(matching: projectSearchText).isEmpty {
                         Text("没有匹配的项目")
@@ -1003,55 +1049,66 @@ struct ContentView: View {
                     }
                 }
                 if !projectsModel.ignoredProjects.isEmpty {
-                    Section("Ignored Projects") {
+                    Section("已忽略的项目  \(projectsModel.ignoredProjects.count)") {
                         ForEach(projectsModel.ignoredProjects) { project in
                             HStack(spacing: 12) {
+                                if isSelectingProjects {
+                                    Toggle("", isOn: projectSelectionBinding(project.id))
+                                        .labelsHidden()
+                                        .toggleStyle(.checkbox)
+                                        .accessibilityLabel("选择 \(project.path)")
+                                }
                                 Image(systemName: "eye.slash")
                                     .foregroundStyle(.secondary)
                                 Text(project.path)
-                                    .font(.callout.monospaced())
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                 Spacer()
-                                Button("恢复") {
-                                    projectsModel.restore(project)
-                                    selectedProjectID = project.path
-                                    projectSearchIsFocused = true
-                                }
-                                .accessibilityLabel("恢复 \(project.path)")
+                                if !isSelectingProjects {
+                                    Button("恢复") {
+                                        projectsModel.restore(project)
+                                        selectedProjectID = project.path
+                                        projectSearchIsFocused = true
+                                    }
+                                    .accessibilityLabel("恢复 \(project.path)")
                                     .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
+                                }
                             }
+                            .padding(.vertical, 3)
                         }
                     }
                 }
             }
-            .listStyle(.inset)
+            .accentColor(Color(red: 143.0 / 255, green: 203.0 / 255, blue: 235.0 / 255))
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
     }
 
     private func projectListRow(_ project: ProjectRecord) -> some View {
-        let status = projectStatus(project)
         let summary = projectsModel.summary(for: project)
         return HStack(alignment: .top, spacing: 10) {
-            Image(systemName: status.symbol)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(status.color)
-                .frame(width: 24, height: 24)
+            Image(systemName: "folder.fill")
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(.blue)
+                .frame(width: 30, height: 30)
                 .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 7) {
                     Text(project.title)
-                        .font(.headline)
+                        .font(.system(size: 14, weight: .semibold))
                         .lineLimit(1)
                     if project.isNew {
-                        Text("New")
-                            .font(.caption.bold())
+                        Text("NEW")
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.blue)
-                            .padding(.horizontal, 7)
+                            .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(.blue.opacity(0.12), in: Capsule())
+                            .background(Color.blue.opacity(0.12), in: Capsule())
                     }
                     Spacer(minLength: 4)
                     if projectsModel.refreshingProjectIDs.contains(project.id) {
@@ -1061,7 +1118,7 @@ struct ContentView: View {
                     }
                 }
                 Text(project.path)
-                    .font(.caption.monospaced())
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -1076,7 +1133,7 @@ struct ContentView: View {
                 .foregroundStyle(projectSummaryColor(summary))
             }
         }
-        .opacity(status.isUnavailable ? 0.62 : 1)
+        .opacity(project.availability == .available ? 1 : 0.72)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             "\(project.title)，\(project.path)，\(project.isNew ? "New，" : "")"
@@ -1088,47 +1145,69 @@ struct ContentView: View {
     @ViewBuilder
     private var projectDetail: some View {
         if let project = selectedProject {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    projectDetailHeader(project)
-                    if case let .unavailable(reason) = project.availability {
-                        Label("项目不可用：\(reason)", systemImage: "folder.badge.questionmark")
-                            .foregroundStyle(.secondary)
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                    }
-                    if projectsModel.staleProjectIDs.contains(project.id) {
-                        Label("当前路径刷新失败；以下为本次会话最后一次成功结果，已过期。", systemImage: "clock.badge.exclamationmark")
-                            .foregroundStyle(.orange)
-                            .accessibilityLabel("项目结果已过期，显示本次会话最后一次成功结果")
-                    }
-                    if projectsModel.refreshingProjectIDs.contains(project.id) {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("正在刷新项目要求…")
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        projectDetailHeader(project)
+                        projectSummaryCards(project, analysis: projectsModel.analyses[project.id])
+                        if case let .unavailable(reason) = project.availability {
+                            Label("项目不可用：\(reason)", systemImage: "folder.badge.questionmark")
+                                .foregroundStyle(.secondary)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                         }
-                        .accessibilityElement(children: .combine)
-                    }
-                    ForEach(projectsModel.projectNotices[project.id] ?? []) { notice in
-                        Label("\(notice.relativePath)：\(notice.message)", systemImage: "exclamationmark.triangle")
-                            .font(.callout)
-                            .foregroundStyle(.orange)
-                            .accessibilityLabel("Project Notice，\(notice.relativePath)，\(notice.message)")
-                    }
-                    if let analysis = projectsModel.analyses[project.id] {
-                        projectAnalysisDetail(analysis)
-                    } else if !projectsModel.refreshingProjectIDs.contains(project.id) {
-                        ContentUnavailableView {
-                            Label("没有项目要求结果", systemImage: "doc.text.magnifyingglass")
-                        } description: {
-                            Text("刷新项目后将在此展示声明与 Machine Environment 证据。")
+                        if projectsModel.staleProjectIDs.contains(project.id) {
+                            Label("当前路径刷新失败；以下为本次会话最后一次成功结果，已过期。", systemImage: "clock.badge.exclamationmark")
+                                .foregroundStyle(.orange)
+                                .accessibilityLabel("项目结果已过期，显示本次会话最后一次成功结果")
+                        }
+                        if projectsModel.refreshingProjectIDs.contains(project.id) {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("正在刷新项目要求…")
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
+                        ForEach(projectsModel.projectNotices[project.id] ?? []) { notice in
+                            Label("\(notice.relativePath)：\(notice.message)", systemImage: "exclamationmark.triangle")
+                                .font(.callout)
+                                .foregroundStyle(.orange)
+                                .accessibilityLabel("Project Notice，\(notice.relativePath)，\(notice.message)")
+                        }
+                        Text("环境要求与匹配")
+                            .font(.headline)
+                        if let analysis = projectsModel.analyses[project.id] {
+                            projectAnalysisDetail(analysis)
+                        } else if !projectsModel.refreshingProjectIDs.contains(project.id) {
+                            ContentUnavailableView {
+                                Label("没有项目要求结果", systemImage: "doc.text.magnifyingglass")
+                            } description: {
+                                Text("刷新项目后将在此展示声明来源和 Machine Environment 证据。")
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(28)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(24)
+                Divider()
+                HStack(spacing: 12) {
+                    Text("最近发现：\(formatted(project.lastDiscoveredAt))")
+                        .foregroundStyle(.secondary)
+                    Button("重新扫描", action: projectsModel.refreshProjects)
+                        .disabled(projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                    Spacer()
+                    Label(
+                        project.availability == .available ? "项目可访问" : "项目不可访问",
+                        systemImage: project.availability == .available ? "checkmark.circle" : "questionmark.circle"
+                    )
+                    .foregroundStyle(project.availability == .available ? .green : .secondary)
+                }
+                .font(.caption)
+                .padding(.horizontal, 30)
+                .padding(.vertical, 13)
             }
+            .id(project.id)
         } else {
             ContentUnavailableView {
                 Label("选择一个项目", systemImage: "sidebar.left")
@@ -1143,124 +1222,338 @@ struct ContentView: View {
         return projectsModel.records.first { $0.id == selectedProjectID }
     }
 
+    private var visibleProjectRecordIDs: Set<String> {
+        Set(
+            projectsModel.records(matching: projectSearchText).map(\.id)
+                + projectsModel.ignoredProjects.map(\.id)
+        )
+    }
+
+    private func projectSelectionBinding(_ projectID: String) -> Binding<Bool> {
+        Binding(
+            get: { selectedProjectIDs.contains(projectID) },
+            set: { isSelected in
+                if isSelected {
+                    selectedProjectIDs.insert(projectID)
+                } else {
+                    selectedProjectIDs.remove(projectID)
+                }
+            }
+        )
+    }
+
     private func projectDetailHeader(_ project: ProjectRecord) -> some View {
         let summary = projectsModel.summary(for: project)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(project.title)
-                    .font(.title2.bold())
-                Label(summary.map(projectSummaryTitle) ?? "待刷新", systemImage: projectSummarySymbol(summary))
-                    .foregroundStyle(projectSummaryColor(summary))
-                Spacer()
-                Button(role: .destructive) {
-                    pendingProjectRemoval = project
-                } label: {
-                    Image(systemName: "trash")
+        return HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 28, weight: .medium))
+                .foregroundStyle(.blue)
+                .frame(width: 48, height: 42)
+                .background(.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 12) {
+                    Text(project.title)
+                        .font(.title2.bold())
+                    Label(summary.map(projectSummaryTitle) ?? "待刷新", systemImage: projectSummarySymbol(summary))
+                        .foregroundStyle(projectSummaryColor(summary))
                 }
-                .accessibilityLabel("从 DevEnv 移除 \(project.title)")
-                .help("移除记录")
-                .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
-            }
-            Text(project.path)
-                .font(.callout.monospaced())
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .accessibilityLabel("项目路径 \(project.path)")
-            if project.isNew {
-                Label("New，本次发现的新项目", systemImage: "sparkles")
+                Text(project.path)
                     .font(.callout)
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .accessibilityLabel("项目路径 \(project.path)")
+                if project.isNew {
+                    HStack(spacing: 8) {
+                        Text("NEW")
+                            .font(.caption.bold())
+                            .foregroundStyle(.blue)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(.blue.opacity(0.12), in: Capsule())
+                        Text("本次扫描新发现")
+                            .font(.callout)
+                            .foregroundStyle(.blue)
+                    }
+                }
+            }
+            Spacer()
+            if !isSelectingProjects {
+                Menu {
+                    Button("移除项目记录", role: .destructive) {
+                        pendingProjectRemovalIDs = [project.id]
+                    }
+                    .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 24, height: 20)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .accessibilityLabel("项目操作")
+                .help("项目操作")
             }
         }
         .accessibilityElement(children: .contain)
     }
 
+    private func projectSummaryCards(
+        _ project: ProjectRecord,
+        analysis: ProjectRequirementsAnalysis?
+    ) -> some View {
+        let manifests = Array(Set(analysis?.components.flatMap(\.manifestNames) ?? [])).sorted()
+        let requirements = analysis?.components.flatMap(\.requirements) ?? []
+        let capabilities = Array(Set(requirements.map { projectCapabilityTitle($0.capability) })).sorted()
+        let unsatisfiedCount = requirements.filter { $0.satisfaction == .unsatisfied }.count
+        let discovery = ProjectDiscovery()
+        let isGitRepository = discovery.isGitRepository(project.path)
+        let gitBranch = discovery.currentGitBranch(project.path)
+        return LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
+            spacing: 10
+        ) {
+            projectMetricCard(
+                title: "Git 仓库",
+                assetName: "GitLogo",
+                value: isGitRepository ? "已检测到" : "未检测到",
+                detail: gitBranch.map { "当前分支：\($0)" }
+                    ?? (isGitRepository ? "当前分支：游离 HEAD" : "未发现 Git 仓库"),
+                tint: isGitRepository ? .secondary : .orange
+            )
+            projectMetricCard(
+                title: "项目清单",
+                symbol: "doc.text",
+                value: "\(manifests.count) 个清单文件",
+                detail: manifests.isEmpty ? "未发现支持的清单" : manifests.prefix(2).joined(separator: "、"),
+                tint: .secondary
+            )
+            projectMetricCard(
+                title: "环境要求",
+                symbol: "viewfinder",
+                value: "\(requirements.count) 项",
+                detail: capabilities.isEmpty ? "未声明要求" : capabilities.prefix(3).joined(separator: "、"),
+                tint: .secondary
+            )
+            projectMetricCard(
+                title: "匹配结果",
+                symbol: projectSummarySymbol(analysis?.summary),
+                value: analysis.map { projectSummaryTitle($0.summary) } ?? "待刷新",
+                detail: "未满足 \(unsatisfiedCount) 项",
+                tint: projectSummaryColor(analysis?.summary)
+            )
+        }
+    }
+
+    private func projectMetricCard(
+        title: String,
+        symbol: String? = nil,
+        assetName: String? = nil,
+        value: String,
+        detail: String,
+        tint: Color
+    ) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Group {
+                if let assetName {
+                    Image(assetName)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(2)
+                } else if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 15, weight: .medium))
+                }
+            }
+            .foregroundStyle(assetName == nil ? tint : .orange)
+            .frame(width: 22, height: 22)
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.callout)
+                    .lineLimit(1)
+                Text(value)
+                    .font(.caption)
+                    .foregroundStyle(tint)
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, minHeight: 72, maxHeight: 72, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.separator.opacity(0.65), lineWidth: 1)
+        }
+    }
+
     @ViewBuilder
     private func projectAnalysisDetail(_ analysis: ProjectRequirementsAnalysis) -> some View {
-        if analysis.components.isEmpty {
+        let requirements = analysis.components.flatMap(\.requirements)
+        if analysis.components.isEmpty || requirements.isEmpty {
             Label("未声明受支持的 Project Requirements", systemImage: "doc.text")
                 .foregroundStyle(.secondary)
         } else {
-            ForEach(analysis.components) { component in
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if component.requirements.isEmpty {
-                            Text("此 Component 未声明受支持的要求")
-                                .foregroundStyle(.secondary)
-                        }
-                        ForEach(component.requirements) { requirement in
-                            projectRequirementDetail(requirement)
-                            if requirement.id != component.requirements.last?.id { Divider() }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 4)
-                } label: {
-                    HStack {
-                        Text(component.relativePath)
-                            .font(.headline.monospaced())
-                        if let manifestName = component.manifestName {
-                            Text(manifestName).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Text(projectSummaryTitle(component.summary))
-                            .foregroundStyle(projectSummaryColor(component.summary))
-                    }
+            VStack(spacing: 0) {
+                ForEach(Array(requirements.enumerated()), id: \.element.id) { index, requirement in
+                    projectRequirementDetail(requirement)
+                    if index < requirements.count - 1 { Divider() }
                 }
+            }
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.22), in: RoundedRectangle(cornerRadius: 14))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(.separator.opacity(0.75), lineWidth: 1)
+            }
+            .onAppear {
+                expandedProjectRequirementID = expandedProjectRequirementID ?? requirements.first?.id
             }
         }
     }
 
     private func projectRequirementDetail(_ requirement: ProjectRequirement) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text(requirement.capability)
-                    .font(.headline)
-                Spacer()
-                Label(
-                    projectRequirementStateTitle(requirement.satisfaction),
-                    systemImage: projectRequirementStateSymbol(requirement.satisfaction)
-                )
-                .foregroundStyle(projectRequirementStateColor(requirement.satisfaction))
-            }
-            LabeledContent("原始表达式") {
-                Text(requirement.expression).font(.body.monospaced())
-            }
-            LabeledContent("声明来源") {
-                Text("\(requirement.relativePath) · \(requirement.field)")
-                    .font(.callout.monospaced())
-                    .textSelection(.enabled)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Machine Environment 证据")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if requirement.matches.isEmpty {
-                    if requirement.evidence.isEmpty {
-                        Text(projectRequirementEvidenceFallback(requirement.satisfaction))
+        let isExpanded = expandedProjectRequirementID == requirement.id
+        return VStack(spacing: 0) {
+            Button {
+                expandedProjectRequirementID = isExpanded ? nil : requirement.id
+            } label: {
+                HStack(spacing: 14) {
+                    projectCapabilityIcon(requirement.capability)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(projectCapabilityTitle(requirement.capability))
+                            .font(.headline)
+                        Text("要求：\(requirement.expression)")
+                            .font(.callout)
                             .foregroundStyle(.secondary)
+                        Text("来源：\(requirement.relativePath) · \(requirement.field)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Label(
+                        projectRequirementStateTitle(requirement.satisfaction),
+                        systemImage: projectRequirementStateSymbol(requirement.satisfaction)
+                    )
+                    .foregroundStyle(projectRequirementStateColor(requirement.satisfaction))
+                    Image(systemName: "chevron.down")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                }
+                .contentShape(Rectangle())
+                .padding(.horizontal, 18)
+                .padding(.vertical, 15)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                "\(projectCapabilityTitle(requirement.capability))，要求 \(requirement.expression)，"
+                    + "\(projectRequirementStateTitle(requirement.satisfaction))，"
+                    + (isExpanded ? "收起详情" : "展开详情")
+            )
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("匹配环境（\(requirement.matches.count)）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if requirement.matches.isEmpty {
+                        Label(
+                            requirement.evidence.first ?? projectRequirementEvidenceFallback(requirement.satisfaction),
+                            systemImage: projectRequirementStateSymbol(requirement.satisfaction)
+                        )
+                        .font(.callout)
+                        .foregroundStyle(projectRequirementStateColor(requirement.satisfaction))
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 9))
                     } else {
-                        ForEach(requirement.evidence, id: \.self) { evidence in
-                            Text(evidence)
-                                .font(.callout.monospaced())
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
+                        ForEach(requirement.matches, id: \.path) { match in
+                            HStack(spacing: 12) {
+                                Image(systemName: "checkmark.circle")
+                                    .foregroundStyle(.green)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 8) {
+                                        Text(match.version)
+                                            .font(.headline)
+                                        if let source = match.source {
+                                            Text(source)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 3)
+                                                .background(.secondary.opacity(0.1), in: Capsule())
+                                        }
+                                    }
+                                    Text(match.path)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                VStack(alignment: .trailing, spacing: 3) {
+                                    Text("\(projectCapabilityTitle(requirement.capability)) \(match.version)")
+                                    Text("优先级：\(match.isEffective ? "高" : "中")")
+                                }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 11)
+                            .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 9)
+                                    .stroke(.separator.opacity(0.55), lineWidth: 1)
+                            }
                         }
                     }
-                } else {
-                    ForEach(requirement.matches, id: \.path) { match in
-                        Label("\(match.version) · \(match.path)", systemImage: "checkmark.circle")
-                            .font(.callout.monospaced())
-                            .textSelection(.enabled)
-                    }
                 }
+                .padding(14)
+                .background(.secondary.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+                .padding(.leading, 72)
+                .padding(.trailing, 18)
+                .padding(.bottom, 16)
             }
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(
-            "\(requirement.capability)，原始表达式 \(requirement.expression)，声明来源 \(requirement.relativePath) \(requirement.field)，"
-                + projectRequirementStateTitle(requirement.satisfaction)
-        )
+    }
+
+    @ViewBuilder
+    private func projectCapabilityIcon(_ capability: String) -> some View {
+        if let brand = runtimeBrand(capability) {
+            runtimeLogo(brand)
+        } else {
+            Image(systemName: capability == "docker-compose" ? "shippingbox.fill" : "terminal.fill")
+                .font(.system(size: 21, weight: .medium))
+                .foregroundStyle(.blue)
+                .frame(width: 48, height: 48)
+        }
+    }
+
+    private func projectCapabilityTitle(_ capability: String) -> String {
+        switch capability {
+        case "node": "Node.js"
+        case "python": "Python"
+        case "docker-compose": "Docker Compose"
+        case "go": "Go"
+        case "java": "Java"
+        case "rust": "Rust"
+        case "ruby": "Ruby"
+        case "lua": "Lua"
+        default: capability
+        }
+    }
+
+    private func projectBoundaryTitle(_ boundary: ProjectRootBoundary) -> String {
+        switch boundary {
+        case .git: "Git 根目录"
+        case .manifest: "项目清单"
+        case .explicit: "手动添加"
+        }
     }
 
     private func projectSummaryTitle(_ summary: ProjectRequirementsSummary) -> String {
@@ -1336,21 +1629,6 @@ struct ContentView: View {
             return
         }
         selectedProjectID = projectsModel.records.first?.id
-    }
-
-    private func projectStatus(_ project: ProjectRecord) -> (
-        symbol: String,
-        color: Color,
-        isUnavailable: Bool
-    ) {
-        switch project.availability {
-        case .unknown:
-            ("clock", .secondary, false)
-        case .available:
-            ("folder", .blue, false)
-        case .unavailable:
-            ("folder.badge.questionmark", .secondary, true)
-        }
     }
 
     private func chooseProjectDirectories(forBatchScan: Bool) {
@@ -2851,21 +3129,7 @@ struct ContentView: View {
         let pathVersionCount = Set(runtime.installations.filter(\.isInPath).compactMap(\.version)).count
 
         return HStack(alignment: .center, spacing: 18) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.primary.opacity(0.045))
-                Image(brand.assetName)
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(brand.color)
-                    .padding(11)
-            }
-            .frame(width: 64, height: 64)
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.primary.opacity(0.10))
-            }
-            .accessibilityHidden(true)
+            runtimeLogo(brand, size: 64, padding: 11, cornerRadius: 14)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(runtime.name)
@@ -2960,21 +3224,7 @@ struct ContentView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(brand.color.opacity(0.10))
-                    Image(brand.assetName)
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundStyle(brand.color)
-                        .padding(8)
-                }
-                .frame(width: 48, height: 48)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .stroke(brand.color.opacity(0.12))
-                }
-                .accessibilityHidden(true)
+                runtimeLogo(brand)
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text(runtime.name)
@@ -3054,16 +3304,43 @@ struct ContentView: View {
     }
 
     private func runtimeBrand(_ runtime: RuntimeSnapshot) -> (assetName: String, color: Color) {
-        switch runtime.name {
-        case "Node.js": ("RuntimeNodeLogo", Color(red: 0.37, green: 0.63, blue: 0.31))
-        case "Python": ("RuntimePythonLogo", Color(red: 0.22, green: 0.46, blue: 0.67))
-        case "Go": ("RuntimeGoLogo", Color(red: 0, green: 0.68, blue: 0.85))
-        case "Java": ("RuntimeJavaLogo", Color(red: 0.26, green: 0.45, blue: 0.57))
-        case "Rust": ("RuntimeRustLogo", .primary)
-        case "Ruby": ("RuntimeRubyLogo", Color(red: 0.80, green: 0.20, blue: 0.18))
-        case "Lua": ("RuntimeLuaLogo", Color(red: 0.17, green: 0.18, blue: 0.45))
-        default: ("RuntimeNodeLogo", .secondary)
+        runtimeBrand(runtime.id) ?? ("RuntimeNodeLogo", .secondary)
+    }
+
+    private func runtimeBrand(_ id: String) -> (assetName: String, color: Color)? {
+        switch id {
+        case "node": ("RuntimeNodeLogo", Color(red: 0.37, green: 0.63, blue: 0.31))
+        case "python": ("RuntimePythonLogo", Color(red: 0.22, green: 0.46, blue: 0.67))
+        case "go": ("RuntimeGoLogo", Color(red: 0, green: 0.68, blue: 0.85))
+        case "java": ("RuntimeJavaLogo", Color(red: 0.26, green: 0.45, blue: 0.57))
+        case "rust": ("RuntimeRustLogo", .primary)
+        case "ruby": ("RuntimeRubyLogo", Color(red: 0.80, green: 0.20, blue: 0.18))
+        case "lua": ("RuntimeLuaLogo", Color(red: 0.17, green: 0.18, blue: 0.45))
+        default: nil
         }
+    }
+
+    private func runtimeLogo(
+        _ brand: (assetName: String, color: Color),
+        size: CGFloat = 48,
+        padding: CGFloat = 8,
+        cornerRadius: CGFloat = 11
+    ) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(brand.color.opacity(0.10))
+            Image(brand.assetName)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(brand.color)
+                .padding(padding)
+        }
+        .frame(width: size, height: size)
+        .overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(brand.color.opacity(0.12))
+        }
+        .accessibilityHidden(true)
     }
 
     private func runtimeInstallationRow(

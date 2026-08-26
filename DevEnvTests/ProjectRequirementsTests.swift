@@ -31,7 +31,10 @@ final class ProjectRequirementsTests: XCTestCase {
         XCTAssertEqual(analysis.components[0].requirements.first { $0.capability == "node" }?.satisfaction, .satisfied)
         XCTAssertEqual(analysis.components[1].summary, .satisfied)
         XCTAssertEqual(analysis.components[1].requirements.map(\.field), ["project.requires-python"])
-        XCTAssertEqual(analysis.components[1].requirements.first?.matches.first?.path, python.path)
+        let localMatch = try XCTUnwrap(analysis.components[1].requirements.first?.matches.first)
+        XCTAssertEqual(localMatch.path, python.path)
+        XCTAssertEqual(localMatch.source, "Virtual Environment")
+        XCTAssertFalse(localMatch.isEffective)
     }
 
     func testConflictingPythonDeclarationsAndBrokenManifestAreIsolated() throws {
@@ -169,7 +172,7 @@ final class ProjectRequirementsTests: XCTestCase {
         <plugin><configuration><rules><requireJavaVersion><version>(17,22]</version></requireJavaVersion></rules></configuration></plugin>
         </plugins></build></project>
         """.utf8).write(to: maven.appendingPathComponent("pom.xml"))
-        try Data("java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }\nsourceCompatibility JavaVersion.VERSION_17\n".utf8)
+        try Data("java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }\nsourceCompatibility JavaVersion.VERSION_17\ntargetCompatibility JavaVersion.VERSION_17\n".utf8)
             .write(to: gradle.appendingPathComponent("build.gradle.kts"))
         try Data("21\n".utf8).write(to: gradle.appendingPathComponent(".java-version"))
         try Data("let note = \"JavaLanguageVersion.of(99)\" // sourceCompatibility = 99\njava { toolchain { languageVersion = JavaLanguageVersion.of(project.property(\"java\")) } }\n".utf8)

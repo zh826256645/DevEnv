@@ -100,6 +100,23 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertTrue(document.ignoredProjects.isEmpty)
     }
 
+    func testBatchRemovalMovesProjectsAndClearsIgnoredProjects() {
+        let date = Date(timeIntervalSince1970: 200)
+        var document = ProjectRecordDocument()
+        document.mergeDiscovered(["/Projects/alpha", "/Projects/beta"])
+        document.remove(projectID: "/Projects/beta")
+
+        let summary = document.remove(
+            projectIDs: ["/Projects/alpha", "/Projects/beta"],
+            at: date
+        )
+
+        XCTAssertEqual(summary, ProjectRemovalSummary(projectCount: 1, ignoredProjectCount: 1))
+        XCTAssertTrue(document.records.isEmpty)
+        XCTAssertEqual(document.ignoredProjects.map(\.path), ["/Projects/alpha"])
+        XCTAssertEqual(document.ignoredProjects.first?.ignoredAt, date)
+    }
+
     func testProjectRecordStoreRoundTripsAndRecreatesCorruptStoreWithBackup() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -180,6 +197,24 @@ final class ProjectRecordsTests: XCTestCase {
 
         XCTAssertEqual(document.records.map(\.path), [parent, manifestChild, gitChild])
         XCTAssertEqual(document.records.first { $0.path == manifestChild }?.boundary, .explicit)
+    }
+
+    func testExplicitBoundaryStillDetectsGitRepositoryAndCurrentBranch() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent(".git"),
+            withIntermediateDirectories: true
+        )
+        try Data("ref: refs/heads/feature/current\n".utf8)
+            .write(to: root.appendingPathComponent(".git/HEAD"))
+        var document = ProjectRecordDocument()
+        document.addDirect([root.path])
+        let project = try XCTUnwrap(document.records.first)
+
+        XCTAssertEqual(project.boundary, .explicit)
+        XCTAssertTrue(ProjectDiscovery().isGitRepository(project.path))
+        XCTAssertEqual(ProjectDiscovery().currentGitBranch(project.path), "feature/current")
     }
 
     func testIgnoredProjectRestoresItsOriginalBoundary() {
@@ -333,6 +368,28 @@ final class ProjectRecordsTests: XCTestCase {
         model.addDirect([projectURL])
         XCTAssertFalse(model.mutationsArePaused)
         XCTAssertEqual(model.records.count, 1)
+    }
+
+    @MainActor
+    func testFailedBatchRemovalSaveRollsBackDocument() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("records.json")
+        let store = ProjectRecordStore(fileURL: fileURL)
+        var document = ProjectRecordDocument()
+        document.mergeDiscovered(["/Projects/alpha", "/Projects/beta"])
+        document.remove(projectID: "/Projects/beta")
+        try store.save(document)
+        let model = ProjectsViewModel(store: store)
+        let previousDocument = model.document
+        try FileManager.default.removeItem(at: directory)
+        try Data().write(to: directory)
+
+        let result = model.remove(projectIDs: ["/Projects/alpha", "/Projects/beta"])
+
+        XCTAssertNil(result)
+        XCTAssertEqual(model.document, previousDocument)
+        XCTAssertNotNil(model.operationError)
     }
 
     @MainActor
