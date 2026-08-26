@@ -153,7 +153,11 @@ struct ProjectRequirementsScanner: Sendable {
     ]
     private static let runtimeCapabilities: Set<String> = ["node", "python", "go", "java", "rust", "ruby", "lua"]
 
-    func scan(projectRoot: URL, machineSnapshot: MachineSnapshot? = nil) -> ProjectRequirementsAnalysis {
+    func scan(
+        projectRoot: URL,
+        machineSnapshot: MachineSnapshot? = nil,
+        excludingProjectPaths: Set<String> = []
+    ) -> ProjectRequirementsAnalysis {
         let root = projectRoot.resolvingSymlinksInPath().standardizedFileURL
         guard isDirectory(root) else {
             return ProjectRequirementsAnalysis(
@@ -164,7 +168,12 @@ struct ProjectRequirementsScanner: Sendable {
         }
 
         var manifestDirectories: [String: Set<String>] = [:]
-        collectManifests(root: root, directory: root, into: &manifestDirectories)
+        collectManifests(
+            root: root,
+            directory: root,
+            excludingProjectPaths: excludingProjectPaths,
+            into: &manifestDirectories
+        )
         var components: [ProjectComponent] = []
         var rootNotices: [ProjectNotice] = []
         for relativePath in manifestDirectories.keys.sorted() {
@@ -309,8 +318,16 @@ struct ProjectRequirementsScanner: Sendable {
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
-    private func collectManifests(root: URL, directory: URL, into result: inout [String: Set<String>]) {
-        if directory != root && FileManager.default.fileExists(atPath: directory.appendingPathComponent(".git").path) {
+    private func collectManifests(
+        root: URL,
+        directory: URL,
+        excludingProjectPaths: Set<String>,
+        into result: inout [String: Set<String>]
+    ) {
+        if directory != root && (
+            excludingProjectPaths.contains(directory.standardizedFileURL.path)
+                || FileManager.default.fileExists(atPath: directory.appendingPathComponent(".git").path)
+        ) {
             return
         }
         guard let entries = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: []) else { return }
@@ -336,7 +353,12 @@ struct ProjectRequirementsScanner: Sendable {
             let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard values?.isDirectory == true, values?.isSymbolicLink != true,
                   !Self.excludedDirectories.contains(entry.lastPathComponent) else { continue }
-            collectManifests(root: root, directory: entry, into: &result)
+            collectManifests(
+                root: root,
+                directory: entry,
+                excludingProjectPaths: excludingProjectPaths,
+                into: &result
+            )
         }
     }
 

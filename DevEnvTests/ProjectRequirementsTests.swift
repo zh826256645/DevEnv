@@ -325,6 +325,38 @@ final class ProjectRequirementsTests: XCTestCase {
         XCTAssertEqual(model.analyses[root.path]?.summary, .satisfied)
     }
 
+    @MainActor
+    func testParentAnalysisExcludesKnownAndIgnoredNestedProjectRoots() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let parent = directory.appendingPathComponent("parent")
+        let child = parent.appendingPathComponent("packages/child")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        try Data("{\"engines\":{\"node\":\">=20\"}}".utf8)
+            .write(to: parent.appendingPathComponent("package.json"))
+        try Data("{\"engines\":{\"node\":\"18\"}}".utf8)
+            .write(to: child.appendingPathComponent("package.json"))
+        let model = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+
+        model.addDirect([parent, child])
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(model.analyses[parent.path]?.components.map(\.relativePath), ["."])
+        XCTAssertEqual(model.analyses[child.path]?.components.map(\.relativePath), ["."])
+
+        model.remove(try XCTUnwrap(model.records.first { $0.path == child.path }))
+        model.refreshProjects()
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(model.analyses[parent.path]?.components.map(\.relativePath), ["."])
+    }
+
     func testMachineSnapshotRecalculationDoesNotRereadProjectFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

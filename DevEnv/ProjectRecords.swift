@@ -538,6 +538,7 @@ final class ProjectsViewModel: ObservableObject {
         let generation = UUID()
         refreshGeneration = generation
         refreshingProjectIDs = Set(paths)
+        let projectBoundaryPaths = Set(paths + document.ignoredProjects.map(\.path))
         let discovery = discovery
         let scanner = ProjectRequirementsScanner()
         let model = self
@@ -549,7 +550,10 @@ final class ProjectsViewModel: ObservableObject {
                 }
                 let availability = discovery.availability(of: path)
                 let analysis: ProjectRequirementsAnalysis? = if availability == .available {
-                    scanner.scan(projectRoot: URL(fileURLWithPath: path, isDirectory: true))
+                    scanner.scan(
+                        projectRoot: URL(fileURLWithPath: path, isDirectory: true),
+                        excludingProjectPaths: projectBoundaryPaths
+                    )
                 } else {
                     nil
                 }
