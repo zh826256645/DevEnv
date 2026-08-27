@@ -3,6 +3,47 @@ import XCTest
 @testable import DevEnv
 
 final class ProjectRequirementsTests: XCTestCase {
+    func testGroupsRequirementsAcrossComponentsAndUsesLowestDatabaseVersion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let backend = root.appendingPathComponent("backend")
+        try FileManager.default.createDirectory(at: backend, withIntermediateDirectories: true)
+        try Data("postgres 15 16\n".utf8).write(to: root.appendingPathComponent(".tool-versions"))
+        try Data("services:\n  old-db:\n    image: postgres:15\n  new-db:\n    image: postgres:16\n".utf8)
+            .write(to: root.appendingPathComponent("compose.yaml"))
+        try Data("3.13\n".utf8).write(to: backend.appendingPathComponent(".python-version"))
+        try Data("""
+        [project]
+        requires-python = ">=3.13"
+        dependencies = ["psycopg[binary]"]
+        """.utf8).write(to: backend.appendingPathComponent("pyproject.toml"))
+
+        let analysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(
+                python: [runtimeInstallation(path: "/opt/python", version: "3.13.4")],
+                databases: [
+                    databaseOverview(
+                        id: "postgresql",
+                        installations: [databaseInstallation(path: "/opt/postgres", version: "15.9")]
+                    ),
+                ]
+            )
+        )
+
+        XCTAssertEqual(analysis.requirements.count, 3)
+        let python = try XCTUnwrap(analysis.requirements.first { $0.capability == "python" })
+        XCTAssertEqual(python.expression, "3.13")
+        XCTAssertEqual(python.declarations.count, 2)
+        XCTAssertEqual(python.satisfaction, .satisfied)
+
+        let postgresql = try XCTUnwrap(analysis.requirements.first { $0.capability == "postgresql" })
+        XCTAssertEqual(postgresql.expression, ">=15")
+        XCTAssertEqual(postgresql.declarations.map(\.expression), ["15 || 16", "15", "16", "*"])
+        XCTAssertEqual(postgresql.satisfaction, .satisfied)
+        XCTAssertEqual(postgresql.matches.map(\.version), ["15.9"])
+    }
+
     func testScansComponentsAndUsesComponentVenvAsPythonEvidence() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -113,9 +154,12 @@ final class ProjectRequirementsTests: XCTestCase {
         try Data(repeating: 0x20, count: ProjectRequirementsScanner.maxManifestBytes + 1)
             .write(to: broken.appendingPathComponent("package.json"))
 
-        let analysis = ProjectRequirementsScanner().scan(projectRoot: root, machineSnapshot: snapshot(python: []))
+        let analysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(python: [runtimeInstallation(path: "/opt/python", version: "3.11.9")])
+        )
 
-        XCTAssertEqual(analysis.components.first { $0.relativePath == "api" }?.summary, .undetermined)
+        XCTAssertEqual(analysis.components.first { $0.relativePath == "api" }?.summary, .satisfied)
         XCTAssertEqual(analysis.components.first { $0.relativePath == "broken" }?.summary, .undetermined)
         XCTAssertEqual(analysis.summary, .undetermined)
         XCTAssertEqual(analysis.notices.first?.message, "清单不可读或超过 4 MiB")
@@ -275,7 +319,8 @@ final class ProjectRequirementsTests: XCTestCase {
         XCTAssertEqual(miseRequirements.first { $0.capability == "lua" }?.expression, "5.4")
         XCTAssertFalse(miseRequirements.contains { $0.capability == "node" || $0.capability == "python" })
         XCTAssertEqual(analysis.components.first { $0.relativePath == "compose" }?.requirements.first?.capability, "docker-compose")
-        XCTAssertEqual(analysis.components.first { $0.relativePath == "compose" }?.requirements.count, 1)
+        XCTAssertEqual(analysis.components.first { $0.relativePath == "compose" }?.requirements.count, 2)
+        XCTAssertEqual(analysis.components.first { $0.relativePath == "compose" }?.requirements.last?.capability, "postgresql")
         XCTAssertEqual(analysis.components.first { $0.relativePath == "compose" }?.summary, .undetermined)
 
         let missingGitRoot = root.appendingPathComponent("missing-git")
@@ -377,6 +422,291 @@ final class ProjectRequirementsTests: XCTestCase {
         XCTAssertEqual(scanner.scan(projectRoot: root, machineSnapshot: snapshot()).summary, .undeclared)
     }
 
+    func testRequirementsInDatabaseRequirementRecalculatesFromMachineSnapshot() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let manifest = root.appendingPathComponent("requirements.in")
+        try Data("redis==5.0.0\n".utf8).write(to: manifest)
+        let scanner = ProjectRequirementsScanner()
+
+        let missing = scanner.scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(databases: [databaseOverview(id: "redis", state: .notFound)])
+        )
+
+        let requirement = try XCTUnwrap(missing.components.first?.requirements.first)
+        XCTAssertEqual(requirement.capability, "redis")
+        XCTAssertEqual(requirement.expression, "*")
+        XCTAssertEqual(requirement.field, "dependency.redis")
+        XCTAssertEqual(requirement.satisfaction, .unsatisfied)
+
+        try FileManager.default.removeItem(at: manifest)
+        let recalculated = scanner.recalculate(
+            missing,
+            machineSnapshot: snapshot(databases: [databaseOverview(
+                id: "redis",
+                installations: [databaseInstallation(path: "/opt/redis-server", version: "7.4.1")]
+            )])
+        )
+
+        XCTAssertEqual(recalculated.summary, .satisfied)
+        XCTAssertEqual(recalculated.components.first?.requirements.first?.matches.first?.path, "/opt/redis-server")
+        XCTAssertEqual(scanner.scan(projectRoot: root, machineSnapshot: snapshot()).summary, .undeclared)
+    }
+
+    func testDirectDatabaseDependenciesAcrossSupportedLanguagesUseExactUnconditionalPackages() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifests: [(String, String, String)] = [
+            ("node", "package.json", #"{"dependencies":{"pg":"8","redis-tool":"1"},"devDependencies":{"mongoose":"9"},"optionalDependencies":{"redis":"5"},"peerDependencies":{"mysql2":"3"}}"#),
+            ("python", "pyproject.toml", """
+            [project]
+            dependencies = [
+                "psycopg[binary]>=3",
+                "motor",
+                "SQLAlchemy",
+            ]
+            [project.optional-dependencies]
+            cache = ["redis"]
+            [tool.poetry.dependencies]
+            python = ">=3.12"
+            pymysql = "1"
+            conditional = { version = "1", markers = "sys_platform == 'linux'" }
+            [tool.poetry.group.test.dependencies]
+            redis = "5"
+            [tool.poetry.dev-dependencies]
+            mongoengine = "1"
+            """),
+            ("go", "go.mod", """
+            module example.test/db
+            go 1.23
+            require (
+              github.com/jackc/pgx/v5 v5.7.0
+              github.com/go-sql-driver/mysql v1.9.0
+              github.com/redis/go-redis/v9 v9.7.0 // indirect
+            )
+            """),
+            ("java", "pom.xml", """
+            <project><dependencyManagement><dependencies><dependency><groupId>org.mongodb</groupId><artifactId>mongodb-driver-sync</artifactId></dependency></dependencies></dependencyManagement><dependencies>
+              <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId></dependency>
+              <dependency><groupId>redis.clients</groupId><artifactId>jedis</artifactId><scope>test</scope></dependency>
+              <dependency><groupId>org.mariadb.jdbc</groupId><artifactId>mariadb-java-client</artifactId><optional>true</optional></dependency>
+            </dependencies><build><plugins><plugin><dependencies>
+              <dependency><groupId>org.redisson</groupId><artifactId>redisson</artifactId></dependency>
+            </dependencies></plugin></plugins></build></project>
+            """),
+            ("gradle", "build.gradle.kts", """
+            dependencies {
+              implementation("org.mongodb:mongodb-driver-sync:5.0.0")
+              testRuntimeOnly("com.mysql:mysql-connector-j:9.0.0")
+              implementation(project(":redis"))
+              if (enableRedis) {
+                implementation("redis.clients:jedis:5.0.0")
+              }
+            }
+            """),
+            ("rust", "Cargo.toml", """
+            [package]
+            name = "db"
+            version = "1.0.0"
+            [dependencies]
+            postgres = "0.19"
+            redis = { version = "0.27", optional=true }
+            [dev-dependencies]
+            mongodb = "3"
+            [target.'cfg(unix)'.dependencies]
+            mysql = "25"
+            """),
+            ("ruby", "Gemfile", """
+            gem "pg"
+            group :development, :test do
+              gem "redis"
+            end
+            if ENV["MONGO"]
+              gem "mongo"
+            end
+            group :production do
+              gem "mongoid"
+            end
+            """),
+            ("lua", "db.rockspec", """
+            package = "db"
+            version = "1.0-1"
+            dependencies = { "luasql-postgres >= 2" }
+            test_dependencies = { "lua-resty-redis >= 0.3" }
+            """),
+        ]
+        for (directoryName, fileName, contents) in manifests {
+            let directory = root.appendingPathComponent(directoryName)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data(contents.utf8).write(to: directory.appendingPathComponent(fileName))
+        }
+
+        let analysis = ProjectRequirementsScanner().scan(projectRoot: root, machineSnapshot: snapshot())
+        func databaseCapabilities(_ component: String) -> [String] {
+            analysis.components.first { $0.relativePath == component }?.requirements
+                .map(\.capability).filter { ["postgresql", "mysql-compatible", "mongodb", "redis"].contains($0) }
+                .sorted() ?? []
+        }
+
+        XCTAssertEqual(databaseCapabilities("node"), ["mongodb", "postgresql"])
+        XCTAssertEqual(databaseCapabilities("python"), ["mongodb", "mongodb", "mysql-compatible", "postgresql", "redis"])
+        XCTAssertEqual(databaseCapabilities("go"), ["mysql-compatible", "postgresql"])
+        XCTAssertEqual(databaseCapabilities("java"), ["postgresql", "redis"])
+        XCTAssertEqual(databaseCapabilities("gradle"), ["mongodb", "mysql-compatible"])
+        XCTAssertEqual(databaseCapabilities("rust"), ["mongodb", "postgresql"])
+        XCTAssertEqual(databaseCapabilities("ruby"), ["postgresql", "redis"])
+        XCTAssertEqual(databaseCapabilities("lua"), ["postgresql", "redis"])
+    }
+
+    func testDatabaseToolAndComposeDeclarationsUseAliasesPrecedenceProfilesAndVersionSemantics() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("{}\n".utf8).write(to: root.appendingPathComponent("package.json"))
+        try Data("postgres 16\nmongo latest\n".utf8).write(to: root.appendingPathComponent(".tool-versions"))
+        try Data("[tools]\nmariadb = \"11.4\"\n".utf8).write(to: root.appendingPathComponent("mise.toml"))
+        try Data("""
+        services:
+          pg:
+            image: registry.example/team/postgres:16-alpine
+          cache:
+            image: redis:7.2.4
+          dynamic-tag:
+            image: postgres:${POSTGRES_TAG}
+          dynamic-repository:
+            image: ${POSTGRES_IMAGE}:16
+          optional:
+            image: mongo:7
+            profiles: [debug]
+          variant:
+            image: postgis/postgis:16
+        """.utf8).write(to: root.appendingPathComponent("compose.yaml"))
+        try Data("services:\n  ignored:\n    image: mysql:8\n".utf8)
+            .write(to: root.appendingPathComponent("docker-compose.yml"))
+
+        let analysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(databases: [
+                databaseOverview(id: "postgresql", installations: [databaseInstallation(path: "/opt/postgres", version: "16.4")]),
+                databaseOverview(id: "mongodb", installations: [databaseInstallation(path: "/opt/mongod", version: nil)]),
+                databaseOverview(id: "redis", installations: [databaseInstallation(path: "/opt/redis", version: "7.2.4", listening: .listening)]),
+                databaseOverview(id: "mariadb", installations: [databaseInstallation(path: "/opt/mariadbd", version: "11.4.2")]),
+            ])
+        )
+        let requirements = try XCTUnwrap(analysis.components.first?.requirements)
+
+        XCTAssertEqual(requirements.filter { $0.capability == "postgresql" }.count, 3)
+        XCTAssertTrue(requirements.filter { $0.capability == "postgresql" }.allSatisfy { $0.satisfaction == .satisfied })
+        XCTAssertEqual(requirements.first { $0.field == "services.dynamic-tag.image" }?.expression, "*")
+        XCTAssertFalse(requirements.contains { $0.field == "services.dynamic-repository.image" })
+        XCTAssertEqual(requirements.first { $0.capability == "mongodb" }?.expression, "*")
+        XCTAssertEqual(requirements.first { $0.capability == "mongodb" }?.satisfaction, .satisfied)
+        XCTAssertEqual(requirements.first { $0.capability == "redis" }?.expression, "7.2.4")
+        XCTAssertEqual(requirements.first { $0.capability == "redis" }?.matches.first?.listeningState, .listening)
+        XCTAssertEqual(requirements.first { $0.capability == "mariadb" }?.satisfaction, .satisfied)
+        XCTAssertFalse(requirements.contains { $0.capability == "mysql" })
+        XCTAssertEqual(requirements.filter { $0.capability == "mongodb" }.count, 1)
+    }
+
+    func testDatabaseCompatibilityConflictDiscoveryAndListeningStatesStayDistinct() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"dependencies":{"mysql2":"3","redis":"5"}}"#.utf8)
+            .write(to: root.appendingPathComponent("package.json"))
+        try Data("""
+        services:
+          first:
+            image: postgres:15
+          second:
+            image: postgres:16
+          mysql:
+            image: mysql:8
+        """.utf8).write(to: root.appendingPathComponent("compose.yaml"))
+
+        let analysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(databases: [
+                databaseOverview(id: "postgresql", state: .notFound),
+                databaseOverview(id: "mysql", state: .notFound),
+                databaseOverview(id: "mariadb", installations: [databaseInstallation(path: "/opt/mariadbd", version: "11.4")]),
+                databaseOverview(id: "redis", installations: [databaseInstallation(path: "/opt/redis", version: nil)]),
+            ])
+        )
+        let requirements = try XCTUnwrap(analysis.components.first?.requirements)
+
+        XCTAssertTrue(requirements.filter { $0.capability == "postgresql" }.allSatisfy { $0.satisfaction == .declarationConflict })
+        XCTAssertEqual(requirements.first { $0.capability == "mysql-compatible" }?.satisfaction, .satisfied)
+        XCTAssertEqual(requirements.first { $0.capability == "mysql" }?.satisfaction, .unsatisfied)
+        XCTAssertEqual(requirements.first { $0.capability == "redis" }?.satisfaction, .satisfied)
+        XCTAssertEqual(requirements.first { $0.capability == "redis" }?.matches.first?.version, "版本不可读")
+
+        let unknown = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(databases: [
+                databaseOverview(id: "postgresql", installations: [databaseInstallation(path: "/broken/postgres", version: nil)]),
+                databaseOverview(id: "mysql", state: .unknown),
+                databaseOverview(id: "mariadb", state: .notFound),
+                databaseOverview(id: "redis", state: .unknown),
+            ])
+        )
+        XCTAssertEqual(unknown.components[0].requirements.first { $0.capability == "mysql" }?.satisfaction, .undetermined)
+        XCTAssertTrue(unknown.components[0].requirements.first { $0.capability == "mysql" }?.evidence
+            .contains { $0.contains("发现状态未知") } == true)
+    }
+
+    func testDatabaseUnknownVersionsDiscoveryAndListeningEvidenceDoNotConflateStates() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"dependencies":{"redis":"5"}}"#.utf8).write(to: root.appendingPathComponent("package.json"))
+        try Data("redis\n".utf8).write(to: root.appendingPathComponent("requirements.txt"))
+        try Data("""
+        services:
+          postgres:
+            image: postgres:16
+          mysql:
+            image: mysql
+          maria:
+            image: mariadb:latest
+          mongo:
+            image: mongo@sha256:deadbeef
+        """.utf8).write(to: root.appendingPathComponent("compose.yaml"))
+        let scanner = ProjectRequirementsScanner()
+
+        let analysis = scanner.scan(projectRoot: root, machineSnapshot: snapshot(databases: [
+            databaseOverview(id: "postgresql", installations: [databaseInstallation(path: "/broken/postgres", version: nil)]),
+            databaseOverview(id: "mysql", installations: [databaseInstallation(path: "/opt/mysql", version: nil)]),
+            databaseOverview(id: "mariadb", installations: [databaseInstallation(path: "/opt/maria", version: nil)]),
+            databaseOverview(id: "mongodb", installations: [databaseInstallation(path: "/opt/mongo", version: nil)]),
+            databaseOverview(id: "redis", installations: [databaseInstallation(path: "/opt/redis", version: "7.4", listening: .unknown)]),
+        ]))
+        let requirements = try XCTUnwrap(analysis.components.first?.requirements)
+
+        XCTAssertEqual(requirements.first { $0.capability == "postgresql" }?.satisfaction, .undetermined)
+        XCTAssertTrue(requirements.filter { ["mysql", "mariadb", "mongodb"].contains($0.capability) }
+            .allSatisfy { $0.expression == "*" && $0.satisfaction == .satisfied })
+        XCTAssertEqual(requirements.first { $0.capability == "redis" }?.matches.first?.listeningState, .unknown)
+        XCTAssertEqual(requirements.filter { $0.capability == "redis" }.count, 1)
+
+        let mismatch = scanner.recalculate(analysis, machineSnapshot: snapshot(databases: [
+            databaseOverview(id: "postgresql", installations: [databaseInstallation(path: "/opt/postgres15", version: "15.9")]),
+            databaseOverview(id: "mysql", state: .notFound),
+            databaseOverview(id: "mariadb", state: .notFound),
+            databaseOverview(id: "mongodb", state: .notFound),
+            databaseOverview(id: "redis", installations: [databaseInstallation(path: "/opt/redis", version: "7.4")]),
+        ]))
+        XCTAssertEqual(mismatch.components[0].requirements.first { $0.capability == "postgresql" }?.satisfaction, .unsatisfied)
+        XCTAssertEqual(mismatch.components[0].requirements.first { $0.capability == "redis" }?.satisfaction, .satisfied)
+
+        let insufficient = scanner.recalculate(analysis, machineSnapshot: snapshot(databases: []))
+        XCTAssertTrue(insufficient.components[0].requirements.filter {
+            ["postgresql", "mysql", "mariadb", "mongodb", "redis"].contains($0.capability)
+        }.allSatisfy { $0.satisfaction == .undetermined })
+    }
+
     private func runtimeInstallation(
         path: String,
         version: String?,
@@ -390,6 +720,37 @@ final class ProjectRequirementsTests: XCTestCase {
         )
     }
 
+    private func databaseInstallation(
+        path: String,
+        version: String?,
+        listening: DatabaseListeningState = .notListening
+    ) -> DatabaseInstallation {
+        DatabaseInstallation(
+            id: path,
+            executable: path,
+            actualExecutable: nil,
+            version: version,
+            error: version == nil ? "unreadable" : nil,
+            sources: [.homebrew],
+            homebrewFormula: nil,
+            listeningState: listening
+        )
+    }
+
+    private func databaseOverview(
+        id: String,
+        installations: [DatabaseInstallation] = [],
+        state: DatabaseDiscoveryState = .discovered
+    ) -> DatabaseInstallationOverview {
+        DatabaseInstallationOverview(
+            id: id,
+            name: id,
+            installations: installations,
+            discoveryState: state,
+            listeningState: installations.contains { $0.listeningState == .listening } ? .listening : .notListening
+        )
+    }
+
     private func snapshot(
         node: [RuntimeInstallation]? = nil,
         python: [RuntimeInstallation]? = nil,
@@ -398,7 +759,8 @@ final class ProjectRequirementsTests: XCTestCase {
         rust: [RuntimeInstallation] = [],
         ruby: [RuntimeInstallation] = [],
         lua: [RuntimeInstallation] = [],
-        gitVersion: String? = nil
+        gitVersion: String? = nil,
+        databases: [DatabaseInstallationOverview] = []
     ) -> MachineSnapshot {
         MachineSnapshot(
             schemaVersion: MachineSnapshot.currentSchemaVersion,
@@ -426,7 +788,7 @@ final class ProjectRequirementsTests: XCTestCase {
                 if runtime.id == "python", let python { return RuntimeSnapshot(id: runtime.id, name: runtime.name, installations: python) }
                 return runtime
             },
-            databaseInstallationOverviews: [],
+            databaseInstallationOverviews: databases,
             homebrew: HomebrewSnapshot(executable: nil, version: nil, available: false, error: nil),
             terminalApplications: [],
             shellInstallations: [],

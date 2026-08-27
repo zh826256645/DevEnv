@@ -1301,7 +1301,7 @@ struct ContentView: View {
         analysis: ProjectRequirementsAnalysis?
     ) -> some View {
         let manifests = Array(Set(analysis?.components.flatMap(\.manifestNames) ?? [])).sorted()
-        let requirements = analysis?.components.flatMap(\.requirements) ?? []
+        let requirements = analysis?.requirements ?? []
         let capabilities = Array(Set(requirements.map { projectCapabilityTitle($0.capability) })).sorted()
         let unsatisfiedCount = requirements.filter { $0.satisfaction == .unsatisfied }.count
         let discovery = ProjectDiscovery()
@@ -1393,7 +1393,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private func projectAnalysisDetail(_ analysis: ProjectRequirementsAnalysis) -> some View {
-        let requirements = analysis.components.flatMap(\.requirements)
+        let requirements = analysis.requirements
         if analysis.components.isEmpty || requirements.isEmpty {
             Label("未声明受支持的 Project Requirements", systemImage: "doc.text")
                 .foregroundStyle(.secondary)
@@ -1415,7 +1415,7 @@ struct ContentView: View {
         }
     }
 
-    private func projectRequirementDetail(_ requirement: ProjectRequirement) -> some View {
+    private func projectRequirementDetail(_ requirement: ProjectCapabilityRequirement) -> some View {
         let isExpanded = expandedProjectRequirementID == requirement.id
         return VStack(spacing: 0) {
             Button {
@@ -1426,13 +1426,9 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(projectCapabilityTitle(requirement.capability))
                             .font(.headline)
-                        Text("要求：\(requirement.expression)")
+                        Text("要求：\(requirement.expression)（\(requirement.declarations.count) 个声明）")
                             .font(.callout)
                             .foregroundStyle(.secondary)
-                        Text("来源：\(requirement.relativePath) · \(requirement.field)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
                     }
                     Spacer()
                     Label(
@@ -1452,12 +1448,31 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .accessibilityLabel(
                 "\(projectCapabilityTitle(requirement.capability))，要求 \(requirement.expression)，"
+                    + "\(requirement.declarations.count) 个声明，"
                     + "\(projectRequirementStateTitle(requirement.satisfaction))，"
                     + (isExpanded ? "收起详情" : "展开详情")
             )
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 8) {
+                    Text("声明来源（\(requirement.declarations.count)）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(requirement.declarations) { declaration in
+                        HStack(spacing: 12) {
+                            Text(declaration.expression)
+                                .font(.headline)
+                            Text("\(declaration.relativePath) · \(declaration.field)")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 9))
+                    }
                     Text("匹配环境（\(requirement.matches.count)）")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1498,7 +1513,14 @@ struct ContentView: View {
                                 Spacer()
                                 VStack(alignment: .trailing, spacing: 3) {
                                     Text("\(projectCapabilityTitle(requirement.capability)) \(match.version)")
-                                    Text("优先级：\(match.isEffective ? "高" : "中")")
+                                    if let listeningState = match.listeningState {
+                                        let listening = databaseListeningStyle(listeningState)
+                                        Label(listening.title, systemImage: listening.symbol)
+                                            .foregroundStyle(listening.color)
+                                            .accessibilityLabel("Database Listening State：\(listening.title)")
+                                    } else {
+                                        Text("优先级：\(match.isEffective ? "高" : "中")")
+                                    }
                                 }
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -1526,6 +1548,14 @@ struct ContentView: View {
     private func projectCapabilityIcon(_ capability: String) -> some View {
         if let brand = runtimeBrand(capability) {
             runtimeLogo(brand)
+        } else if capability == "mysql-compatible" {
+            HStack(spacing: 4) {
+                databaseLogo("mysql", size: 22, padding: 4)
+                databaseLogo("mariadb", size: 22, padding: 4)
+            }
+            .frame(width: 48, height: 48)
+        } else if ["postgresql", "mysql", "mariadb", "mongodb", "redis"].contains(capability) {
+            databaseLogo(capability, size: 48, padding: 8)
         } else {
             Image(systemName: capability == "docker-compose" ? "shippingbox.fill" : "terminal.fill")
                 .font(.system(size: 21, weight: .medium))
@@ -1544,6 +1574,12 @@ struct ContentView: View {
         case "rust": "Rust"
         case "ruby": "Ruby"
         case "lua": "Lua"
+        case "postgresql": "PostgreSQL"
+        case "mysql": "MySQL"
+        case "mariadb": "MariaDB"
+        case "mongodb": "MongoDB"
+        case "redis": "Redis"
+        case "mysql-compatible": "MySQL 兼容数据库要求"
         default: capability
         }
     }
@@ -1620,7 +1656,7 @@ struct ContentView: View {
         case .satisfied: "Machine Snapshot 已满足该声明"
         case .unsatisfied: "未找到满足声明的可用安装"
         case .undetermined: "Machine Environment 证据不足，无法判断"
-        case .declarationConflict: "同一 Project Component 的声明无法由单个安装同时满足"
+        case .declarationConflict: "项目中的声明无法由单个安装同时满足"
         }
     }
 
@@ -2417,7 +2453,16 @@ struct ContentView: View {
         padding: CGFloat,
         usesNeutralBackground: Bool = false
     ) -> some View {
-        let appearance: (asset: String, color: Color) = switch database.id {
+        databaseLogo(database.id, size: size, padding: padding, usesNeutralBackground: usesNeutralBackground)
+    }
+
+    private func databaseLogo(
+        _ id: String,
+        size: CGFloat,
+        padding: CGFloat,
+        usesNeutralBackground: Bool = false
+    ) -> some View {
+        let appearance: (asset: String, color: Color) = switch id {
         case "mysql": ("ServiceMySQLLogo", Color(red: 0.27, green: 0.47, blue: 0.63))
         case "mariadb": ("ServiceMariaDBLogo", Color(red: 0, green: 0.36, blue: 0.43))
         case "mongodb": ("ServiceMongoDBLogo", Color(red: 0.29, green: 0.66, blue: 0.34))
