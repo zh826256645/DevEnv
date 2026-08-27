@@ -78,6 +78,98 @@ final class ProjectRequirementsTests: XCTestCase {
         XCTAssertFalse(localMatch.isEffective)
     }
 
+    func testExplicitPackageManagerSelectionOverridesOtherToolSignalsAndMatchesMachineSnapshot() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("""
+        {
+          "name": "web",
+          "packageManager": "pnpm@9.12.2+sha512.integrity",
+          "devEngines": {"packageManager": {"name": "pnpm", "version": ">=9.10 <10"}},
+          "engines": {"pnpm": ">=9 <10", "npm": ">=11"}
+        }
+        """.utf8).write(to: root.appendingPathComponent("package.json"))
+        try Data().write(to: root.appendingPathComponent("package-lock.json"))
+        try Data().write(to: root.appendingPathComponent("pnpm-lock.yaml"))
+
+        let analysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(packageManagers: [
+                packageManager(id: "pnpm", version: "9.12.2"),
+                packageManager(id: "npm", version: "11.5.2"),
+            ])
+        )
+
+        let requirement = try XCTUnwrap(analysis.requirements.first { $0.capability == "pnpm" })
+        XCTAssertEqual(analysis.requirements.map(\.capability), ["pnpm"])
+        XCTAssertEqual(requirement.declarations.map(\.field), [
+            "engines.pnpm", "packageManager", "devEngines.packageManager.version", "pnpm-lock.yaml",
+        ])
+        XCTAssertEqual(requirement.declarations.map(\.expression), [">=9 <10", "9.12.2", ">=9.10 <10", "*"])
+        XCTAssertEqual(requirement.satisfaction, .satisfied)
+        XCTAssertEqual(requirement.matches.map(\.path), ["/tools/pnpm"])
+        XCTAssertEqual(analysis.notices.map(\.message), ["已按 pnpm 声明忽略其他包管理器线索：npm"])
+    }
+
+    func testLockFilesAndUVRequirementsUsePackageManagerAvailabilityWithoutInventingComponents() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for path in ["api", "uv-explicit", "web", "broken", "ambiguous", "mixed", "orphan"] {
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent(path),
+                withIntermediateDirectories: true
+            )
+        }
+        try Data("[project]\nname = \"api\"\n[tool.uv]\nrequired-version = \">=0.8 <0.9\"\n".utf8)
+            .write(to: root.appendingPathComponent("api/pyproject.toml"))
+        try Data().write(to: root.appendingPathComponent("api/uv.lock"))
+        try Data("[project]\nname = \"tool\"\n[tool.uv]\nrequired-version = \">=0.8 <0.9\"\n".utf8)
+            .write(to: root.appendingPathComponent("uv-explicit/pyproject.toml"))
+        try Data("{\"name\":\"web\"}".utf8).write(to: root.appendingPathComponent("web/package.json"))
+        try Data().write(to: root.appendingPathComponent("web/yarn.lock"))
+        try Data("{}".utf8).write(to: root.appendingPathComponent("broken/package.json"))
+        try Data().write(to: root.appendingPathComponent("broken/bun.lock"))
+        try Data("{}".utf8).write(to: root.appendingPathComponent("ambiguous/package.json"))
+        try Data().write(to: root.appendingPathComponent("ambiguous/package-lock.json"))
+        try Data().write(to: root.appendingPathComponent("ambiguous/pnpm-lock.yaml"))
+        try Data("{\"engines\":{\"npm\":\">=11\"}}".utf8)
+            .write(to: root.appendingPathComponent("mixed/package.json"))
+        try Data().write(to: root.appendingPathComponent("mixed/pnpm-lock.yaml"))
+        try Data().write(to: root.appendingPathComponent("orphan/yarn.lock"))
+
+        let analysis = ProjectRequirementsScanner().scan(
+            projectRoot: root,
+            machineSnapshot: snapshot(packageManagers: [
+                packageManager(id: "uv", version: "0.8.14"),
+                packageManager(id: "yarn", version: nil, state: .configured),
+                packageManager(id: "bun", version: nil, state: .failed),
+            ])
+        )
+
+        XCTAssertEqual(analysis.components.map(\.relativePath), ["ambiguous", "api", "broken", "mixed", "uv-explicit", "web"])
+        XCTAssertEqual(analysis.components.first { $0.relativePath == "api" }?.requirements.map(\.field), [
+            "tool.uv.required-version", "uv.lock",
+        ])
+        XCTAssertEqual(analysis.requirements.first { $0.capability == "uv" }?.satisfaction, .satisfied)
+        XCTAssertEqual(
+            analysis.components.first { $0.relativePath == "uv-explicit" }?.requirements.map(\.field),
+            ["tool.uv.required-version"]
+        )
+        XCTAssertEqual(analysis.requirements.first { $0.capability == "yarn" }?.satisfaction, .satisfied)
+        XCTAssertEqual(analysis.requirements.first { $0.capability == "yarn" }?.matches.first?.version, "版本无法判断")
+        XCTAssertEqual(analysis.requirements.first { $0.capability == "bun" }?.satisfaction, .undetermined)
+        XCTAssertFalse(analysis.requirements.contains { $0.capability == "npm" || $0.capability == "pnpm" })
+        XCTAssertTrue(analysis.notices.contains {
+            $0.relativePath == "ambiguous"
+                && $0.message == "包管理器线索互相矛盾，无法判断：npm、pnpm"
+        })
+        XCTAssertTrue(analysis.notices.contains {
+            $0.relativePath == "mixed"
+                && $0.message == "包管理器线索互相矛盾，无法判断：npm、pnpm"
+        })
+    }
+
     func testConflictingPythonDeclarationsAndBrokenManifestAreIsolated() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -760,7 +852,8 @@ final class ProjectRequirementsTests: XCTestCase {
         ruby: [RuntimeInstallation] = [],
         lua: [RuntimeInstallation] = [],
         gitVersion: String? = nil,
-        databases: [DatabaseInstallationOverview] = []
+        databases: [DatabaseInstallationOverview] = [],
+        packageManagers: [PackageManagerSnapshot] = []
     ) -> MachineSnapshot {
         MachineSnapshot(
             schemaVersion: MachineSnapshot.currentSchemaVersion,
@@ -790,6 +883,7 @@ final class ProjectRequirementsTests: XCTestCase {
             },
             databaseInstallationOverviews: databases,
             homebrew: HomebrewSnapshot(executable: nil, version: nil, available: false, error: nil),
+            packageManagers: packageManagers,
             terminalApplications: [],
             shellInstallations: [],
             gitCLI: GitCLISnapshot(
@@ -806,6 +900,22 @@ final class ProjectRequirementsTests: XCTestCase {
                 ghTokenExists: false, githubTokenExists: false
             ),
             issues: []
+        )
+    }
+
+    private func packageManager(
+        id: String,
+        version: String?,
+        state: PackageManagerState = .available
+    ) -> PackageManagerSnapshot {
+        PackageManagerSnapshot(
+            id: id,
+            name: id,
+            executable: "/tools/\(id)",
+            actualExecutable: nil,
+            version: version,
+            state: state,
+            error: state == .failed ? "版本读取失败" : nil
         )
     }
 }

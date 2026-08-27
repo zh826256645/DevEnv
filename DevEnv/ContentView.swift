@@ -447,7 +447,7 @@ struct ContentView: View {
     }
 
     private enum EnvironmentCard: CaseIterable {
-        case homebrew
+        case packageManagers
         case git
         case terminal
         case shell
@@ -3482,9 +3482,9 @@ struct ContentView: View {
                     .font(.title3.bold())
             }
 
-            if expandedEnvironmentCard == .homebrew {
-                homebrewCard(snapshot.homebrew)
-                environmentCardGrid(snapshot, excluding: .homebrew)
+            if expandedEnvironmentCard == .packageManagers {
+                packageManagerCard(snapshot.homebrew, managers: snapshot.packageManagers)
+                environmentCardGrid(snapshot, excluding: .packageManagers)
             } else if expandedEnvironmentCard == .git {
                 gitCard(
                     snapshot.gitCLI,
@@ -3517,11 +3517,6 @@ struct ContentView: View {
         .onPreferenceChange(EnvironmentCardUpperContentHeightKey.self) {
             environmentCardUpperContentHeight = $0
         }
-        .onChange(of: snapshot.homebrew.executable == nil && snapshot.homebrew.error == nil) { _, hasNoDetails in
-            if hasNoDetails, expandedEnvironmentCard == .homebrew {
-                expandedEnvironmentCard = nil
-            }
-        }
         .onChange(of: snapshot.terminalApplications.isEmpty) { _, isEmpty in
             if isEmpty, expandedEnvironmentCard == .terminal { expandedEnvironmentCard = nil }
         }
@@ -3540,8 +3535,8 @@ struct ContentView: View {
                 alignment: .leading,
                 spacing: 14
             ) {
-                if excludedCard != .homebrew {
-                    homebrewCard(snapshot.homebrew)
+                if excludedCard != .packageManagers {
+                    packageManagerCard(snapshot.homebrew, managers: snapshot.packageManagers)
                 }
                 if excludedCard != .git {
                     gitCard(
@@ -4192,177 +4187,134 @@ struct ContentView: View {
         .contentShape(Rectangle())
     }
 
-    private func homebrewCard(_ homebrew: HomebrewSnapshot) -> some View {
-        let isExpanded = expandedEnvironmentCard == .homebrew
-        let hasDetails = homebrew.executable != nil || homebrew.error != nil
-        let summary = HStack(alignment: .center, spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color.green.opacity(0.09))
-                Image(systemName: "shippingbox")
-                    .font(.system(size: 21, weight: .medium))
-            }
-            .frame(width: 50, height: 50)
-            .overlay {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(Color.primary.opacity(0.07))
-            }
-            .accessibilityHidden(true)
+    private func packageManagerCard(
+        _ homebrew: HomebrewSnapshot,
+        managers: [PackageManagerSnapshot]
+    ) -> some View {
+        let discoveredCount = (homebrew.executable == nil ? 0 : 1)
+            + managers.count { $0.state != .unavailable }
+        let hasFailure = homebrew.error != nil || managers.contains { $0.state == .failed }
+        let statusColor: Color = hasFailure ? .orange : (discoveredCount == 6 ? .green : .secondary)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Homebrew")
-                    .font(.headline)
-                Text(homebrew.available ? (homebrew.version ?? "可用") : "未发现")
-                    .font(.title3.bold())
-                    .monospacedDigit()
-                Text("包管理器")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 8)
-
-            Label(
-                homebrew.available ? "已安装" : "未发现",
-                systemImage: homebrew.available ? "checkmark.circle.fill" : "questionmark.circle"
-            )
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(homebrew.available ? Color.green : Color.secondary)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background((homebrew.available ? Color.green : Color.secondary).opacity(0.10), in: Capsule())
-
-            if hasDetails {
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-
-        return VStack(alignment: .leading, spacing: 12) {
-            Group {
-                if isExpanded {
-                    Button {
-                        toggleEnvironmentCard(.homebrew)
-                    } label: {
-                        homebrewExpandedSummary(homebrew)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityValue("已展开")
-                } else if hasDetails {
-                    Button {
-                        toggleEnvironmentCard(.homebrew)
-                    } label: {
-                        summary
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityValue("已折叠")
-                } else {
-                    summary
+        return inventoryEnvironmentCard(
+            card: .packageManagers,
+            title: "包管理器",
+            primaryValue: "\(discoveredCount) / 6",
+            subtitle: "Homebrew 与当前 PATH 工具",
+            systemImage: "shippingbox",
+            tint: .orange,
+            status: "已发现 \(discoveredCount) / 6",
+            statusImage: hasFailure ? "exclamationmark.circle.fill" : (discoveredCount == 6 ? "checkmark.circle.fill" : "circle"),
+            statusColor: statusColor,
+            hasDetails: true
+        ) {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 320), spacing: 12, alignment: .top)],
+                alignment: .leading,
+                spacing: 12
+            ) {
+                packageManagerDetailRow(
+                    id: "homebrew",
+                    name: "Homebrew",
+                    version: homebrew.version,
+                    executable: homebrew.executable,
+                    actualExecutable: nil,
+                    status: homebrew.available ? "已安装" : (homebrew.error == nil ? "未发现" : "读取失败"),
+                    statusColor: homebrew.available ? .green : (homebrew.error == nil ? .secondary : .orange),
+                    statusImage: homebrew.available ? "checkmark.circle.fill" : (homebrew.error == nil ? "circle" : "exclamationmark.circle.fill")
+                )
+                ForEach(managers) { manager in
+                    packageManagerDetailRow(manager)
                 }
             }
-
-            if isExpanded {
-                homebrewDetails(homebrew)
-                    .transition(.opacity)
-            }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+    }
+
+    private func packageManagerDetailRow(_ manager: PackageManagerSnapshot) -> some View {
+        let appearance: (status: String, color: Color, image: String) = switch manager.state {
+        case .available: ("已安装", .green, "checkmark.circle.fill")
+        case .configured: ("已配置", .green, "checkmark.circle.fill")
+        case .unavailable: ("未发现", .secondary, "circle")
+        case .failed: ("读取失败", .orange, "exclamationmark.circle.fill")
+        }
+        return packageManagerDetailRow(
+            id: manager.id,
+            name: manager.name,
+            version: manager.version ?? (manager.state == .configured ? "版本无法判断" : nil),
+            executable: manager.executable,
+            actualExecutable: manager.actualExecutable,
+            status: appearance.status,
+            statusColor: appearance.color,
+            statusImage: appearance.image
+        )
+    }
+
+    private func packageManagerDetailRow(
+        id: String,
+        name: String,
+        version: String?,
+        executable: String?,
+        actualExecutable: String?,
+        status: String,
+        statusColor: Color,
+        statusImage: String
+    ) -> some View {
+        let brand = packageManagerBrand(id)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(id == "bun" ? Color.white.opacity(0.92) : brand.tint.opacity(0.10))
+                    Image(brand.assetName)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(9)
+                }
+                .frame(width: 44, height: 44)
                 .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.primary.opacity(0.09))
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(brand.tint.opacity(0.18))
                 }
-        }
-    }
+                .accessibilityHidden(true)
 
-    private func homebrewExpandedSummary(_ homebrew: HomebrewSnapshot) -> some View {
-        let tint: Color = homebrew.available ? .green : (homebrew.error == nil ? .secondary : .orange)
-        let status = homebrew.available ? "已安装" : (homebrew.error == nil ? "未发现" : "读取失败")
-
-        return HStack(alignment: .center, spacing: 18) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(tint.opacity(0.10))
-                Image(systemName: "shippingbox")
-                    .font(.system(size: 27, weight: .medium))
-                    .foregroundStyle(tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .font(.callout.weight(.semibold))
+                    Text(version ?? status)
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(version == nil ? .secondary : .primary)
+                }
+                Spacer(minLength: 8)
+                Label(status, systemImage: statusImage)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(statusColor.opacity(0.10), in: Capsule())
             }
-            .frame(width: 64, height: 64)
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(tint.opacity(0.16))
-            }
-            .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Homebrew")
-                    .font(.title3.bold())
-                Text(homebrew.version ?? (homebrew.available ? "可用" : "未发现"))
-                    .font(.title2.bold())
-                    .monospacedDigit()
-                Text("包管理器")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Label(
-                    status,
-                    systemImage: homebrew.available ? "checkmark.circle.fill" : (homebrew.error == nil ? "circle" : "exclamationmark.circle.fill")
-                )
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(tint)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(tint.opacity(0.10), in: Capsule())
-            }
-            .frame(width: 150, alignment: .leading)
-
-            HStack(spacing: 10) {
-                environmentMetric(
-                    title: "当前版本",
-                    value: homebrew.version ?? "—",
-                    systemImage: "shippingbox.fill",
-                    tint: tint
-                )
-                environmentMetric(
-                    title: "安装状态",
-                    value: status,
-                    systemImage: homebrew.available ? "checkmark.circle" : (homebrew.error == nil ? "questionmark.circle" : "exclamationmark.circle"),
-                    tint: tint
-                )
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .contentShape(Rectangle())
-    }
-
-    @ViewBuilder
-    private func homebrewDetails(_ homebrew: HomebrewSnapshot) -> some View {
-        if let executable = homebrew.executable {
-            VStack(alignment: .leading, spacing: 6) {
-                Label("Homebrew CLI 路径", systemImage: "terminal")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
+            if let executable {
                 copyablePath(executable)
+                if let actualExecutable { copyablePath(actualExecutable, prefix: "实际路径") }
             }
-            .padding(12)
-            .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
-            .overlay {
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.primary.opacity(0.09))
-            }
-        } else if let error = homebrew.error {
-            Label(error, systemImage: "exclamationmark.circle.fill")
-                .font(.callout)
-                .foregroundStyle(.orange)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(statusColor == .orange ? Color.orange.opacity(0.35) : Color.primary.opacity(0.09))
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func packageManagerBrand(_ id: String) -> (assetName: String, tint: Color) {
+        switch id {
+        case "homebrew": ("PackageManagerHomebrewLogo", Color(red: 0.98, green: 0.69, blue: 0.25))
+        case "uv": ("PackageManagerUVLogo", Color(red: 0.87, green: 0.37, blue: 0.91))
+        case "bun": ("PackageManagerBunLogo", .primary)
+        case "npm": ("PackageManagerNPMLogo", Color(red: 0.80, green: 0.22, blue: 0.22))
+        case "pnpm": ("PackageManagerPNPMLogo", Color(red: 0.96, green: 0.57, blue: 0.13))
+        default: ("PackageManagerYarnLogo", Color(red: 0.17, green: 0.56, blue: 0.73))
         }
     }
 

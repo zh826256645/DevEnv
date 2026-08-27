@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 struct MachineSnapshot: Codable, Sendable {
-    static let currentSchemaVersion = 13
+    static let currentSchemaVersion = 14
     static let localServiceTimeoutNotice = "本地服务：命令超时"
     static let localServiceFailureNotice = "本地服务：读取失败"
 
@@ -15,6 +15,7 @@ struct MachineSnapshot: Codable, Sendable {
     let runtimes: [RuntimeSnapshot]
     let databaseInstallationOverviews: [DatabaseInstallationOverview]
     let homebrew: HomebrewSnapshot
+    let packageManagers: [PackageManagerSnapshot]
     let terminalApplications: [TerminalApplicationSnapshot]
     let shellInstallations: [ShellInstallationSnapshot]
     let gitCLI: GitCLISnapshot
@@ -39,6 +40,7 @@ struct MachineSnapshot: Codable, Sendable {
             runtimes: runtimes,
             databaseInstallationOverviews: dynamicStatus.databaseInstallationOverviews,
             homebrew: homebrew,
+            packageManagers: packageManagers,
             terminalApplications: terminalApplications,
             shellInstallations: shellInstallations,
             gitCLI: gitCLI,
@@ -242,6 +244,23 @@ struct HomebrewSnapshot: Codable, Sendable {
     let executable: String?
     let version: String?
     let available: Bool
+    let error: String?
+}
+
+enum PackageManagerState: String, Codable, Sendable {
+    case available
+    case unavailable
+    case configured
+    case failed
+}
+
+struct PackageManagerSnapshot: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let executable: String?
+    let actualExecutable: String?
+    let version: String?
+    let state: PackageManagerState
     let error: String?
 }
 
@@ -504,6 +523,11 @@ struct EnvironmentScanner: Sendable {
         let homebrewFormula: String
     }
 
+    private struct PackageManagerDefinition: Sendable {
+        let id: String
+        let name: String
+    }
+
     private struct TerminalDefinition: Sendable {
         let name: String
         let bundleIdentifier: String
@@ -590,6 +614,14 @@ struct EnvironmentScanner: Sendable {
         RuntimeDefinition(id: "lua", name: "Lua", executable: "lua", arguments: ["-v"], homebrewFormula: "lua"),
     ]
 
+    private let packageManagerDefinitions = [
+        PackageManagerDefinition(id: "uv", name: "uv"),
+        PackageManagerDefinition(id: "bun", name: "Bun"),
+        PackageManagerDefinition(id: "npm", name: "npm"),
+        PackageManagerDefinition(id: "pnpm", name: "pnpm"),
+        PackageManagerDefinition(id: "yarn", name: "Yarn"),
+    ]
+
     private let terminalDefinitions = [
         TerminalDefinition(name: "Terminal", bundleIdentifier: "com.apple.Terminal"),
         TerminalDefinition(name: "iTerm2", bundleIdentifier: "com.googlecode.iterm2"),
@@ -629,6 +661,7 @@ struct EnvironmentScanner: Sendable {
         let localServiceScan = scanLocalServices(issues: &issues)
 
         let homebrew = scanHomebrew(path: path, issues: &issues)
+        let packageManagers = scanPackageManagers(path: path, issues: &issues)
         let terminalApplications = scanTerminalApplications()
         let shellInstallations = scanShellInstallations(notices: &issues)
         let gitCLI = scanGitCLI(path: path, notices: &issues)
@@ -693,6 +726,7 @@ struct EnvironmentScanner: Sendable {
             runtimes: runtimes,
             databaseInstallationOverviews: databaseInstallationOverviews,
             homebrew: homebrew,
+            packageManagers: packageManagers,
             terminalApplications: terminalApplications,
             shellInstallations: shellInstallations,
             gitCLI: gitCLI,
@@ -1960,6 +1994,58 @@ struct EnvironmentScanner: Sendable {
         }
 
         return RuntimeSnapshot(id: definition.id, name: definition.name, installations: installations)
+    }
+
+    private func scanPackageManagers(path: [String], issues: inout [String]) -> [PackageManagerSnapshot] {
+        packageManagerDefinitions.map { definition in
+            guard let executable = path.lazy.map({ absoluteExecutable(definition.id, directory: $0) })
+                .first(where: machine.isExecutableFile) else {
+                return PackageManagerSnapshot(
+                    id: definition.id,
+                    name: definition.name,
+                    executable: nil,
+                    actualExecutable: nil,
+                    version: nil,
+                    state: .unavailable,
+                    error: nil
+                )
+            }
+            let actual = standardizedPath(machine.resolvingSymlinksInPath(executable))
+            if ["pnpm", "yarn"].contains(definition.id), actual.lowercased().contains("/corepack/") {
+                return PackageManagerSnapshot(
+                    id: definition.id,
+                    name: definition.name,
+                    executable: executable,
+                    actualExecutable: actual == executable ? nil : actual,
+                    version: nil,
+                    state: .configured,
+                    error: nil
+                )
+            }
+            let result = machine.command(executable: executable, arguments: ["--version"])
+            let version = result.status == 0 && !result.timedOut ? packageManagerVersion(result.output) : nil
+            let error = version == nil ? (result.timedOut ? "命令超时" : "版本读取失败") : nil
+            if let error { issues.append("包管理器：\(definition.name) \(error)") }
+            return PackageManagerSnapshot(
+                id: definition.id,
+                name: definition.name,
+                executable: executable,
+                actualExecutable: actual == executable ? nil : actual,
+                version: version,
+                state: version == nil ? .failed : .available,
+                error: error
+            )
+        }
+    }
+
+    private func packageManagerVersion(_ output: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?:^|\s)v?([0-9]+(?:\.[0-9]+){1,2}(?:-[0-9A-Za-z.-]+)?)"#
+        ) else { return nil }
+        let range = NSRange(output.startIndex..., in: output)
+        guard let match = regex.firstMatch(in: output, range: range),
+              let versionRange = Range(match.range(at: 1), in: output) else { return nil }
+        return String(output[versionRange])
     }
 
     private func scanMiseRuntimes(path: [String], issues: inout [String]) -> [RuntimeProviderInstallation] {

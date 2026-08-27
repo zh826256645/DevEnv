@@ -1,6 +1,6 @@
 # macOS 系统环境扫描
 
-状态：v0.1 范围已冻结；Runtime 多版本发现、TCP 监听服务、Git Tooling State、Terminal Application、Shell Installation 与总览界面已实现。
+状态：v0.1 范围已冻结；Runtime 多版本发现、Package Manager Tool、TCP 监听服务、Git Tooling State、Terminal Application、Shell Installation 与总览界面已实现。
 
 ## 目标
 
@@ -61,6 +61,16 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 
 未找到标准路径时显示“未发现”，不加载 Shell 配置寻找自定义安装位置。
 
+### Package Manager Tool
+
+- 固定按 uv、Bun、npm、pnpm、Yarn 顺序扫描，每项只取当前 App `PATH` 中第一个可执行文件，不枚举 Provider 或未激活副本。
+- 非 Corepack 工具以固定 `--version` 参数直接执行，记录调用路径、软链接实际路径与版本；超时、退出失败或版本不可解析时保留路径并产生 Scan Notice。
+- pnpm 或 Yarn 实际路径指向 Corepack 时只记录“已配置”，不执行代理读取版本，避免扫描隐式下载或激活工具。
+- 状态为“已安装”、“未发现”、“已配置”或“读取失败”；未发现是中性状态，不产生 Scan Notice。
+- 品牌 SVG 直接取自各厂商官方仓库：Homebrew `brew.sh`、uv `astral-sh/uv`、Bun `oven-sh/bun`、npm `npm/logos`、pnpm `pnpm/pnpm.io` 与 Yarn `yarnpkg/assets`。
+- Project Package Manager Requirement 来自顶层 `packageManager`、`devEngines.packageManager`、同工具 `engines`、`[tool.uv].required-version` 或单一受支持锁文件。显式选择优先；同一 Project Component 存在多个无法取舍的工具线索时产生 Project Notice。锁文件自身不创建 Project Component。
+- 无版本的 Corepack Proxy Configuration 可满足锁文件产生的 `*` 要求，但显式版本约束为“无法判断”；版本命令失败的工具不满足 `*`。
+
 ## 执行与安全边界
 
 - 不加载或执行 `.zshrc`、`.zprofile` 等 Shell 配置。
@@ -89,12 +99,13 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - MongoDB 与 Redis Database Installation 完整扩展：`schemaVersion = 11`
 - Python 与 Node Local Service Attribution 扩展：`schemaVersion = 12`
 - Terminal Application 与 Shell Installation 扩展：`schemaVersion = 13`
+- Package Manager Tool 扩展：`schemaVersion = 14`
 - 写入方式：原子替换
 - 启动读取到损坏或不支持版本的文件时忽略该文件，不尝试迁移
 
-Terminal Application 与 Shell Installation 扩展启用后，V1–V12 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
+Package Manager Tool 扩展启用后，V1–V13 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
 
-只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Terminal Application、Shell Installation、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
+只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Package Manager Tool、Terminal Application、Shell Installation、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
 
 ## 触发与界面
 
@@ -106,7 +117,7 @@ Terminal Application 与 Shell Installation 扩展启用后，V1–V12 快照视
 - 总览页依次展示 Runtime 类别、已发现数据库类别、Local Service 组数和环境配置项数四张指标卡，以及双列的系统信息与环境状态，最后展示环境配置；不在正文中单独展示 Scan Notice 模块。
 - 环境状态展示 PATH 冲突、未发现 Runtime、已发现但未监听的数据库和非回环 TCP Listener Binding 数量；任一数量大于零时整体标记“需关注”，否则标记“正常”。该摘要不改变 Scan Notice 的定义，也不证明对应工具或服务健康可用。
 - 系统信息卡使用大号系统 Apple 标志，集中展示 macOS 版本、Build、架构，并以图标指标展示主机名和内存；系统卷使用线性进度条显示已用容量占总容量的比例，并同时标注已用、可用和总容量。
-- Runtime、数据库和本地服务页各自先展示四张指标卡，再展示完整列表；Runtime 与数据库列表固定使用双列卡片网格，本地服务使用单列列表。Homebrew、Git、PATH、Terminal 与 Shell 只在总览页的“环境配置”中作为同级卡片展示。Terminal 摘要展示已发现应用数量，展开后按支持清单顺序展示名称、版本和应用路径；Shell 摘要展示 Default Login Shell 与已发现数量，展开后将默认项置顶并展示名称、路径、默认标记和可用状态。五张卡片复用同一时间只展开一张、选中卡片置顶并占满整行的交互。
+- Runtime、数据库和本地服务页各自先展示四张指标卡，再展示完整列表；Runtime 与数据库列表固定使用双列卡片网格，本地服务使用单列列表。包管理器、Git、PATH、Terminal 与 Shell 只在总览页的“环境配置”中作为同级卡片展示；包管理器卡聚合 Homebrew、uv、Bun、npm、pnpm 与 Yarn，摘要展示已发现数量，展开后展示品牌 Logo、版本、状态和路径。Terminal 摘要展示已发现应用数量，展开后按支持清单顺序展示名称、版本和应用路径；Shell 摘要展示 Default Login Shell 与已发现数量，展开后将默认项置顶并展示名称、路径、默认标记和可用状态。五张卡片复用同一时间只展开一张、选中卡片置顶并占满整行的交互。
 
 ### 扫描状态
 
@@ -339,6 +350,7 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - Default Login Shell 未注册或不可执行：Shell 卡片仍将其置顶并标记“不可用”，同时产生 Scan Notice；其他可用项保持 `/etc/shells` 顺序。
 - `/etc/shells` 或 POSIX 账户记录读取失败：保留另一来源可建立的 Shell 结果，并分别产生一条 Scan Notice。
 - Terminal Application 与 Shell Installation 扩展读取 V1–V12 快照：忽略旧快照并执行扫描，成功后写入 V13 快照。
+- Package Manager Tool 扩展读取 V1–V13 快照：忽略旧快照并执行扫描，成功后写入 V14 快照。
 
 ## 相关决策
 
