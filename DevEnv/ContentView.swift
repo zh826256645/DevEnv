@@ -4171,6 +4171,8 @@ struct ContentView: View {
 
             Label(status, systemImage: statusImage)
                 .font(.caption.weight(.semibold))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 .foregroundStyle(statusColor)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 4)
