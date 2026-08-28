@@ -77,17 +77,63 @@ struct ProjectRemovalSummary: Equatable, Sendable {
     var totalCount: Int { projectCount + ignoredProjectCount }
 }
 
+struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let projectID: String
+    var name: String
+    var command: String
+    var workingDirectory: String
+    let sourceIdentity: String?
+
+    init(
+        id: String = UUID().uuidString,
+        projectID: String,
+        name: String,
+        command: String,
+        workingDirectory: String,
+        sourceIdentity: String? = nil
+    ) {
+        self.id = id
+        self.projectID = projectID
+        self.name = name
+        self.command = command
+        self.workingDirectory = workingDirectory
+        self.sourceIdentity = sourceIdentity
+    }
+}
+
 struct ProjectRecordDocument: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     let schemaVersion: Int
     var records: [ProjectRecord]
     var ignoredProjects: [IgnoredProject]
+    var runConfigurations: [ProjectRunConfiguration]
 
-    init(records: [ProjectRecord] = [], ignoredProjects: [IgnoredProject] = []) {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, records, ignoredProjects, runConfigurations
+    }
+
+    init(
+        records: [ProjectRecord] = [],
+        ignoredProjects: [IgnoredProject] = [],
+        runConfigurations: [ProjectRunConfiguration] = []
+    ) {
         schemaVersion = Self.currentSchemaVersion
         self.records = records
         self.ignoredProjects = ignoredProjects
+        self.runConfigurations = runConfigurations
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let storedSchemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        schemaVersion = Self.currentSchemaVersion
+        records = try values.decode([ProjectRecord].self, forKey: .records)
+        ignoredProjects = try values.decode([IgnoredProject].self, forKey: .ignoredProjects)
+        runConfigurations = storedSchemaVersion == 1
+            ? []
+            : try values.decode([ProjectRunConfiguration].self, forKey: .runConfigurations)
     }
 
     mutating func mergeDiscovered(
@@ -186,6 +232,30 @@ enum ProjectRecordStoreError: LocalizedError {
     }
 }
 
+enum ProjectRunConfigurationError: LocalizedError {
+    case projectNotFound
+    case configurationNotFound
+    case nameRequired
+    case commandRequired
+    case workingDirectoryMustBeRelative
+    case workingDirectoryOutsideProject
+    case workingDirectoryMissing
+    case workingDirectoryNotDirectory
+
+    var errorDescription: String? {
+        switch self {
+        case .projectNotFound: "所属项目记录不存在"
+        case .configurationNotFound: "运行配置不存在"
+        case .nameRequired: "名称不能为空"
+        case .commandRequired: "命令不能为空"
+        case .workingDirectoryMustBeRelative: "工作目录必须使用 Project Root 相对路径"
+        case .workingDirectoryOutsideProject: "工作目录不能离开 Project Root"
+        case .workingDirectoryMissing: "工作目录不存在"
+        case .workingDirectoryNotDirectory: "工作目录不是目录"
+        }
+    }
+}
+
 struct ProjectRecordStore: Sendable {
     private struct Header: Decodable { let schemaVersion: Int }
 
@@ -209,7 +279,7 @@ struct ProjectRecordStore: Sendable {
         guard let header = try? decoder.decode(Header.self, from: data) else {
             throw ProjectRecordStoreError.corrupt
         }
-        guard header.schemaVersion == ProjectRecordDocument.currentSchemaVersion else {
+        guard (1 ... ProjectRecordDocument.currentSchemaVersion).contains(header.schemaVersion) else {
             throw ProjectRecordStoreError.incompatibleSchema(header.schemaVersion)
         }
         do {
@@ -531,6 +601,97 @@ final class ProjectsViewModel: ObservableObject {
         return analyses[project.id]?.summary
     }
 
+    func runConfigurations(projectID: String? = nil) -> [ProjectRunConfiguration] {
+        document.runConfigurations
+            .filter { projectID == nil || $0.projectID == projectID }
+            .sorted { lhs, rhs in
+                let projectOrder = lhs.projectID.localizedStandardCompare(rhs.projectID)
+                if projectOrder != .orderedSame { return projectOrder == .orderedAscending }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    @discardableResult
+    func createRunConfiguration(
+        projectID: String,
+        name: String,
+        command: String,
+        workingDirectory: String,
+        sourceIdentity: String? = nil
+    ) -> ProjectRunConfiguration? {
+        guard !mutationsArePaused else { return nil }
+        do {
+            let input = try normalizedRunConfigurationInput(
+                projectID: projectID,
+                name: name,
+                command: command,
+                workingDirectory: workingDirectory
+            )
+            let sourceIdentity = sourceIdentity?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let configuration = ProjectRunConfiguration(
+                projectID: projectID,
+                name: input.name,
+                command: input.command,
+                workingDirectory: input.workingDirectory,
+                sourceIdentity: sourceIdentity?.isEmpty == false ? sourceIdentity : nil
+            )
+            guard applyRunConfigurationChange({ $0.runConfigurations.append(configuration) }) else { return nil }
+            resultMessage = "已创建运行配置“\(configuration.name)”"
+            return configuration
+        } catch {
+            operationError = "运行配置保存失败：\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    @discardableResult
+    func updateRunConfiguration(
+        _ configuration: ProjectRunConfiguration,
+        name: String,
+        command: String,
+        workingDirectory: String
+    ) -> Bool {
+        guard !mutationsArePaused else { return false }
+        do {
+            guard let index = document.runConfigurations.firstIndex(where: { $0.id == configuration.id }) else {
+                throw ProjectRunConfigurationError.configurationNotFound
+            }
+            let existing = document.runConfigurations[index]
+            let input = try normalizedRunConfigurationInput(
+                projectID: existing.projectID,
+                name: name,
+                command: command,
+                workingDirectory: workingDirectory,
+                existingWorkingDirectory: existing.workingDirectory
+            )
+            let updated = ProjectRunConfiguration(
+                id: existing.id,
+                projectID: existing.projectID,
+                name: input.name,
+                command: input.command,
+                workingDirectory: input.workingDirectory,
+                sourceIdentity: existing.sourceIdentity
+            )
+            guard applyRunConfigurationChange({ $0.runConfigurations[index] = updated }) else { return false }
+            resultMessage = "已更新运行配置“\(updated.name)”"
+            return true
+        } catch {
+            operationError = "运行配置保存失败：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    @discardableResult
+    func deleteRunConfiguration(_ configuration: ProjectRunConfiguration) -> Bool {
+        guard !mutationsArePaused,
+              document.runConfigurations.contains(where: { $0.id == configuration.id }) else { return false }
+        guard applyRunConfigurationChange({ document in
+            document.runConfigurations.removeAll { $0.id == configuration.id }
+        }) else { return false }
+        resultMessage = "已删除运行配置“\(configuration.name)”"
+        return true
+    }
+
     func addDirect(_ urls: [URL]) {
         guard !mutationsArePaused, !isScanning else { return }
         let paths = discovery.directProjectPaths(urls)
@@ -730,6 +891,77 @@ final class ProjectsViewModel: ObservableObject {
         resultMessage = result.wasCancelled
             ? "扫描已取消，保留已发现的 \(result.projectPaths.count) 个项目"
             : "扫描完成，发现 \(result.projectPaths.count) 个项目"
+    }
+
+    private func normalizedRunConfigurationInput(
+        projectID: String,
+        name: String,
+        command: String,
+        workingDirectory: String,
+        existingWorkingDirectory: String? = nil
+    ) throws -> (name: String, command: String, workingDirectory: String) {
+        guard let project = document.records.first(where: { $0.id == projectID }) else {
+            throw ProjectRunConfigurationError.projectNotFound
+        }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw ProjectRunConfigurationError.nameRequired }
+        let command = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else { throw ProjectRunConfigurationError.commandRequired }
+        let trimmedDirectory = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let relativePath = trimmedDirectory.isEmpty ? "." : trimmedDirectory
+        guard !NSString(string: relativePath).isAbsolutePath else {
+            throw ProjectRunConfigurationError.workingDirectoryMustBeRelative
+        }
+        guard !relativePath.split(separator: "/", omittingEmptySubsequences: false).contains("..") else {
+            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
+        }
+        var projectRootIsDirectory: ObjCBool = false
+        let projectRootIsAvailable = FileManager.default.fileExists(
+            atPath: project.path,
+            isDirectory: &projectRootIsDirectory
+        ) && projectRootIsDirectory.boolValue
+        if relativePath == existingWorkingDirectory, !projectRootIsAvailable {
+            return (name, command, relativePath)
+        }
+        let root = URL(fileURLWithPath: project.path, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let unresolvedDirectory = root
+            .appendingPathComponent(relativePath, isDirectory: true)
+            .standardizedFileURL
+        guard unresolvedDirectory.path == root.path
+                || unresolvedDirectory.path.hasPrefix(root.path + "/") else {
+            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
+        }
+        let directory = unresolvedDirectory.resolvingSymlinksInPath().standardizedFileURL
+        guard directory.path == root.path || directory.path.hasPrefix(root.path + "/") else {
+            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) else {
+            throw ProjectRunConfigurationError.workingDirectoryMissing
+        }
+        guard isDirectory.boolValue else {
+            throw ProjectRunConfigurationError.workingDirectoryNotDirectory
+        }
+        let normalizedDirectory = directory.path == root.path
+            ? "."
+            : String(directory.path.dropFirst(root.path.count + 1))
+        return (name, command, normalizedDirectory)
+    }
+
+    private func applyRunConfigurationChange(
+        _ change: (inout ProjectRecordDocument) -> Void
+    ) -> Bool {
+        operationError = nil
+        let previousDocument = document
+        change(&document)
+        guard persist() else {
+            document = previousDocument
+            return false
+        }
+        return true
     }
 
     @discardableResult

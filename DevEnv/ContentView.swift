@@ -406,17 +406,20 @@ struct ContentView: View {
     private enum Page: CaseIterable, Hashable {
         case overview
         case projects
+        case runs
         case runtimes
         case databases
         case localServices
         case settings
 
         static var primaryPages: [Page] { allCases.filter { $0 != .settings } }
+        var usesProjectRecords: Bool { self == .projects || self == .runs }
 
         var title: String {
             switch self {
             case .overview: "总览"
             case .projects: "项目"
+            case .runs: "运行"
             case .runtimes: "开发语言"
             case .databases: "数据库"
             case .localServices: "本地服务"
@@ -428,6 +431,7 @@ struct ContentView: View {
             switch self {
             case .overview: "square.grid.2x2"
             case .projects: "folder"
+            case .runs: "play.rectangle"
             case .runtimes: "terminal"
             case .databases: "cylinder"
             case .localServices: "network"
@@ -483,9 +487,19 @@ struct ContentView: View {
     @State private var selectedProjectID: String?
     @State private var expandedProjectRequirementID: String?
     @State private var projectSearchText = ""
+    @State private var runProjectFilterID: String?
+    @State private var isShowingRunConfigurationEditor = false
+    @State private var editingRunConfiguration: ProjectRunConfiguration?
+    @State private var runConfigurationProjectID = ""
+    @State private var runConfigurationName = ""
+    @State private var runConfigurationCommand = ""
+    @State private var runConfigurationWorkingDirectory = "."
+    @State private var runConfigurationSaveAttempted = false
+    @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
     @FocusState private var focusedCopyPath: String?
     @FocusState private var projectSearchIsFocused: Bool
     @FocusState private var projectAddIsFocused: Bool
+    @FocusState private var runConfigurationNameIsFocused: Bool
 
     var body: some View {
         navigation(model.snapshot)
@@ -516,13 +530,13 @@ struct ContentView: View {
                 }
 
                 Button {
-                    if selectedPage == .projects {
+                    if selectedPage?.usesProjectRecords == true {
                         projectsModel.refreshProjects()
                     } else {
                         model.scan()
                     }
                 } label: {
-                    if selectedPage == .projects
+                    if selectedPage?.usesProjectRecords == true
                         ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
                         : model.isBusy {
                         ProgressView().controlSize(.small)
@@ -531,16 +545,16 @@ struct ContentView: View {
                     }
                 }
                 .accessibilityLabel(
-                    selectedPage == .projects
+                    selectedPage?.usesProjectRecords == true
                         ? (projectsModel.isScanning || projectsModel.isRefreshingProjects
                             ? "正在刷新项目"
                             : "刷新项目")
                         : (model.busyDescription ?? "重新扫描")
                 )
-                .help(selectedPage == .projects ? "刷新项目状态" : (model.busyDescription ?? "重新扫描"))
+                .help(selectedPage?.usesProjectRecords == true ? "刷新项目状态" : (model.busyDescription ?? "重新扫描"))
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(
-                    selectedPage == .projects
+                    selectedPage?.usesProjectRecords == true
                         ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
                         : model.isBusy
                 )
@@ -591,6 +605,9 @@ struct ContentView: View {
         }) {
             settingsExitConfirmation
         }
+        .sheet(isPresented: $isShowingRunConfigurationEditor) {
+            runConfigurationEditor
+        }
         .alert(
             homebrewServiceConfirmationTitle,
             isPresented: isConfirmingHomebrewServiceAction,
@@ -635,6 +652,18 @@ struct ContentView: View {
         } message: {
             Text("当前存储损坏或版本不兼容，已暂停修改。原文件会保留为备份，然后创建空的 project-records.json。")
         }
+        .alert(
+            "删除运行配置？",
+            isPresented: isConfirmingRunConfigurationDeletion,
+            presenting: pendingRunConfigurationDeletion
+        ) { configuration in
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                projectsModel.deleteRunConfiguration(configuration)
+            }
+        } message: { configuration in
+            Text("将删除运行配置“\(configuration.name)”。此操作不会修改 Project Root。")
+        }
     }
 
     private var autoRefreshSchedule: AutoRefreshSchedule {
@@ -665,6 +694,13 @@ struct ContentView: View {
         Binding(
             get: { !pendingProjectRemovalIDs.isEmpty },
             set: { if !$0 { pendingProjectRemovalIDs.removeAll() } }
+        )
+    }
+
+    private var isConfirmingRunConfigurationDeletion: Binding<Bool> {
+        Binding(
+            get: { pendingRunConfigurationDeletion != nil },
+            set: { if !$0 { pendingRunConfigurationDeletion = nil } }
         )
     }
 
@@ -739,8 +775,8 @@ struct ContentView: View {
 
     @ViewBuilder
     private func page(_ snapshot: MachineSnapshot?) -> some View {
-        if selectedPage == .projects {
-            populatedPage(.projects, snapshot: snapshot)
+        if selectedPage?.usesProjectRecords == true {
+            populatedPage(selectedPage ?? .projects, snapshot: snapshot)
         } else if let snapshot {
             populatedPage(selectedPage ?? .overview, snapshot: snapshot)
         } else if model.isScanning {
@@ -752,8 +788,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private func populatedPage(_ page: Page, snapshot: MachineSnapshot?) -> some View {
-        if page == .projects {
-            projectsPage
+        if page.usesProjectRecords {
+            Group {
+                if page == .projects { projectsPage } else { runsPage }
+            }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             ScrollView {
@@ -776,6 +814,8 @@ struct ContentView: View {
                     }
                 case .projects:
                     EmptyView()
+                case .runs:
+                    EmptyView()
                 case .runtimes:
                     if let snapshot { runtimePage(snapshot.runtimes) }
                 case .databases:
@@ -787,7 +827,7 @@ struct ContentView: View {
                 }
             }
             .frame(
-                maxWidth: page == .overview || page == .projects || page == .runtimes || page == .databases || page == .localServices
+                maxWidth: page == .overview || page == .projects || page == .runs || page == .runtimes || page == .databases || page == .localServices
                     ? 1100
                     : 900
             )
@@ -825,6 +865,9 @@ struct ContentView: View {
             projectsModel.enterProjects()
             projectsModel.refreshRequirements(machineSnapshot: model.snapshot)
             DispatchQueue.main.async { projectSearchIsFocused = true }
+        }
+        if page == .runs, previousPage != .runs {
+            projectsModel.refreshProjects()
         }
         if page == .settings { settingsDraft = model.autoRefreshSettings }
     }
@@ -1018,6 +1061,236 @@ struct ContentView: View {
         .onChange(of: selectedProjectID) { _, _ in
             expandedProjectRequirementID = nil
         }
+    }
+
+    private var runsPage: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("运行")
+                        .font(.title2.bold())
+                    Text("\(projectsModel.runConfigurations(projectID: runProjectFilterID).count) 个已保存运行配置")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 20)
+                Picker("筛选项目", selection: $runProjectFilterID) {
+                    Text("全部项目").tag(Optional<String>.none)
+                    ForEach(projectsModel.records) { project in
+                        Text(project.title).tag(Optional(project.id))
+                    }
+                }
+                .frame(maxWidth: 260)
+                .accessibilityLabel("按项目筛选运行配置")
+                Button(action: beginCreatingRunConfiguration) {
+                    Label("新建配置", systemImage: "plus")
+                }
+                .disabled(projectsModel.records.isEmpty || projectsModel.mutationsArePaused)
+                .accessibilityLabel("新建运行配置")
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 17)
+
+            Divider()
+
+            if let storageError = projectsModel.storageError {
+                GroupBox {
+                    Label("项目记录存储已暂停：\(storageError)", systemImage: "externaldrive.badge.exclamationmark")
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(28)
+            } else if projectsModel.records.isEmpty && projectsModel.runConfigurations().isEmpty {
+                ContentUnavailableView {
+                    Label("尚未添加项目", systemImage: "folder.badge.plus")
+                } description: {
+                    Text("请先在“项目”页面添加 Project Root，再创建运行配置。")
+                } actions: {
+                    Button("前往项目页面") { selectPage(.projects) }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if projectsModel.runConfigurations(projectID: runProjectFilterID).isEmpty {
+                ContentUnavailableView {
+                    Label("没有运行配置", systemImage: "play.rectangle")
+                } description: {
+                    Text(runProjectFilterID == nil ? "为项目保存名称、命令和 Project Root 相对工作目录。" : "当前项目尚未保存运行配置。")
+                } actions: {
+                    Button("新建配置", action: beginCreatingRunConfiguration)
+                        .disabled(projectsModel.mutationsArePaused)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        if let error = projectsModel.operationError {
+                            Label("项目操作失败：\(error)", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityLabel("项目操作失败，\(error)")
+                        }
+                        ForEach(projectsModel.runConfigurations(projectID: runProjectFilterID)) { configuration in
+                            runConfigurationCard(configuration)
+                        }
+                    }
+                    .frame(maxWidth: 900)
+                    .frame(maxWidth: .infinity)
+                    .padding(28)
+                }
+            }
+        }
+        .onChange(of: projectsModel.records.map(\.id)) { _, projectIDs in
+            if let runProjectFilterID, !projectIDs.contains(runProjectFilterID) {
+                self.runProjectFilterID = nil
+            }
+        }
+    }
+
+    private func runConfigurationCard(_ configuration: ProjectRunConfiguration) -> some View {
+        let project = projectsModel.records.first { $0.id == configuration.projectID }
+        return GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "play.rectangle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.blue)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(configuration.name)
+                            .font(.headline)
+                        Text(project.map { "\($0.title)  ·  \($0.path)" } ?? "所属项目记录不存在")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                    Spacer()
+                    Button("编辑") { beginEditingRunConfiguration(configuration) }
+                        .disabled(projectsModel.mutationsArePaused)
+                        .accessibilityLabel("编辑运行配置 \(configuration.name)")
+                    Button("删除", role: .destructive) {
+                        pendingRunConfigurationDeletion = configuration
+                    }
+                    .disabled(projectsModel.mutationsArePaused)
+                    .accessibilityLabel("删除运行配置 \(configuration.name)")
+                }
+                Divider()
+                LabeledContent("命令") {
+                    Text(configuration.command)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                }
+                LabeledContent("工作目录") {
+                    Text(configuration.workingDirectory)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                }
+                if let project {
+                    switch project.availability {
+                    case .available:
+                        EmptyView()
+                    case .unknown:
+                        Label("正在确认项目是否可用", systemImage: "clock")
+                            .foregroundStyle(.secondary)
+                    case let .unavailable(reason):
+                        Label("项目不可用，不能执行：\(reason)", systemImage: "folder.badge.questionmark")
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("项目不可用，不能执行，\(reason)")
+                    }
+                } else {
+                    Label("所属项目记录不存在，不能执行", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private var runConfigurationEditor: some View {
+        VStack(spacing: 0) {
+            Form {
+                Picker("项目", selection: $runConfigurationProjectID) {
+                    ForEach(projectsModel.records) { project in
+                        Text(project.title).tag(project.id)
+                    }
+                }
+                .disabled(editingRunConfiguration != nil)
+                .accessibilityLabel("运行配置所属项目")
+                TextField("名称", text: $runConfigurationName)
+                    .focused($runConfigurationNameIsFocused)
+                    .accessibilityLabel("运行配置名称")
+                TextField("命令", text: $runConfigurationCommand)
+                    .font(.body.monospaced())
+                    .accessibilityLabel("运行命令")
+                TextField("工作目录", text: $runConfigurationWorkingDirectory)
+                    .font(.body.monospaced())
+                    .accessibilityLabel("Project Root 相对工作目录")
+                Text("工作目录使用 Project Root 相对路径；根目录填写 .")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                if runConfigurationSaveAttempted, let error = projectsModel.operationError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("运行配置保存失败，\(error)")
+                }
+            }
+            .formStyle(.grouped)
+            Divider()
+            HStack {
+                Button("取消") { isShowingRunConfigurationEditor = false }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(editingRunConfiguration == nil ? "创建" : "保存", action: saveRunConfiguration)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(runConfigurationProjectID.isEmpty || projectsModel.mutationsArePaused)
+            }
+            .padding()
+        }
+        .frame(width: 520, height: 410)
+        .onAppear {
+            DispatchQueue.main.async { runConfigurationNameIsFocused = true }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func beginCreatingRunConfiguration() {
+        guard let projectID = runProjectFilterID ?? projectsModel.records.first?.id else { return }
+        editingRunConfiguration = nil
+        runConfigurationProjectID = projectID
+        runConfigurationName = ""
+        runConfigurationCommand = ""
+        runConfigurationWorkingDirectory = "."
+        runConfigurationSaveAttempted = false
+        isShowingRunConfigurationEditor = true
+    }
+
+    private func beginEditingRunConfiguration(_ configuration: ProjectRunConfiguration) {
+        editingRunConfiguration = configuration
+        runConfigurationProjectID = configuration.projectID
+        runConfigurationName = configuration.name
+        runConfigurationCommand = configuration.command
+        runConfigurationWorkingDirectory = configuration.workingDirectory
+        runConfigurationSaveAttempted = false
+        isShowingRunConfigurationEditor = true
+    }
+
+    private func saveRunConfiguration() {
+        runConfigurationSaveAttempted = true
+        let succeeded = if let editingRunConfiguration {
+            projectsModel.updateRunConfiguration(
+                editingRunConfiguration,
+                name: runConfigurationName,
+                command: runConfigurationCommand,
+                workingDirectory: runConfigurationWorkingDirectory
+            )
+        } else {
+            projectsModel.createRunConfiguration(
+                projectID: runConfigurationProjectID,
+                name: runConfigurationName,
+                command: runConfigurationCommand,
+                workingDirectory: runConfigurationWorkingDirectory
+            ) != nil
+        }
+        if succeeded { isShowingRunConfigurationEditor = false }
     }
 
     private var projectList: some View {
@@ -1278,6 +1551,13 @@ struct ContentView: View {
             }
             Spacer()
             if !isSelectingProjects {
+                Button {
+                    openRuns(for: project)
+                } label: {
+                    Label("运行", systemImage: "play.rectangle")
+                }
+                .accessibilityLabel("管理 \(project.title) 的运行配置")
+                .help("在运行页面管理此项目的运行配置")
                 Menu {
                     Button("移除项目记录", role: .destructive) {
                         pendingProjectRemovalIDs = [project.id]
@@ -1294,6 +1574,11 @@ struct ContentView: View {
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    private func openRuns(for project: ProjectRecord) {
+        runProjectFilterID = project.id
+        selectPage(.runs)
     }
 
     private func projectSummaryCards(

@@ -28,6 +28,10 @@ _Avoid_: Package Root, Working Directory
 DevEnv 对一个已发现 Project Root 保存的轻量身份记录；原目录暂时不可用时记录仍可保留，删除记录不会删除或修改原目录。
 _Avoid_: Project Snapshot, Project Files
 
+**Project Run Configuration**:
+DevEnv 保存、归属于一个 Project Record 的运行意图，包含稳定身份、名称、命令、Project Root 相对工作目录和可选来源身份；它不是 Project Requirement 或 Project Requirements Summary，不表示项目可运行，也不执行命令。
+_Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
+
 **Ignored Project**:
 用户从 DevEnv 删除后不再由 Project Search Root 自动恢复的 Project Root；直接重新添加该目录或由用户恢复时解除忽略。
 _Avoid_: Deleted Project, Unavailable Project

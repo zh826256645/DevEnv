@@ -156,7 +156,7 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertTrue(try store.load().records.isEmpty)
     }
 
-    func testProjectRecordStoreRejectsIncompatibleSchemaWithoutOverwritingIt() throws {
+    func testProjectRecordStoreRejectsIncompatibleOrIncompleteSchemaWithoutOverwritingIt() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("project-records.json")
@@ -167,6 +167,183 @@ final class ProjectRecordsTests: XCTestCase {
 
         XCTAssertThrowsError(try store.load())
         XCTAssertEqual(try Data(contentsOf: fileURL), incompatible)
+
+        let incomplete = Data("{\"schemaVersion\":2,\"records\":[],\"ignoredProjects\":[]}".utf8)
+        try incomplete.write(to: fileURL)
+        XCTAssertThrowsError(try store.load())
+        XCTAssertEqual(try Data(contentsOf: fileURL), incomplete)
+    }
+
+    func testVersionOneStoreMigratesWithoutLosingProjectRecordsOrIgnoredProjects() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("project-records.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(#"""
+        {
+          "schemaVersion": 1,
+          "records": [{
+            "path": "/Projects/alpha",
+            "firstDiscoveredAt": "1970-01-01T00:01:40Z",
+            "lastDiscoveredAt": "1970-01-01T00:01:40Z",
+            "isNew": false,
+            "boundary": "git"
+          }],
+          "ignoredProjects": [{
+            "path": "/Projects/beta",
+            "ignoredAt": "1970-01-01T00:03:20Z",
+            "boundary": "manifest"
+          }]
+        }
+        """#.utf8).write(to: fileURL)
+
+        let document = try ProjectRecordStore(fileURL: fileURL).load()
+
+        XCTAssertEqual(document.schemaVersion, ProjectRecordDocument.currentSchemaVersion)
+        XCTAssertEqual(document.records.map(\.path), ["/Projects/alpha"])
+        XCTAssertEqual(document.ignoredProjects.map(\.path), ["/Projects/beta"])
+        XCTAssertTrue(document.runConfigurations.isEmpty)
+    }
+
+    @MainActor
+    func testPublicRunConfigurationOperationsPersistFilterAndRollBackFailedSave() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let alpha = directory.appendingPathComponent("alpha")
+        let beta = directory.appendingPathComponent("beta")
+        let alphaScripts = alpha.appendingPathComponent("scripts")
+        for project in [alphaScripts, beta] {
+            try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        }
+        let storageDirectory = directory.appendingPathComponent("storage")
+        try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+        let fileURL = storageDirectory.appendingPathComponent("records.json")
+        var document = ProjectRecordDocument()
+        document.addDirect([alpha.path, beta.path])
+        let store = ProjectRecordStore(fileURL: fileURL)
+        try store.save(document)
+        let model = ProjectsViewModel(store: store)
+
+        let alphaRun = try XCTUnwrap(model.createRunConfiguration(
+            projectID: alpha.path,
+            name: "开发服务器",
+            command: "npm run dev",
+            workingDirectory: "scripts",
+            sourceIdentity: "package.json#scripts.dev"
+        ))
+        let betaRun = try XCTUnwrap(model.createRunConfiguration(
+            projectID: beta.path,
+            name: "测试",
+            command: "swift test",
+            workingDirectory: "."
+        ))
+
+        XCTAssertEqual(model.runConfigurations(projectID: alpha.path).map(\.id), [alphaRun.id])
+        XCTAssertEqual(model.runConfigurations().map(\.id), [alphaRun.id, betaRun.id])
+        XCTAssertTrue(model.updateRunConfiguration(
+            alphaRun,
+            name: "开发",
+            command: "npm run start",
+            workingDirectory: "scripts"
+        ))
+        let updated = try XCTUnwrap(model.runConfigurations(projectID: alpha.path).first)
+        XCTAssertEqual(updated.id, alphaRun.id)
+        XCTAssertEqual(updated.name, "开发")
+        XCTAssertEqual(updated.sourceIdentity, "package.json#scripts.dev")
+
+        try FileManager.default.removeItem(at: alpha)
+        XCTAssertTrue(model.updateRunConfiguration(
+            updated,
+            name: "开发（磁盘未挂载）",
+            command: "npm run start -- --offline",
+            workingDirectory: updated.workingDirectory
+        ))
+        let unavailableUpdated = try XCTUnwrap(model.runConfigurations(projectID: alpha.path).first)
+        XCTAssertTrue(model.deleteRunConfiguration(betaRun))
+        XCTAssertEqual(try store.load().runConfigurations, [unavailableUpdated])
+
+        try FileManager.default.createDirectory(at: alphaScripts, withIntermediateDirectories: true)
+        let previousConfigurations = model.runConfigurations()
+        try FileManager.default.removeItem(at: fileURL)
+        try FileManager.default.removeItem(at: storageDirectory)
+        try Data().write(to: storageDirectory)
+
+        XCTAssertNil(model.createRunConfiguration(
+            projectID: alpha.path,
+            name: "不会保存",
+            command: "false",
+            workingDirectory: "."
+        ))
+        XCTAssertEqual(model.runConfigurations(), previousConfigurations)
+        XCTAssertNotNil(model.operationError)
+    }
+
+    @MainActor
+    func testRunConfigurationWorkingDirectoryCannotEscapeProjectRoot() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let project = directory.appendingPathComponent("project")
+        let child = project.appendingPathComponent("Sources")
+        let outside = directory.appendingPathComponent("outside")
+        for item in [child, outside] {
+            try FileManager.default.createDirectory(at: item, withIntermediateDirectories: true)
+        }
+        try Data().write(to: project.appendingPathComponent("README.md"))
+        try FileManager.default.createSymbolicLink(
+            at: project.appendingPathComponent("inside-link"),
+            withDestinationURL: child
+        )
+        try FileManager.default.createSymbolicLink(
+            at: project.appendingPathComponent("escape-link"),
+            withDestinationURL: outside
+        )
+        var document = ProjectRecordDocument()
+        document.addDirect([project.path])
+        try ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")).save(document)
+        let loadedModel = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+
+        let rootRun = try XCTUnwrap(loadedModel.createRunConfiguration(
+            projectID: project.path,
+            name: "根目录",
+            command: "true",
+            workingDirectory: ""
+        ))
+        let childRun = try XCTUnwrap(loadedModel.createRunConfiguration(
+            projectID: project.path,
+            name: "子目录",
+            command: "true",
+            workingDirectory: "inside-link"
+        ))
+
+        XCTAssertEqual(rootRun.workingDirectory, ".")
+        XCTAssertEqual(childRun.workingDirectory, "Sources")
+        try FileManager.default.removeItem(at: project.appendingPathComponent("inside-link"))
+        try FileManager.default.removeItem(at: child)
+        try FileManager.default.createSymbolicLink(at: child, withDestinationURL: outside)
+        XCTAssertFalse(loadedModel.updateRunConfiguration(
+            childRun,
+            name: "不能保留逃逸目录",
+            command: "true",
+            workingDirectory: childRun.workingDirectory
+        ))
+        for invalidPath in [
+            outside.path,
+            "../outside",
+            "Sources/../Sources",
+            "missing",
+            "README.md",
+            "escape-link",
+        ] {
+            XCTAssertNil(loadedModel.createRunConfiguration(
+                projectID: project.path,
+                name: invalidPath,
+                command: "true",
+                workingDirectory: invalidPath
+            ))
+        }
+        XCTAssertEqual(loadedModel.runConfigurations().count, 2)
     }
 
     func testIgnoredProjectIsAnExclusionBoundaryAndDirectAddResolvesItsSymlink() throws {
