@@ -197,6 +197,7 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         let ignoredPaths = Set(ignoredProjects.filter { projectIDs.contains($0.id) }.map(\.path))
         records.removeAll { projectIDs.contains($0.id) }
         ignoredProjects.removeAll { projectIDs.contains($0.id) }
+        runConfigurations.removeAll { projectIDs.contains($0.projectID) }
         for project in projects where !ignoredPaths.contains(project.id) {
             ignoredProjects.append(IgnoredProject(
                 path: project.id,

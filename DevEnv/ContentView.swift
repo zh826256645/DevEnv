@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private struct ProjectTerminalView: NSViewRepresentable {
+struct ProjectTerminalView: NSViewRepresentable {
     let terminalView: NSView
 
     func makeNSView(context _: Context) -> NSView { terminalView }
@@ -468,8 +468,8 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = EnvironmentViewModel()
-    @StateObject private var projectsModel = ProjectsViewModel()
-    @StateObject private var runCoordinator = ProjectRunCoordinator()
+    @ObservedObject private var projectsModel: ProjectsViewModel
+    @ObservedObject private var runCoordinator: ProjectRunCoordinator
     @State private var selectedPage: Page? = .overview
     @State private var copiedPath: String?
     @State private var hoveredPath: String?
@@ -505,10 +505,16 @@ struct ContentView: View {
     @State private var runConfigurationSaveAttempted = false
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
     @State private var pendingProjectRunTrust: ProjectRunTrustRequest?
+    @State private var selectedRunConfigurationID: String?
     @FocusState private var focusedCopyPath: String?
     @FocusState private var projectSearchIsFocused: Bool
     @FocusState private var projectAddIsFocused: Bool
     @FocusState private var runConfigurationNameIsFocused: Bool
+
+    init(projectsModel: ProjectsViewModel, runCoordinator: ProjectRunCoordinator) {
+        self.projectsModel = projectsModel
+        self.runCoordinator = runCoordinator
+    }
 
     var body: some View {
         navigation(model.snapshot)
@@ -600,9 +606,6 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didDeminiaturizeNotification)) { _ in
             updateRefreshActivity()
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            runCoordinator.terminateAllForApplicationExit()
-        }
         .onChange(of: currentNoticeIdentities) { _, identities in
             readNoticeIdentities.formIntersection(identities)
         }
@@ -642,7 +645,10 @@ struct ContentView: View {
             Button("取消", role: .cancel) {}
             Button("确认删除", role: .destructive) {
                 let projectIDs = pendingProjectRemovalIDs
-                let succeeded = projectsModel.remove(projectIDs: projectIDs) != nil
+                let succeeded = runCoordinator.removeProjects(
+                    projectIDs: projectIDs,
+                    from: projectsModel
+                ) != nil
                 pendingProjectRemovalIDs.removeAll()
                 guard succeeded else { return }
                 selectedProjectIDs.removeAll()
@@ -652,7 +658,13 @@ struct ContentView: View {
             }
         } message: {
             let summary = projectsModel.removalSummary(for: pendingProjectRemovalIDs)
-            Text("将移除 \(summary.projectCount) 个项目记录并清除 \(summary.ignoredProjectCount) 个忽略记录？不会删除、移动或修改原项目文件。项目记录会进入 Ignored Projects；忽略记录会从 DevEnv 中移除。")
+            let configurations = projectsModel.runConfigurations().filter {
+                pendingProjectRemovalIDs.contains($0.projectID)
+            }
+            let activeSessionCount = configurations.filter {
+                runCoordinator.session(for: $0.id)?.state.isLive == true
+            }.count
+            Text("将移除 \(summary.projectCount) 个项目记录、\(configurations.count) 个已保存运行配置和 \(activeSessionCount) 个活动会话，并清除 \(summary.ignoredProjectCount) 个忽略记录？活动会话将停止，Project Trust 将删除；不会删除、移动或修改原项目文件。项目记录会进入 Ignored Projects；忽略记录会从 DevEnv 中移除。")
         }
         .alert("重新创建项目记录存储？", isPresented: $isConfirmingProjectStoreReset) {
             Button("取消", role: .cancel) {}
@@ -671,7 +683,12 @@ struct ContentView: View {
         ) { configuration in
             Button("取消", role: .cancel) {}
             Button("删除", role: .destructive) {
-                projectsModel.deleteRunConfiguration(configuration)
+                if projectsModel.deleteRunConfiguration(configuration) {
+                    runCoordinator.closeTerminal(configurationID: configuration.id)
+                    if selectedRunConfigurationID == configuration.id {
+                        selectedRunConfigurationID = nil
+                    }
+                }
             }
         } message: { configuration in
             Text("将删除运行配置“\(configuration.name)”。此操作不会修改 Project Root。")
@@ -683,7 +700,9 @@ struct ContentView: View {
         ) { request in
             Button("取消", role: .cancel) {}
             Button("信任并运行") {
-                _ = runCoordinator.confirmTrustAndRun(request)
+                if runCoordinator.confirmTrustAndRun(request) == .started {
+                    selectedRunConfigurationID = request.configuration.id
+                }
             }
         } message: { request in
             Text("完整命令：\n\(request.command)\n\n工作目录：\n\(request.workingDirectory)\n\n确认后，此 Project Root 的后续运行不再重复询问。")
@@ -1159,7 +1178,9 @@ struct ContentView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .accessibilityLabel("项目操作失败，\(error)")
                         }
-                        ForEach(projectsModel.runConfigurations(projectID: runProjectFilterID)) { configuration in
+                        ForEach(runCoordinator.activeConfigurationsFirst(
+                            projectsModel.runConfigurations(projectID: runProjectFilterID)
+                        )) { configuration in
                             runConfigurationCard(configuration)
                         }
                     }
@@ -1218,6 +1239,13 @@ struct ContentView: View {
                     }
                     .disabled(projectsModel.mutationsArePaused || session?.state.isLive == true)
                     .accessibilityLabel("删除运行配置 \(configuration.name)")
+                    if session?.lastSuccessfulCommand != nil {
+                        Button(selectedRunConfigurationID == configuration.id ? "正在查看" : "查看终端") {
+                            selectedRunConfigurationID = configuration.id
+                        }
+                        .disabled(selectedRunConfigurationID == configuration.id)
+                        .accessibilityLabel("查看运行配置 \(configuration.name) 的终端")
+                    }
                 }
                 Divider()
                 LabeledContent("命令") {
@@ -1231,7 +1259,7 @@ struct ContentView: View {
                         .textSelection(.enabled)
                 }
                 projectRunState(session?.state ?? .inactive)
-                if let session {
+                if let session, selectedRunConfigurationID == configuration.id {
                     if session.lastSuccessfulCommand != nil {
                         ProjectTerminalView(terminalView: session.terminalView)
                             .frame(minHeight: 260, idealHeight: 320)
@@ -1241,6 +1269,7 @@ struct ContentView: View {
                     if !session.state.isLive {
                         Button("关闭终端") {
                             runCoordinator.closeTerminal(configurationID: configuration.id)
+                            selectedRunConfigurationID = nil
                         }
                         .accessibilityLabel("关闭并清除运行配置 \(configuration.name) 的终端输出")
                     }
@@ -1292,8 +1321,13 @@ struct ContentView: View {
 
     private func run(_ configuration: ProjectRunConfiguration, project: ProjectRecord?) {
         guard let project else { return }
-        if case let .needsTrust(request) = runCoordinator.run(configuration, projectRoot: project.path) {
+        switch runCoordinator.run(configuration, project: project) {
+        case let .needsTrust(request):
             pendingProjectRunTrust = request
+        case .started:
+            selectedRunConfigurationID = configuration.id
+        case .rejected:
+            break
         }
     }
 
@@ -1455,6 +1489,9 @@ struct ContentView: View {
 
     private func projectListRow(_ project: ProjectRecord) -> some View {
         let summary = projectsModel.summary(for: project)
+        let hasActiveSession = projectsModel.runConfigurations(projectID: project.id).contains {
+            runCoordinator.session(for: $0.id)?.state.isLive == true
+        }
         return HStack(alignment: .top, spacing: 10) {
             Image(systemName: "folder.fill")
                 .font(.system(size: 20, weight: .medium))
@@ -1496,6 +1533,11 @@ struct ContentView: View {
                 }
                 .font(.caption)
                 .foregroundStyle(projectSummaryColor(summary))
+                if hasActiveSession {
+                    Label("运行中", systemImage: "play.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
             }
         }
         .opacity(project.availability == .available ? 1 : 0.72)
@@ -1504,6 +1546,7 @@ struct ContentView: View {
             "\(project.title)，\(project.path)，\(project.isNew ? "New，" : "")"
                 + "\(summary.map(projectSummaryTitle) ?? "待刷新")"
                 + "\(projectsModel.staleProjectIDs.contains(project.id) ? "，结果已过期" : "")"
+                + "\(hasActiveSession ? "，含活动 Project Run Session" : "")"
         )
     }
 

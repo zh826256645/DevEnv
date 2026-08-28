@@ -107,12 +107,13 @@ struct SwiftTermProjectRunEngineFactory: ProjectRunEngineFactory {
 
 @MainActor
 final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preconcurrency LocalProcessTerminalViewDelegate {
-    let terminal = LocalProcessTerminalView(frame: .zero)
+    let terminal = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
     var terminalView: NSView { terminal }
     var onExit: ((Int32?) -> Void)?
     private var processMonitor: DispatchSourceProcess?
     private var monitoredPID: pid_t?
     private var trackedProcessGroups: Set<pid_t> = []
+    private var trackedSessionID: pid_t?
 
     override init() {
         super.init()
@@ -137,20 +138,24 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
             throw ProjectRunLaunchError.processDidNotStart
         }
         trackedProcessGroups = [pid]
+        trackedSessionID = pid
         monitor(pid)
     }
 
     func signalProcessGroups(_ signal: Int32) {
         let rootPID = terminal.process.shellPid
-        guard rootPID > 0 else { return }
-        trackedProcessGroups.formUnion(processGroups(rootedAt: rootPID))
-        let groups = trackedProcessGroups
-        for group in groups where group != rootPID {
+        if rootPID > 0 {
+            trackedProcessGroups.formUnion(processGroups(rootedAt: rootPID))
+        }
+        if let trackedSessionID, trackedSessionID > 0 {
+            trackedProcessGroups.formUnion(processGroups(inSession: trackedSessionID))
+        }
+        for group in trackedProcessGroups {
             Darwin.kill(-group, signal)
         }
-        Darwin.kill(-rootPID, signal)
         if signal == SIGKILL {
             trackedProcessGroups.removeAll()
+            trackedSessionID = nil
         }
     }
 
@@ -196,10 +201,24 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
         })
     }
 
+    private func processGroups(inSession sessionID: pid_t) -> Set<pid_t> {
+        let capacity = Int(proc_listallpids(nil, 0))
+        guard capacity > 0 else { return [] }
+        var processes = [pid_t](repeating: 0, count: capacity)
+        let count = processes.withUnsafeMutableBytes {
+            proc_listallpids($0.baseAddress, Int32($0.count))
+        }
+        guard count > 0 else { return [] }
+        return Set(processes.prefix(Int(count)).compactMap { process in
+            guard process > 0, getsid(process) == sessionID else { return nil }
+            let group = getpgid(process)
+            return group > 0 ? group : nil
+        })
+    }
+
     private func finish(pid: pid_t, rawWaitStatus: Int32?) {
         guard monitoredPID == pid else { return }
         monitoredPID = nil
-        trackedProcessGroups.remove(pid)
         processMonitor?.cancel()
         processMonitor = nil
         guard let rawWaitStatus else {
@@ -300,6 +319,24 @@ final class ProjectRunCoordinator: ObservableObject {
         sessions[configurationID]
     }
 
+    func activeConfigurationsFirst(
+        _ configurations: [ProjectRunConfiguration]
+    ) -> [ProjectRunConfiguration] {
+        configurations.filter { sessions[$0.id]?.state.isLive == true }
+            + configurations.filter { sessions[$0.id]?.state.isLive != true }
+    }
+
+    func run(_ configuration: ProjectRunConfiguration, project: ProjectRecord) -> ProjectRunActionResult {
+        switch project.availability {
+        case .available:
+            run(configuration, projectRoot: project.path)
+        case .unknown:
+            .rejected("正在确认项目是否可用")
+        case let .unavailable(reason):
+            .rejected("项目不可用，不能执行：\(reason)")
+        }
+    }
+
     func run(_ configuration: ProjectRunConfiguration, projectRoot: String) -> ProjectRunActionResult {
         guard sessions[configuration.id]?.state.isLive != true else {
             return .rejected("该运行配置已有活动会话")
@@ -347,11 +384,32 @@ final class ProjectRunCoordinator: ObservableObject {
         }
     }
 
-    func terminateAllForApplicationExit() {
-        for session in sessions.values where session.state.isLive {
-            session.engine.signalProcessGroups(SIGKILL)
-            session.state = .stopping
+    func removeProjects(
+        projectIDs: Set<String>,
+        from projectsModel: ProjectsViewModel
+    ) -> ProjectRemovalSummary? {
+        let configurationIDs = Set(
+            projectsModel.runConfigurations()
+                .filter { projectIDs.contains($0.projectID) }
+                .map(\.id)
+        )
+        guard let summary = projectsModel.remove(projectIDs: projectIDs) else { return nil }
+        for configurationID in configurationIDs {
+            if let session = sessions[configurationID], session.state.isLive {
+                session.engine.signalProcessGroups(SIGKILL)
+            }
+            sessions.removeValue(forKey: configurationID)
         }
+        defaults.set(Array(trustedRoots.subtracting(projectIDs)).sorted(), forKey: Self.trustedRootsKey)
+        objectWillChange.send()
+        return summary
+    }
+
+    func terminateAllForApplicationExit() {
+        for session in sessions.values {
+            session.engine.signalProcessGroups(SIGKILL)
+        }
+        sessions.removeAll()
         objectWillChange.send()
     }
 
@@ -400,6 +458,7 @@ final class ProjectRunCoordinator: ObservableObject {
                 session.pendingStopExitCode = exitCode
                 return
             }
+            session.engine.signalProcessGroups(SIGKILL)
             session.state = .exited(exitCode ?? -1)
             self.objectWillChange.send()
         }

@@ -10,3 +10,4 @@ Project Run Session 使用当前用户可用的 Default Login Shell 和 SwiftTer
 - 工作目录或 Default Login Shell 在后续启动时失效会直接导致 launch failed，不按旧快照继续执行，也不回退到其他 Shell。
 - 命令通过交互式登录 Shell 的单次 `-c` 调用执行；命令结束后 PTY 关闭并保留只读输出与退出码，不留下空闲通用 Shell。
 - 停止和 App 退出作用于独立进程组，避免 Project Run Session 的子进程脱离会话遗留。
+- Project Run Coordinator 与终端缓冲由 App 持有：关闭窗口不终止会话，重开窗口接回同一状态；真正退出 App 时清空会话，下次启动只恢复已保存配置。

@@ -1,10 +1,238 @@
 import AppKit
 import Darwin
+import SwiftTerm
+import SwiftUI
 import XCTest
 @testable import DevEnv
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+    func testConcurrentConfigurationsAreActiveFirstAndSurviveWindowRecreation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstRoot = directory.appendingPathComponent("first")
+        let secondRoot = directory.appendingPathComponent("second")
+        try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
+        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            engineFactory: factory,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            defaults: defaults,
+            scheduler: FakeProjectRunScheduler()
+        )
+        let first = ProjectRunConfiguration(
+            id: "first",
+            projectID: firstRoot.path,
+            name: "前端",
+            command: "npm run dev",
+            workingDirectory: "."
+        )
+        let sameProject = ProjectRunConfiguration(
+            id: "same-project",
+            projectID: firstRoot.path,
+            name: "测试",
+            command: "npm test",
+            workingDirectory: "."
+        )
+        let second = ProjectRunConfiguration(
+            id: "second",
+            projectID: secondRoot.path,
+            name: "后端",
+            command: "swift run",
+            workingDirectory: "."
+        )
+        let inactive = ProjectRunConfiguration(
+            id: "inactive",
+            projectID: secondRoot.path,
+            name: "未启动",
+            command: "swift test",
+            workingDirectory: "."
+        )
+
+        for configuration in [first, second] {
+            guard case let .needsTrust(request) = coordinator.run(
+                configuration,
+                projectRoot: configuration.projectID
+            ) else {
+                return XCTFail("首次运行必须请求信任")
+            }
+            XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        }
+        XCTAssertEqual(coordinator.run(sameProject, projectRoot: firstRoot.path), .started)
+        let firstSession = try XCTUnwrap(coordinator.session(for: first.id))
+
+        let projectsModel = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+        _ = ContentView(projectsModel: projectsModel, runCoordinator: coordinator)
+        _ = ContentView(projectsModel: projectsModel, runCoordinator: coordinator)
+
+        XCTAssertEqual(factory.engines.count, 3)
+        XCTAssertTrue(coordinator.session(for: first.id) === firstSession)
+        XCTAssertEqual(
+            coordinator.activeConfigurationsFirst([inactive, second, sameProject, first]).map(\.id),
+            [second.id, sameProject.id, first.id, inactive.id]
+        )
+    }
+
+    func testUnavailableProjectCannotCreateAProcessEngine() throws {
+        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            engineFactory: factory,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            defaults: defaults,
+            scheduler: FakeProjectRunScheduler()
+        )
+        var project = ProjectRecord(path: "/Volumes/Missing/project", discoveredAt: Date())
+        project.availability = .unavailable("项目根目录不存在")
+        let configuration = ProjectRunConfiguration(
+            id: "run",
+            projectID: project.id,
+            name: "开发服务器",
+            command: "npm run dev",
+            workingDirectory: "."
+        )
+
+        XCTAssertEqual(
+            coordinator.run(configuration, project: project),
+            .rejected("项目不可用，不能执行：项目根目录不存在")
+        )
+        XCTAssertTrue(factory.engines.isEmpty)
+        XCTAssertNil(coordinator.session(for: configuration.id))
+    }
+
+    func testRemovingProjectRecordCommitsStoreBeforeCleaningSessionsAndTrust() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstRoot = directory.appendingPathComponent("first")
+        let secondRoot = directory.appendingPathComponent("second")
+        try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
+        let first = ProjectRunConfiguration(
+            id: "first",
+            projectID: firstRoot.path,
+            name: "前端",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        let second = ProjectRunConfiguration(
+            id: "second",
+            projectID: secondRoot.path,
+            name: "后端",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: [first, second])
+        document.addDirect([firstRoot.path, secondRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            engineFactory: factory,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            defaults: defaults,
+            scheduler: FakeProjectRunScheduler()
+        )
+        for configuration in [first, second] {
+            guard case let .needsTrust(request) = coordinator.run(
+                configuration,
+                projectRoot: configuration.projectID
+            ) else {
+                return XCTFail("首次运行必须请求信任")
+            }
+            XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        }
+        factory.engines[0].finish(exitCode: 0)
+
+        let summary = coordinator.removeProjects(projectIDs: [firstRoot.path], from: projectsModel)
+
+        XCTAssertEqual(summary, ProjectRemovalSummary(projectCount: 1, ignoredProjectCount: 0))
+        XCTAssertEqual(factory.engines[0].signals, [SIGKILL])
+        XCTAssertTrue(factory.engines[1].signals.isEmpty)
+        XCTAssertNil(coordinator.session(for: first.id))
+        XCTAssertNotNil(coordinator.session(for: second.id))
+        XCTAssertEqual(projectsModel.runConfigurations().map(\.id), [second.id])
+        XCTAssertEqual(try store.load().runConfigurations.map(\.id), [second.id])
+
+        let relaunchedCoordinator = ProjectRunCoordinator(
+            engineFactory: FakeProjectRunEngineFactory(),
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            defaults: defaults,
+            scheduler: FakeProjectRunScheduler()
+        )
+        guard case .needsTrust = relaunchedCoordinator.run(first, projectRoot: firstRoot.path) else {
+            return XCTFail("移除 Project Record 必须删除 Project Trust")
+        }
+        XCTAssertEqual(relaunchedCoordinator.run(second, projectRoot: secondRoot.path), .started)
+    }
+
+    func testFailedProjectRemovalPreservesSessionsConfigurationsAndTrust() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        let storageDirectory = directory.appendingPathComponent("storage")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(
+            id: "run",
+            projectID: projectRoot.path,
+            name: "服务",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        let store = ProjectRecordStore(fileURL: storageDirectory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: [configuration])
+        document.addDirect([projectRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            engineFactory: factory,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            defaults: defaults,
+            scheduler: FakeProjectRunScheduler()
+        )
+        guard case let .needsTrust(request) = coordinator.run(
+            configuration,
+            projectRoot: projectRoot.path
+        ) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        try FileManager.default.removeItem(at: storageDirectory)
+        try Data().write(to: storageDirectory)
+
+        XCTAssertNil(coordinator.removeProjects(projectIDs: [projectRoot.path], from: projectsModel))
+        XCTAssertTrue(factory.engines[0].signals.isEmpty)
+        XCTAssertNotNil(coordinator.session(for: configuration.id))
+        XCTAssertEqual(projectsModel.runConfigurations(), [configuration])
+
+        let relaunchedCoordinator = ProjectRunCoordinator(
+            engineFactory: FakeProjectRunEngineFactory(),
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            defaults: defaults,
+            scheduler: FakeProjectRunScheduler()
+        )
+        XCTAssertEqual(
+            relaunchedCoordinator.run(configuration, projectRoot: projectRoot.path),
+            .started
+        )
+    }
+
     func testFirstRunRequiresPersistentProjectTrustBeforeLaunching() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -117,6 +345,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         let secondEngine = try XCTUnwrap(factory.engines.last)
         coordinator.terminateAllForApplicationExit()
         XCTAssertEqual(secondEngine.signals, [SIGKILL])
+        XCTAssertTrue(coordinator.sessions.isEmpty)
     }
 
     func testRerunRevalidatesPathAndShellWithoutDiscardingTheTerminal() throws {
@@ -229,6 +458,137 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(exitCode, 7, renderedOutput)
         XCTAssertTrue(renderedOutput.contains("ANSI"))
         XCTAssertTrue(renderedOutput.contains("INPUT:hello"))
+    }
+
+    func testRealConcurrentSessionsRetainLongOutputAcrossWindowRecreationAndExitCleanly() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstRoot = directory.appendingPathComponent("first")
+        let secondRoot = directory.appendingPathComponent("second")
+        try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
+        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let coordinator = ProjectRunCoordinator(
+            engineFactory: SwiftTermProjectRunEngineFactory(),
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            defaults: defaults,
+            scheduler: FakeProjectRunScheduler()
+        )
+        let first = ProjectRunConfiguration(
+            id: "first",
+            projectID: firstRoot.path,
+            name: "长输出",
+            command: "for i in {1..1500}; do printf 'FIRST:%s\\n' \"$i\"; done; sleep 30",
+            workingDirectory: "."
+        )
+        let second = ProjectRunConfiguration(
+            id: "second",
+            projectID: secondRoot.path,
+            name: "并发服务",
+            command: "printf 'SECOND\\n'; sleep 30",
+            workingDirectory: "."
+        )
+        let background = ProjectRunConfiguration(
+            id: "background",
+            projectID: firstRoot.path,
+            name: "后台进程",
+            command: #"/bin/sh -c 'trap "" HUP INT TERM; while :; do sleep 1; done' & child=$!; disown; printf 'BACKGROUND:%s\n' "$child""#,
+            workingDirectory: "."
+        )
+        for configuration in [first, second] {
+            guard case let .needsTrust(request) = coordinator.run(
+                configuration,
+                projectRoot: configuration.projectID
+            ) else {
+                return XCTFail("首次运行必须请求信任")
+            }
+            XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        }
+        XCTAssertEqual(coordinator.run(background, projectRoot: firstRoot.path), .started)
+        let firstSession = try XCTUnwrap(coordinator.session(for: first.id))
+        let secondSession = try XCTUnwrap(coordinator.session(for: second.id))
+        let backgroundSession = try XCTUnwrap(coordinator.session(for: background.id))
+        let firstTerminal = try XCTUnwrap(firstSession.terminalView as? LocalProcessTerminalView)
+        let secondTerminal = try XCTUnwrap(secondSession.terminalView as? LocalProcessTerminalView)
+        let backgroundTerminal = try XCTUnwrap(backgroundSession.terminalView as? LocalProcessTerminalView)
+        func output(_ terminal: LocalProcessTerminalView) -> String {
+            String(data: terminal.terminal.getBufferAsData(kind: .normal), encoding: .utf8) ?? ""
+        }
+        let clock = ContinuousClock()
+        let outputDeadline = clock.now.advanced(by: .seconds(5))
+        while (!output(firstTerminal).contains("FIRST:1500")
+            || !output(secondTerminal).contains("SECOND")
+            || !output(backgroundTerminal).contains("BACKGROUND:")),
+              clock.now < outputDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let projectsModel = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+        let firstHost = NSHostingController(rootView: AnyView(
+            ProjectTerminalView(terminalView: firstTerminal).id(first.id)
+        ))
+        let firstWindow = NSWindow(contentViewController: firstHost)
+        firstWindow.isReleasedWhenClosed = false
+        firstWindow.setContentSize(NSSize(width: 900, height: 500))
+        firstWindow.makeKeyAndOrderFront(nil)
+        firstWindow.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertTrue(firstTerminal.window === firstWindow)
+
+        firstWindow.close()
+        let reopenedHost = NSHostingController(rootView: AnyView(
+            ProjectTerminalView(terminalView: secondTerminal).id(second.id)
+        ))
+        let reopenedWindow = NSWindow(contentViewController: reopenedHost)
+        reopenedWindow.isReleasedWhenClosed = false
+        reopenedWindow.setContentSize(NSSize(width: 900, height: 500))
+        reopenedWindow.makeKeyAndOrderFront(nil)
+        reopenedWindow.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertTrue(secondTerminal.window === reopenedWindow)
+
+        reopenedHost.rootView = AnyView(ProjectTerminalView(terminalView: firstTerminal).id(first.id))
+        reopenedWindow.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertTrue(firstTerminal.window === reopenedWindow)
+
+        XCTAssertTrue(output(firstTerminal).contains("FIRST:1500"))
+        XCTAssertTrue(output(secondTerminal).contains("SECOND"))
+        XCTAssertTrue(coordinator.session(for: first.id) === firstSession)
+        XCTAssertTrue(coordinator.session(for: second.id) === secondSession)
+        let processIDs = [firstTerminal.process.shellPid, secondTerminal.process.shellPid]
+        let backgroundOutput = output(backgroundTerminal)
+        let backgroundRange = try XCTUnwrap(
+            backgroundOutput.range(of: #"BACKGROUND:\d+"#, options: .regularExpression)
+        )
+        let backgroundPID = try XCTUnwrap(
+            pid_t(backgroundOutput[backgroundRange].dropFirst("BACKGROUND:".count))
+        )
+        var backgroundNeedsCleanup = true
+        defer { if backgroundNeedsCleanup { Darwin.kill(backgroundPID, SIGKILL) } }
+        let backgroundExitDeadline = clock.now.advanced(by: .seconds(5))
+        while backgroundSession.state.isLive, clock.now < backgroundExitDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        while Darwin.kill(backgroundPID, 0) == 0, clock.now < backgroundExitDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        backgroundNeedsCleanup = Darwin.kill(backgroundPID, 0) == 0
+        XCTAssertFalse(backgroundNeedsCleanup, "根 Shell 退出时必须清理同一会话的后台进程")
+
+        let appDelegate = DevEnvAppDelegate(
+            projectsModel: projectsModel,
+            runCoordinator: coordinator
+        )
+        appDelegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        let exitDeadline = clock.now.advanced(by: .seconds(2))
+        while processIDs.contains(where: { Darwin.kill($0, 0) == 0 }), clock.now < exitDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        reopenedWindow.close()
+        XCTAssertTrue(coordinator.sessions.isEmpty)
+        XCTAssertTrue(processIDs.allSatisfy { Darwin.kill($0, 0) != 0 })
     }
 
     func testRealEngineStopEscalationKillsBackgroundProcessGroupsAfterShellExit() async throws {
