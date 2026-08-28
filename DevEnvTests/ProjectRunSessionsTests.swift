@@ -7,6 +7,50 @@ import XCTest
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+    func testSignalTargetsRejectUnsafeAndUnownedProcessGroups() {
+        let ownedGroups = ProjectRunProcessOwnership.processGroups(
+            in: [
+                ProjectRunOwnedProcess(userID: 501, terminalDevice: 7, processGroup: 1),
+                ProjectRunOwnedProcess(userID: 501, terminalDevice: 7, processGroup: 900),
+                ProjectRunOwnedProcess(userID: 502, terminalDevice: 7, processGroup: 901),
+                ProjectRunOwnedProcess(userID: 501, terminalDevice: 8, processGroup: 902),
+                ProjectRunOwnedProcess(userID: 501, terminalDevice: 7, processGroup: 903),
+            ],
+            userID: 501,
+            terminalDevice: 7
+        )
+        var sentGroups: [pid_t] = []
+        var sentSignals: [Int32] = []
+
+        let succeeded = ProjectRunSignalTargets.signal(
+            SIGTERM,
+            requestedGroups: [-5, 0, 1, 2, 900, 901, 902, 903],
+            ownedGroups: ownedGroups.union([-5, 0, 1]),
+            currentProcessGroup: { 900 },
+            send: { group, signal in
+                sentGroups.append(group)
+                sentSignals.append(signal)
+                return true
+            }
+        )
+
+        XCTAssertEqual(ownedGroups, [900, 903])
+        XCTAssertEqual(
+            ProjectRunProcessOwnership.revalidatedGroup(witnessedGroup: 903, currentGroup: 903),
+            903
+        )
+        XCTAssertNil(
+            ProjectRunProcessOwnership.revalidatedGroup(witnessedGroup: 903, currentGroup: 904)
+        )
+        XCTAssertNil(
+            ProjectRunProcessOwnership.revalidatedGroup(witnessedGroup: 1, currentGroup: 1)
+        )
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(sentGroups, [903])
+        XCTAssertEqual(sentSignals, [SIGTERM])
+        XCTAssertNil(ProjectRunPTYOwnershipToken(masterDescriptor: -1))
+    }
+
     func testConcurrentConfigurationsAreActiveFirstAndSurviveWindowRecreation() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -153,12 +197,19 @@ final class ProjectRunSessionsTests: XCTestCase {
             }
             XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
         }
-        factory.engines[0].finish(exitCode: 0)
+        factory.engines[0].signalSucceeds = false
+
+        XCTAssertNil(coordinator.removeProjects(projectIDs: [firstRoot.path], from: projectsModel))
+        XCTAssertEqual(factory.engines[0].signals, [SIGKILL])
+        XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopping)
+        XCTAssertEqual(Set(projectsModel.runConfigurations().map(\.id)), [first.id, second.id])
+        XCTAssertEqual(Set(try store.load().runConfigurations.map(\.id)), [first.id, second.id])
+        factory.engines[0].signalSucceeds = true
 
         let summary = coordinator.removeProjects(projectIDs: [firstRoot.path], from: projectsModel)
 
         XCTAssertEqual(summary, ProjectRemovalSummary(projectCount: 1, ignoredProjectCount: 0))
-        XCTAssertEqual(factory.engines[0].signals, [SIGKILL])
+        XCTAssertEqual(factory.engines[0].signals, [SIGKILL, SIGKILL])
         XCTAssertTrue(factory.engines[1].signals.isEmpty)
         XCTAssertNil(coordinator.session(for: first.id))
         XCTAssertNotNil(coordinator.session(for: second.id))
@@ -343,8 +394,14 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         XCTAssertEqual(coordinator.run(second, projectRoot: projectRoot.path), .started)
         let secondEngine = try XCTUnwrap(factory.engines.last)
-        coordinator.terminateAllForApplicationExit()
-        XCTAssertEqual(secondEngine.signals, [SIGKILL])
+        secondEngine.signalSucceeds = false
+        XCTAssertFalse(coordinator.terminateAllForApplicationExit())
+        XCTAssertEqual(coordinator.session(for: second.id)?.state, .stopping)
+        XCTAssertEqual(firstEngine.signals, [SIGINT, SIGTERM, SIGKILL])
+        XCTAssertFalse(coordinator.sessions.isEmpty)
+        secondEngine.signalSucceeds = true
+        XCTAssertTrue(coordinator.terminateAllForApplicationExit())
+        XCTAssertEqual(secondEngine.signals, [SIGKILL, SIGKILL])
         XCTAssertTrue(coordinator.sessions.isEmpty)
     }
 
@@ -494,7 +551,7 @@ final class ProjectRunSessionsTests: XCTestCase {
             id: "background",
             projectID: firstRoot.path,
             name: "后台进程",
-            command: #"/bin/sh -c 'trap "" HUP INT TERM; while :; do sleep 1; done' & child=$!; disown; printf 'BACKGROUND:%s\n' "$child""#,
+            command: #"/bin/sh -c 'trap "" HUP INT TERM; while :; do sleep 1; done' & child=$!; disown; printf 'BACKGROUND:%s\n' "$child"; sleep 1"#,
             workingDirectory: "."
         )
         for configuration in [first, second] {
@@ -581,7 +638,7 @@ final class ProjectRunSessionsTests: XCTestCase {
             projectsModel: projectsModel,
             runCoordinator: coordinator
         )
-        appDelegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+        XCTAssertEqual(appDelegate.applicationShouldTerminate(NSApplication.shared), .terminateNow)
         let exitDeadline = clock.now.advanced(by: .seconds(2))
         while processIDs.contains(where: { Darwin.kill($0, 0) == 0 }), clock.now < exitDeadline {
             try await Task.sleep(for: .milliseconds(10))
@@ -609,14 +666,15 @@ final class ProjectRunSessionsTests: XCTestCase {
                 "-f",
                 "-i",
                 "-c",
-                #"/bin/sh -c 'trap "" INT TERM HUP; while :; do :; done' & printf 'CHILD:%s\n' "$!"; trap 'kill -KILL $$' INT; while :; do :; done"#,
+                #"/bin/sh -c 'trap "" INT TERM HUP; printf "CHILD_READY\n"; while :; do :; done' & printf 'CHILD:%s\n' "$!"; trap 'kill -KILL $$' INT; while :; do :; done"#,
             ],
             loginName: "-zsh",
             workingDirectory: FileManager.default.temporaryDirectory.path
         )
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(5))
-        while !output().contains("CHILD:"), clock.now < deadline {
+        while (!output().contains("CHILD:") || !output().contains("CHILD_READY")),
+              clock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
         let renderedOutput = output()
@@ -626,19 +684,25 @@ final class ProjectRunSessionsTests: XCTestCase {
         let childPID = try XCTUnwrap(pid_t(renderedOutput[childRange].dropFirst("CHILD:".count)))
         var childNeedsCleanup = true
         defer { if childNeedsCleanup { Darwin.kill(childPID, SIGKILL) } }
+        func isRunning(_ processID: pid_t) -> Bool {
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            return proc_pidinfo(processID, PROC_PIDTBSDINFO, 0, &info, size) == size
+                && info.pbi_status != SZOMB
+        }
 
-        engine.signalProcessGroups(SIGINT)
+        _ = engine.signalProcessGroups(SIGINT)
 
         await fulfillment(of: [exited], timeout: 5)
-        XCTAssertEqual(Darwin.kill(childPID, 0), 0, "子进程未忽略 SIGINT")
-        engine.signalProcessGroups(SIGTERM)
-        XCTAssertEqual(Darwin.kill(childPID, 0), 0, "子进程未忽略 SIGTERM")
-        engine.signalProcessGroups(SIGKILL)
+        XCTAssertTrue(isRunning(childPID), "子进程未忽略 SIGINT")
+        _ = engine.signalProcessGroups(SIGTERM)
+        XCTAssertTrue(isRunning(childPID), "子进程未忽略 SIGTERM")
+        _ = engine.signalProcessGroups(SIGKILL)
         let cleanupDeadline = clock.now.advanced(by: .seconds(2))
-        while Darwin.kill(childPID, 0) == 0, clock.now < cleanupDeadline {
+        while isRunning(childPID), clock.now < cleanupDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        childNeedsCleanup = Darwin.kill(childPID, 0) == 0
+        childNeedsCleanup = isRunning(childPID)
         XCTAssertFalse(childNeedsCleanup, "后台子进程仍然存活：\(childPID)")
     }
 }
@@ -667,6 +731,7 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
     var onExit: ((Int32?) -> Void)?
     private(set) var launches: [Launch] = []
     private(set) var signals: [Int32] = []
+    var signalSucceeds = true
 
     func start(
         executable: String,
@@ -682,8 +747,9 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
         ))
     }
 
-    func signalProcessGroups(_ signal: Int32) {
+    func signalProcessGroups(_ signal: Int32) -> Bool {
         signals.append(signal)
+        return signalSucceeds
     }
 
     func finish(exitCode: Int32?) {

@@ -33,6 +33,202 @@ enum ProjectRunActionResult: Equatable, Sendable {
     case rejected(String)
 }
 
+enum ProjectRunSignalTargets {
+    static func signal(
+        _ signal: Int32,
+        requestedGroups: Set<pid_t>,
+        ownedGroups: Set<pid_t>,
+        currentProcessGroup: () -> pid_t = getpgrp,
+        send: (pid_t, Int32) -> Bool = { group, signal in
+            Darwin.kill(-group, signal) == 0 || errno == ESRCH
+        }
+    ) -> Bool {
+        let currentProcessGroup = currentProcessGroup()
+        let targets = requestedGroups.intersection(ownedGroups)
+            .filter { $0 > 1 && $0 != currentProcessGroup }
+            .sorted()
+        var succeeded = true
+        for group in targets {
+            if !send(group, signal) {
+                succeeded = false
+            }
+        }
+        return succeeded
+    }
+}
+
+struct ProjectRunOwnedProcess {
+    let userID: uid_t
+    let terminalDevice: UInt32
+    let processGroup: pid_t
+}
+
+struct ProjectRunProcessSnapshot: Sendable {
+    let processID: pid_t
+    let userID: uid_t
+    let terminalDevice: UInt32
+    let processGroup: pid_t
+    let startSeconds: UInt64
+    let startMicroseconds: UInt64
+}
+
+enum ProjectRunProcessSnapshotReader {
+    static func read(userID: uid_t) -> [ProjectRunProcessSnapshot]? {
+        guard let processes = allProcessIDs(userID: userID) else { return nil }
+        var snapshots: [ProjectRunProcessSnapshot] = []
+        for process in processes where process > 1 {
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            guard proc_pidinfo(process, PROC_PIDTBSDINFO, 0, &info, size) == size else {
+                continue
+            }
+            snapshots.append(ProjectRunProcessSnapshot(
+                processID: process,
+                userID: info.pbi_uid,
+                terminalDevice: info.e_tdev,
+                processGroup: pid_t(info.pbi_pgid),
+                startSeconds: info.pbi_start_tvsec,
+                startMicroseconds: info.pbi_start_tvusec
+            ))
+        }
+        return snapshots
+    }
+
+    private static func allProcessIDs(userID: uid_t) -> [pid_t]? {
+        let type = UInt32(PROC_UID_ONLY)
+        let typeInfo = UInt32(userID)
+        var byteCapacity = Int(proc_listpids(type, typeInfo, nil, 0)) + 32 * MemoryLayout<pid_t>.size
+        guard byteCapacity > 32 * MemoryLayout<pid_t>.size else { return nil }
+        for _ in 0..<3 {
+            var processes = [pid_t](
+                repeating: 0,
+                count: byteCapacity / MemoryLayout<pid_t>.size
+            )
+            let byteCount = processes.withUnsafeMutableBytes {
+                proc_listpids(type, typeInfo, $0.baseAddress, Int32($0.count))
+            }
+            guard byteCount > 0 else { return nil }
+            if byteCount < byteCapacity {
+                return Array(processes.prefix(Int(byteCount) / MemoryLayout<pid_t>.size))
+            }
+            byteCapacity *= 2
+        }
+        return nil
+    }
+}
+
+enum ProjectRunProcessOwnership {
+    static func processGroups(
+        in processes: [ProjectRunOwnedProcess],
+        userID: uid_t,
+        terminalDevice: UInt32
+    ) -> Set<pid_t> {
+        Set(processes.compactMap { process in
+            guard process.userID == userID,
+                  process.terminalDevice == terminalDevice,
+                  process.processGroup > 1 else { return nil }
+            return process.processGroup
+        })
+    }
+
+    static func revalidatedGroup(witnessedGroup: pid_t, currentGroup: pid_t) -> pid_t? {
+        witnessedGroup > 1 && currentGroup == witnessedGroup ? witnessedGroup : nil
+    }
+}
+
+final class ProjectRunPTYOwnershipToken {
+    let terminalDevice: UInt32
+    private let masterDescriptor: Int32
+
+    init?(masterDescriptor: Int32) {
+        guard masterDescriptor >= 0 else { return nil }
+        let descriptorFlags = fcntl(masterDescriptor, F_GETFD)
+        guard descriptorFlags >= 0,
+              fcntl(masterDescriptor, F_SETFD, descriptorFlags | FD_CLOEXEC) == 0 else { return nil }
+        let heldDescriptor = dup(masterDescriptor)
+        guard heldDescriptor >= 0 else { return nil }
+        guard fcntl(heldDescriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+            close(heldDescriptor)
+            return nil
+        }
+        guard let slaveName = ptsname(heldDescriptor) else {
+            close(heldDescriptor)
+            return nil
+        }
+        var metadata = stat()
+        guard lstat(slaveName, &metadata) == 0 else {
+            close(heldDescriptor)
+            return nil
+        }
+        let terminalDevice = UInt32(metadata.st_rdev)
+        guard terminalDevice > 0, terminalDevice != UInt32.max else {
+            close(heldDescriptor)
+            return nil
+        }
+        self.masterDescriptor = heldDescriptor
+        self.terminalDevice = terminalDevice
+    }
+
+    deinit {
+        close(masterDescriptor)
+    }
+}
+
+enum ProjectRunProcessIdentityState {
+    case current(processGroup: pid_t)
+    case gone
+    case uncertain
+}
+
+struct ProjectRunProcessIdentityToken {
+    let processID: pid_t
+    private let startSeconds: UInt64
+    private let startMicroseconds: UInt64
+
+    init?(processID: pid_t) {
+        guard let info = Self.info(for: processID) else { return nil }
+        self.init(processID: processID, info: info)
+    }
+
+    init(processID: pid_t, info: proc_bsdinfo) {
+        self.processID = processID
+        startSeconds = info.pbi_start_tvsec
+        startMicroseconds = info.pbi_start_tvusec
+    }
+
+    init(snapshot: ProjectRunProcessSnapshot) {
+        processID = snapshot.processID
+        startSeconds = snapshot.startSeconds
+        startMicroseconds = snapshot.startMicroseconds
+    }
+
+    var state: ProjectRunProcessIdentityState {
+        guard let info = Self.info(for: processID) else {
+            return Darwin.kill(processID, 0) != 0 && errno == ESRCH ? .gone : .uncertain
+        }
+        guard info.pbi_start_tvsec == startSeconds,
+              info.pbi_start_tvusec == startMicroseconds else { return .gone }
+        return .current(processGroup: pid_t(info.pbi_pgid))
+    }
+
+    func terminate() -> Bool {
+        switch state {
+        case .current: break
+        case .gone: return true
+        case .uncertain: return false
+        }
+        return Darwin.kill(processID, SIGKILL) == 0 || errno == ESRCH
+    }
+
+    private static func info(for processID: pid_t) -> proc_bsdinfo? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard processID > 1,
+              proc_pidinfo(processID, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return info
+    }
+}
+
 @MainActor
 protocol ProjectRunProcessEngine: AnyObject {
     var terminalView: NSView { get }
@@ -44,7 +240,7 @@ protocol ProjectRunProcessEngine: AnyObject {
         loginName: String,
         workingDirectory: String
     ) throws
-    func signalProcessGroups(_ signal: Int32)
+    func signalProcessGroups(_ signal: Int32) -> Bool
 }
 
 @MainActor
@@ -61,14 +257,18 @@ protocol ProjectRunScheduling {
     func schedule(after delay: Duration, _ action: @escaping () -> Void)
 }
 
-enum ProjectRunLaunchError: LocalizedError {
+enum ProjectRunLaunchError: LocalizedError, Equatable {
     case defaultLoginShellUnavailable
     case processDidNotStart
+    case processCouldNotBeContained
+    case previousProcessesStillRunning
 
     var errorDescription: String? {
         switch self {
         case .defaultLoginShellUnavailable: "Default Login Shell 不可用或不可执行"
         case .processDidNotStart: "PTY 进程启动失败"
+        case .processCouldNotBeContained: "PTY 所有权建立失败，启动进程未能安全终止"
+        case .previousProcessesStillRunning: "上一次运行仍有进程未退出"
         }
     }
 }
@@ -105,15 +305,32 @@ struct SwiftTermProjectRunEngineFactory: ProjectRunEngineFactory {
     }
 }
 
+private func projectRunOwnershipMonitorHandler(
+    userID: uid_t,
+    deliver: @escaping @MainActor @Sendable ([ProjectRunProcessSnapshot]?) -> Void
+) -> @Sendable () -> Void {
+    {
+        let snapshot = ProjectRunProcessSnapshotReader.read(userID: userID)
+        Task { @MainActor in
+            deliver(snapshot)
+        }
+    }
+}
+
 @MainActor
 final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preconcurrency LocalProcessTerminalViewDelegate {
     let terminal = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
     var terminalView: NSView { terminal }
     var onExit: ((Int32?) -> Void)?
     private var processMonitor: DispatchSourceProcess?
+    private var ownershipMonitor: DispatchSourceTimer?
+    private var ownershipMonitorGeneration = UUID()
     private var monitoredPID: pid_t?
     private var trackedProcessGroups: Set<pid_t> = []
-    private var trackedSessionID: pid_t?
+    private var ownershipToken: ProjectRunPTYOwnershipToken?
+    private var uncontainedProcess: ProjectRunProcessIdentityToken?
+    private var unresolvedProcessID: pid_t?
+    private var ownedGroupWitnesses: [pid_t: [pid_t: ProjectRunProcessIdentityToken]] = [:]
 
     override init() {
         super.init()
@@ -126,6 +343,29 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
         loginName: String,
         workingDirectory: String
     ) throws {
+        if let unresolvedProcessID {
+            guard Darwin.kill(unresolvedProcessID, 0) != 0, errno == ESRCH else {
+                throw ProjectRunLaunchError.previousProcessesStillRunning
+            }
+            self.unresolvedProcessID = nil
+        }
+        if let uncontainedProcess {
+            _ = uncontainedProcess.terminate()
+            guard case .gone = uncontainedProcess.state else {
+                throw ProjectRunLaunchError.previousProcessesStillRunning
+            }
+            self.uncontainedProcess = nil
+        }
+        if let ownershipToken {
+            guard let ownership = refreshOwnedProcessGroups(
+                onTerminal: ownershipToken.terminalDevice
+            ), ownership.groups.isEmpty, !ownership.isUncertain else {
+                throw ProjectRunLaunchError.previousProcessesStillRunning
+            }
+            self.ownershipToken = nil
+            trackedProcessGroups.removeAll()
+            ownedGroupWitnesses.removeAll()
+        }
         let previousPID = terminal.process.shellPid
         terminal.startProcess(
             executable: executable,
@@ -134,29 +374,58 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
             currentDirectory: workingDirectory
         )
         let pid = terminal.process.shellPid
-        guard pid > 0, pid != previousPID || terminal.process.running else {
+        guard pid > 1, pid != previousPID || terminal.process.running else {
             throw ProjectRunLaunchError.processDidNotStart
         }
+        let childProcessToken = ProjectRunProcessIdentityToken(processID: pid)
+        guard let ownershipToken = ProjectRunPTYOwnershipToken(
+            masterDescriptor: terminal.process.childfd
+        ) else {
+            guard let childProcessToken else {
+                if Darwin.kill(pid, 0) != 0, errno == ESRCH {
+                    throw ProjectRunLaunchError.processDidNotStart
+                }
+                unresolvedProcessID = pid
+                throw ProjectRunLaunchError.processCouldNotBeContained
+            }
+            uncontainedProcess = childProcessToken
+            _ = childProcessToken.terminate()
+            throw ProjectRunLaunchError.processCouldNotBeContained
+        }
         trackedProcessGroups = [pid]
-        trackedSessionID = pid
+        self.ownershipToken = ownershipToken
+        _ = refreshOwnedProcessGroups(onTerminal: ownershipToken.terminalDevice)
         monitor(pid)
+        monitorOwnership(ownershipToken)
     }
 
-    func signalProcessGroups(_ signal: Int32) {
+    func signalProcessGroups(_ signal: Int32) -> Bool {
+        if let unresolvedProcessID {
+            guard Darwin.kill(unresolvedProcessID, 0) != 0, errno == ESRCH else { return false }
+            self.unresolvedProcessID = nil
+            return true
+        }
+        if let uncontainedProcess {
+            return uncontainedProcess.terminate()
+        }
         let rootPID = terminal.process.shellPid
         if rootPID > 0 {
             trackedProcessGroups.formUnion(processGroups(rootedAt: rootPID))
         }
-        if let trackedSessionID, trackedSessionID > 0 {
-            trackedProcessGroups.formUnion(processGroups(inSession: trackedSessionID))
+        guard let ownershipToken,
+              let ownership = refreshOwnedProcessGroups(
+                  onTerminal: ownershipToken.terminalDevice
+              ) else {
+            return false
         }
-        for group in trackedProcessGroups {
-            Darwin.kill(-group, signal)
-        }
-        if signal == SIGKILL {
-            trackedProcessGroups.removeAll()
-            trackedSessionID = nil
-        }
+        let ownedProcessGroups = ownership.groups
+        trackedProcessGroups.formUnion(ownedProcessGroups)
+        let signaled = ProjectRunSignalTargets.signal(
+            signal,
+            requestedGroups: trackedProcessGroups,
+            ownedGroups: ownedProcessGroups
+        )
+        return signaled && !ownership.isUncertain
     }
 
     func processTerminated(source _: TerminalView, exitCode rawWaitStatus: Int32?) {
@@ -177,6 +446,30 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
             self?.finish(pid: pid, rawWaitStatus: status)
         }
         processMonitor = monitor
+        monitor.activate()
+    }
+
+    private func monitorOwnership(_ ownershipToken: ProjectRunPTYOwnershipToken) {
+        ownershipMonitor?.cancel()
+        let generation = UUID()
+        ownershipMonitorGeneration = generation
+        let terminalDevice = ownershipToken.terminalDevice
+        let userID = getuid()
+        let monitor = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        monitor.schedule(
+            deadline: .now(),
+            repeating: .milliseconds(250),
+            leeway: .milliseconds(50)
+        )
+        monitor.setEventHandler(handler: projectRunOwnershipMonitorHandler(userID: userID) {
+            [weak self] snapshot in
+                guard let self,
+                      self.ownershipMonitorGeneration == generation,
+                      self.ownershipToken?.terminalDevice == terminalDevice,
+                      let snapshot else { return }
+                _ = self.applyOwnedProcessSnapshot(snapshot, terminalDevice: terminalDevice)
+        })
+        ownershipMonitor = monitor
         monitor.activate()
     }
 
@@ -201,19 +494,60 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
         })
     }
 
-    private func processGroups(inSession sessionID: pid_t) -> Set<pid_t> {
-        let capacity = Int(proc_listallpids(nil, 0))
-        guard capacity > 0 else { return [] }
-        var processes = [pid_t](repeating: 0, count: capacity)
-        let count = processes.withUnsafeMutableBytes {
-            proc_listallpids($0.baseAddress, Int32($0.count))
+    private func refreshOwnedProcessGroups(
+        onTerminal terminalDevice: UInt32
+    ) -> (groups: Set<pid_t>, isUncertain: Bool)? {
+        guard let snapshot = ProjectRunProcessSnapshotReader.read(userID: getuid()) else { return nil }
+        return applyOwnedProcessSnapshot(snapshot, terminalDevice: terminalDevice)
+    }
+
+    private func applyOwnedProcessSnapshot(
+        _ snapshot: [ProjectRunProcessSnapshot],
+        terminalDevice: UInt32
+    ) -> (groups: Set<pid_t>, isUncertain: Bool) {
+        let ownedProcesses = snapshot.map {
+            ProjectRunOwnedProcess(
+                userID: $0.userID,
+                terminalDevice: $0.terminalDevice,
+                processGroup: $0.processGroup
+            )
         }
-        guard count > 0 else { return [] }
-        return Set(processes.prefix(Int(count)).compactMap { process in
-            guard process > 0, getsid(process) == sessionID else { return nil }
-            let group = getpgid(process)
-            return group > 0 ? group : nil
-        })
+        let attachedGroups = ProjectRunProcessOwnership.processGroups(
+            in: ownedProcesses,
+            userID: getuid(),
+            terminalDevice: terminalDevice
+        )
+        for process in snapshot {
+            let group = process.processGroup
+            guard attachedGroups.contains(group) else { continue }
+            ownedGroupWitnesses[group, default: [:]][process.processID] = ProjectRunProcessIdentityToken(
+                snapshot: process
+            )
+        }
+
+        var groups: Set<pid_t> = []
+        var isUncertain = false
+        var validatedWitnesses: [pid_t: [pid_t: ProjectRunProcessIdentityToken]] = [:]
+        for (ownedGroup, witnesses) in ownedGroupWitnesses {
+            for (processID, witness) in witnesses {
+                switch witness.state {
+                case let .current(processGroup):
+                    guard let group = ProjectRunProcessOwnership.revalidatedGroup(
+                        witnessedGroup: ownedGroup,
+                        currentGroup: processGroup
+                    ) else { continue }
+                    validatedWitnesses[group, default: [:]][processID] = witness
+                    groups.insert(group)
+                case .gone:
+                    continue
+                case .uncertain:
+                    validatedWitnesses[ownedGroup, default: [:]][processID] = witness
+                    isUncertain = true
+                }
+            }
+        }
+        ownedGroupWitnesses = validatedWitnesses
+        return (groups, isUncertain)
     }
 
     private func finish(pid: pid_t, rawWaitStatus: Int32?) {
@@ -221,6 +555,9 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
         monitoredPID = nil
         processMonitor?.cancel()
         processMonitor = nil
+        ownershipMonitorGeneration = UUID()
+        ownershipMonitor?.cancel()
+        ownershipMonitor = nil
         guard let rawWaitStatus else {
             onExit?(nil)
             return
@@ -368,17 +705,21 @@ final class ProjectRunCoordinator: ObservableObject {
 
     func stop(configurationID: String) {
         guard let session = sessions[configurationID], session.state.isLive else { return }
+        let isRetry = session.state == .stopping
         session.state = .stopping
-        session.pendingStopExitCode = nil
-        session.engine.signalProcessGroups(SIGINT)
+        if !isRetry {
+            session.pendingStopExitCode = nil
+        }
+        _ = session.engine.signalProcessGroups(SIGINT)
         objectWillChange.send()
         scheduler.schedule(after: .seconds(2)) { [weak self, weak session] in
             guard let self, let session, session.state == .stopping else { return }
-            session.engine.signalProcessGroups(SIGTERM)
+            _ = session.engine.signalProcessGroups(SIGTERM)
             self.scheduler.schedule(after: .seconds(2)) { [weak self, weak session] in
                 guard let self, let session, session.state == .stopping else { return }
-                session.engine.signalProcessGroups(SIGKILL)
-                session.state = .exited(session.pendingStopExitCode ?? 137)
+                if session.engine.signalProcessGroups(SIGKILL) {
+                    session.state = .exited(session.pendingStopExitCode ?? 137)
+                }
                 self.objectWillChange.send()
             }
         }
@@ -393,11 +734,20 @@ final class ProjectRunCoordinator: ObservableObject {
                 .filter { projectIDs.contains($0.projectID) }
                 .map(\.id)
         )
-        guard let summary = projectsModel.remove(projectIDs: projectIDs) else { return nil }
-        for configurationID in configurationIDs {
-            if let session = sessions[configurationID], session.state.isLive {
-                session.engine.signalProcessGroups(SIGKILL)
+        guard let summary = projectsModel.remove(projectIDs: projectIDs, afterPersist: {
+            var succeeded = true
+            for configurationID in configurationIDs {
+                guard let session = sessions[configurationID], session.state.isLive else { continue }
+                session.state = .stopping
+                if session.engine.signalProcessGroups(SIGKILL) {
+                    session.state = .exited(137)
+                } else {
+                    succeeded = false
+                }
             }
+            return succeeded
+        }) else { return nil }
+        for configurationID in configurationIDs {
             sessions.removeValue(forKey: configurationID)
         }
         defaults.set(Array(trustedRoots.subtracting(projectIDs)).sorted(), forKey: Self.trustedRootsKey)
@@ -405,12 +755,20 @@ final class ProjectRunCoordinator: ObservableObject {
         return summary
     }
 
-    func terminateAllForApplicationExit() {
-        for session in sessions.values {
-            session.engine.signalProcessGroups(SIGKILL)
+    func terminateAllForApplicationExit() -> Bool {
+        var succeeded = true
+        for session in sessions.values where session.state.isLive
+            && !session.engine.signalProcessGroups(SIGKILL) {
+            session.state = .stopping
+            succeeded = false
+        }
+        guard succeeded else {
+            objectWillChange.send()
+            return false
         }
         sessions.removeAll()
         objectWillChange.send()
+        return true
     }
 
     func closeTerminal(configurationID: String) {
@@ -458,8 +816,12 @@ final class ProjectRunCoordinator: ObservableObject {
                 session.pendingStopExitCode = exitCode
                 return
             }
-            session.engine.signalProcessGroups(SIGKILL)
-            session.state = .exited(exitCode ?? -1)
+            if session.engine.signalProcessGroups(SIGKILL) {
+                session.state = .exited(exitCode ?? -1)
+            } else {
+                session.state = .stopping
+                session.pendingStopExitCode = exitCode
+            }
             self.objectWillChange.send()
         }
         sessions[configurationID] = session
@@ -469,7 +831,12 @@ final class ProjectRunCoordinator: ObservableObject {
     private func reject(configurationID: String, error: Error) -> ProjectRunActionResult {
         let message = error.localizedDescription
         let session = sessions[configurationID] ?? makeSession(for: configurationID)
-        session.state = .launchFailed(message)
+        if let launchError = error as? ProjectRunLaunchError,
+           launchError == .previousProcessesStillRunning || launchError == .processCouldNotBeContained {
+            session.state = .stopping
+        } else {
+            session.state = .launchFailed(message)
+        }
         objectWillChange.send()
         return .rejected(message)
     }

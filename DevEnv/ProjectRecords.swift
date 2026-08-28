@@ -787,13 +787,21 @@ final class ProjectsViewModel: ObservableObject {
     }
 
     @discardableResult
-    func remove(projectIDs: Set<String>) -> ProjectRemovalSummary? {
+    func remove(
+        projectIDs: Set<String>,
+        afterPersist: () -> Bool = { true }
+    ) -> ProjectRemovalSummary? {
         guard !mutationsArePaused, !isScanning else { return nil }
         let previousDocument = document
         let summary = document.remove(projectIDs: projectIDs)
         guard summary.totalCount > 0 else { return summary }
         guard persist() else {
             document = previousDocument
+            return nil
+        }
+        guard afterPersist() else {
+            document = previousDocument
+            _ = persist()
             return nil
         }
         for projectID in projectIDs {

@@ -16,8 +16,8 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         super.init()
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        runCoordinator.terminateAllForApplicationExit()
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        runCoordinator.terminateAllForApplicationExit() ? .terminateNow : .terminateCancel
     }
 }
 

@@ -1221,7 +1221,6 @@ struct ContentView: View {
                         Button("停止", role: .destructive) {
                             runCoordinator.stop(configurationID: configuration.id)
                         }
-                        .disabled(session?.state == .stopping)
                         .accessibilityLabel("停止运行配置 \(configuration.name)")
                     } else {
                         Button(session == nil ? "运行" : "重新运行") {

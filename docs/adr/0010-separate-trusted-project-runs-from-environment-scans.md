@@ -9,5 +9,6 @@ Project Run Session 使用当前用户可用的 Default Login Shell 和 SwiftTer
 - Project Trust 只表示用户允许 DevEnv 在该 Project Root 中执行已核对的运行配置，不表示项目安全、健康或满足 Project Requirements。
 - 工作目录或 Default Login Shell 在后续启动时失效会直接导致 launch failed，不按旧快照继续执行，也不回退到其他 Shell。
 - 命令通过交互式登录 Shell 的单次 `-c` 调用执行；命令结束后 PTY 关闭并保留只读输出与退出码，不留下空闲通用 Shell。
-- 停止和 App 退出作用于独立进程组，避免 Project Run Session 的子进程脱离会话遗留。
+- 停止和 App 退出只向属于当前用户、仍绑定本次持有 PTY，或曾由该 PTY 明确见证且 PID 与启动时间身份仍匹配的进程组发信号，并始终排除 `<= 1` 与 App 自身进程组；不以登录 session 扫描推断所有权。
+- 进程若在被本次持有 PTY 明确见证前已完全脱离并重挂父进程，DevEnv 不再具备可安全验证的所有权，因此不会按登录 session、工作目录或命令文本猜测并发信号。
 - Project Run Coordinator 与终端缓冲由 App 持有：关闭窗口不终止会话，重开窗口接回同一状态；真正退出 App 时清空会话，下次启动只恢复已保存配置。
