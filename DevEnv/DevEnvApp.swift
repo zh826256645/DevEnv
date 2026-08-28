@@ -7,7 +7,11 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     let runCoordinator: ProjectRunCoordinator
 
     override convenience init() {
-        self.init(projectsModel: ProjectsViewModel(), runCoordinator: ProjectRunCoordinator())
+        let projectsModel = ProjectsViewModel()
+        self.init(
+            projectsModel: projectsModel,
+            runCoordinator: ProjectRunCoordinator(projectsModel: projectsModel)
+        )
     }
 
     init(projectsModel: ProjectsViewModel, runCoordinator: ProjectRunCoordinator) {

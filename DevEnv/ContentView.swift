@@ -547,7 +547,7 @@ struct ContentView: View {
 
                 Button {
                     if selectedPage?.usesProjectRecords == true {
-                        projectsModel.refreshProjects()
+                        runCoordinator.refreshProjects()
                     } else {
                         model.scan()
                     }
@@ -613,7 +613,7 @@ struct ContentView: View {
         .onChange(of: model.snapshot?.scannedAt) {
             readNoticeIdentities.removeAll()
             if selectedPage == .projects {
-                projectsModel.refreshRequirements(machineSnapshot: model.snapshot)
+                runCoordinator.refreshRequirements(machineSnapshot: model.snapshot)
             }
         }
         .sheet(isPresented: $isShowingSettingsExitConfirmation, onDismiss: {
@@ -646,10 +646,7 @@ struct ContentView: View {
             Button("取消", role: .cancel) {}
             Button("确认删除", role: .destructive) {
                 let projectIDs = pendingProjectRemovalIDs
-                let succeeded = runCoordinator.removeProjects(
-                    projectIDs: projectIDs,
-                    from: projectsModel
-                ) != nil
+                let succeeded = runCoordinator.removeProjects(projectIDs: projectIDs) != nil
                 pendingProjectRemovalIDs.removeAll()
                 guard succeeded else { return }
                 selectedProjectIDs.removeAll()
@@ -659,7 +656,7 @@ struct ContentView: View {
             }
         } message: {
             let summary = projectsModel.removalSummary(for: pendingProjectRemovalIDs)
-            let configurations = projectsModel.runConfigurations().filter {
+            let configurations = runCoordinator.runConfigurations().filter {
                 pendingProjectRemovalIDs.contains($0.projectID)
             }
             let activeSessionCount = configurations.filter {
@@ -684,7 +681,7 @@ struct ContentView: View {
         ) { configuration in
             Button("取消", role: .cancel) {}
             Button("删除", role: .destructive) {
-                if projectsModel.deleteRunConfiguration(configuration) {
+                if runCoordinator.deleteRunConfiguration(configuration) {
                     runCoordinator.closeTerminal(configurationID: configuration.id)
                     if selectedRunConfigurationID == configuration.id {
                         selectedRunConfigurationID = nil
@@ -914,11 +911,11 @@ struct ContentView: View {
         selectedPage = page
         if page == .projects, previousPage != .projects {
             projectsModel.enterProjects()
-            projectsModel.refreshRequirements(machineSnapshot: model.snapshot)
+            runCoordinator.refreshRequirements(machineSnapshot: model.snapshot)
             DispatchQueue.main.async { projectSearchIsFocused = true }
         }
         if page == .runs, previousPage != .runs {
-            projectsModel.refreshProjects()
+            runCoordinator.refreshProjects()
         }
         if page == .settings { settingsDraft = model.autoRefreshSettings }
     }
@@ -1120,7 +1117,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("运行")
                         .font(.title2.bold())
-                    Text("\(projectsModel.runConfigurations(projectID: runProjectFilterID).count) 个已保存运行配置")
+                    Text("\(runCoordinator.runConfigurations(projectID: runProjectFilterID).count) 个已保存运行配置")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -1151,7 +1148,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(28)
-            } else if projectsModel.records.isEmpty && projectsModel.runConfigurations().isEmpty {
+            } else if projectsModel.records.isEmpty && runCoordinator.runConfigurations().isEmpty {
                 ContentUnavailableView {
                     Label("尚未添加项目", systemImage: "folder.badge.plus")
                 } description: {
@@ -1160,8 +1157,8 @@ struct ContentView: View {
                     Button("前往项目页面") { selectPage(.projects) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if projectsModel.runConfigurations(projectID: runProjectFilterID).isEmpty
-                && projectsModel.runSuggestions(projectID: runProjectFilterID).isEmpty {
+            } else if runCoordinator.runConfigurations(projectID: runProjectFilterID).isEmpty
+                && runCoordinator.runSuggestions(projectID: runProjectFilterID).isEmpty {
                 ContentUnavailableView {
                     Label("没有运行配置", systemImage: "play.rectangle")
                 } description: {
@@ -1174,7 +1171,7 @@ struct ContentView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        let suggestions = projectsModel.runSuggestions(projectID: runProjectFilterID)
+                        let suggestions = runCoordinator.runSuggestions(projectID: runProjectFilterID)
                         if !suggestions.isEmpty {
                             GroupBox("运行建议（只读发现）") {
                                 VStack(spacing: 8) {
@@ -1192,7 +1189,7 @@ struct ContentView: View {
                                 .accessibilityLabel("项目操作失败，\(error)")
                         }
                         ForEach(runCoordinator.activeConfigurationsFirst(
-                            projectsModel.runConfigurations(projectID: runProjectFilterID)
+                            runCoordinator.runConfigurations(projectID: runProjectFilterID)
                         )) { configuration in
                             runConfigurationCard(configuration)
                         }
@@ -1265,6 +1262,11 @@ struct ContentView: View {
                         .font(.body.monospaced())
                         .textSelection(.enabled)
                 }
+                if runCoordinator.hasCommandDraft(configurationID: configuration.id) {
+                    Label("命令修改将在成功启动后保存", systemImage: "clock.arrow.circlepath")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("命令修改已暂存，将在成功启动后保存")
+                }
                 LabeledContent("工作目录") {
                     Text(configuration.workingDirectory)
                         .font(.body.monospaced())
@@ -1272,16 +1274,16 @@ struct ContentView: View {
                 }
                 if configuration.sourceIdentity != nil {
                     Label(
-                        projectsModel.isSuggestionSourceAvailable(configuration)
+                        runCoordinator.isSuggestionSourceAvailable(configuration)
                             ? "来源：项目声明"
                             : "来源不可用：项目声明已消失",
-                        systemImage: projectsModel.isSuggestionSourceAvailable(configuration)
+                        systemImage: runCoordinator.isSuggestionSourceAvailable(configuration)
                             ? "doc.text"
                             : "doc.badge.ellipsis"
                     )
-                    .foregroundStyle(projectsModel.isSuggestionSourceAvailable(configuration) ? Color.secondary : Color.orange)
+                    .foregroundStyle(runCoordinator.isSuggestionSourceAvailable(configuration) ? Color.secondary : Color.orange)
                     .accessibilityLabel(
-                        projectsModel.isSuggestionSourceAvailable(configuration)
+                        runCoordinator.isSuggestionSourceAvailable(configuration)
                             ? "来源为项目声明"
                             : "来源不可用，项目声明已消失"
                     )
@@ -1381,6 +1383,11 @@ struct ContentView: View {
                 Text("工作目录使用 Project Root 相对路径；根目录填写 .")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                if editingRunConfiguration != nil {
+                    Text("命令修改在成功启动后保存；启动失败时保留上次可用命令。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
                 if runConfigurationSaveAttempted, let error = projectsModel.operationError {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -1462,14 +1469,14 @@ struct ContentView: View {
     private func saveRunConfiguration() {
         runConfigurationSaveAttempted = true
         let succeeded = if let editingRunConfiguration {
-            projectsModel.updateRunConfiguration(
+            runCoordinator.updateRunConfiguration(
                 editingRunConfiguration,
                 name: runConfigurationName,
                 command: runConfigurationCommand,
                 workingDirectory: runConfigurationWorkingDirectory
             )
         } else {
-            projectsModel.createRunConfiguration(
+            runCoordinator.createRunConfiguration(
                 projectID: runConfigurationProjectID,
                 name: runConfigurationName,
                 command: runConfigurationCommand,
@@ -1550,7 +1557,7 @@ struct ContentView: View {
 
     private func projectListRow(_ project: ProjectRecord) -> some View {
         let summary = projectsModel.summary(for: project)
-        let hasActiveSession = projectsModel.runConfigurations(projectID: project.id).contains {
+        let hasActiveSession = runCoordinator.runConfigurations(projectID: project.id).contains {
             runCoordinator.session(for: $0.id)?.state.isLive == true
         }
         return HStack(alignment: .top, spacing: 10) {
@@ -1663,7 +1670,7 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     Text("最近发现：\(formatted(project.lastDiscoveredAt))")
                         .foregroundStyle(.secondary)
-                    Button("重新扫描", action: projectsModel.refreshProjects)
+                    Button("重新扫描", action: runCoordinator.refreshProjects)
                         .disabled(projectsModel.isScanning || projectsModel.isRefreshingProjects)
                     Spacer()
                     Label(

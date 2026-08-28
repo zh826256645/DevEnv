@@ -58,14 +58,14 @@ final class ProjectRunSessionsTests: XCTestCase {
         let secondRoot = directory.appendingPathComponent("second")
         try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
-        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let projectsModel = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
-            engineFactory: factory,
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         let first = ProjectRunConfiguration(
@@ -109,9 +109,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.run(sameProject, projectRoot: firstRoot.path), .started)
         let firstSession = try XCTUnwrap(coordinator.session(for: first.id))
 
-        let projectsModel = ProjectsViewModel(
-            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        )
         _ = ContentView(projectsModel: projectsModel, runCoordinator: coordinator)
         _ = ContentView(projectsModel: projectsModel, runCoordinator: coordinator)
 
@@ -124,14 +121,15 @@ final class ProjectRunSessionsTests: XCTestCase {
     }
 
     func testUnavailableProjectCannotCreateAProcessEngine() throws {
-        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: storageDirectory) }
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
-            engineFactory: factory,
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: storageDirectory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         var project = ProjectRecord(path: "/Volumes/Missing/project", discoveredAt: Date())
@@ -178,14 +176,11 @@ final class ProjectRunSessionsTests: XCTestCase {
         document.addDirect([firstRoot.path, secondRoot.path])
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
-        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
-            engineFactory: factory,
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         for configuration in [first, second] {
@@ -199,14 +194,14 @@ final class ProjectRunSessionsTests: XCTestCase {
         }
         factory.engines[0].signalSucceeds = false
 
-        XCTAssertNil(coordinator.removeProjects(projectIDs: [firstRoot.path], from: projectsModel))
+        XCTAssertNil(coordinator.removeProjects(projectIDs: [firstRoot.path]))
         XCTAssertEqual(factory.engines[0].signals, [SIGKILL])
         XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopping)
         XCTAssertEqual(Set(projectsModel.runConfigurations().map(\.id)), [first.id, second.id])
         XCTAssertEqual(Set(try store.load().runConfigurations.map(\.id)), [first.id, second.id])
         factory.engines[0].signalSucceeds = true
 
-        let summary = coordinator.removeProjects(projectIDs: [firstRoot.path], from: projectsModel)
+        let summary = coordinator.removeProjects(projectIDs: [firstRoot.path])
 
         XCTAssertEqual(summary, ProjectRemovalSummary(projectCount: 1, ignoredProjectCount: 0))
         XCTAssertEqual(factory.engines[0].signals, [SIGKILL, SIGKILL])
@@ -217,9 +212,9 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(try store.load().runConfigurations.map(\.id), [second.id])
 
         let relaunchedCoordinator = ProjectRunCoordinator(
-            engineFactory: FakeProjectRunEngineFactory(),
+            projectsModel: ProjectsViewModel(store: store),
+            makeEngine: FakeProjectRunEngineFactory().makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         guard case .needsTrust = relaunchedCoordinator.run(first, projectRoot: firstRoot.path) else {
@@ -247,14 +242,11 @@ final class ProjectRunSessionsTests: XCTestCase {
         document.addDirect([projectRoot.path])
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
-        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
-            engineFactory: factory,
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         guard case let .needsTrust(request) = coordinator.run(
@@ -267,15 +259,15 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.removeItem(at: storageDirectory)
         try Data().write(to: storageDirectory)
 
-        XCTAssertNil(coordinator.removeProjects(projectIDs: [projectRoot.path], from: projectsModel))
+        XCTAssertNil(coordinator.removeProjects(projectIDs: [projectRoot.path]))
         XCTAssertTrue(factory.engines[0].signals.isEmpty)
         XCTAssertNotNil(coordinator.session(for: configuration.id))
         XCTAssertEqual(projectsModel.runConfigurations(), [configuration])
 
         let relaunchedCoordinator = ProjectRunCoordinator(
-            engineFactory: FakeProjectRunEngineFactory(),
+            projectsModel: projectsModel,
+            makeEngine: FakeProjectRunEngineFactory().makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         XCTAssertEqual(
@@ -290,14 +282,13 @@ final class ProjectRunSessionsTests: XCTestCase {
         let projectRoot = directory.appendingPathComponent("project")
         let workingDirectory = projectRoot.appendingPathComponent("scripts")
         try FileManager.default.createDirectory(at: workingDirectory, withIntermediateDirectories: true)
-        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        let projectsModel = ProjectsViewModel(store: store)
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
-            engineFactory: factory,
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         let configuration = ProjectRunConfiguration(
@@ -334,13 +325,65 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         let relaunchedFactory = FakeProjectRunEngineFactory()
         let relaunchedCoordinator = ProjectRunCoordinator(
-            engineFactory: relaunchedFactory,
+            projectsModel: ProjectsViewModel(store: store),
+            makeEngine: relaunchedFactory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         XCTAssertEqual(relaunchedCoordinator.run(configuration, projectRoot: projectRoot.path), .started)
         XCTAssertEqual(relaunchedFactory.engines.count, 1)
+    }
+
+    func testCoordinatorPersistsTrustAndCommitsAnEditedCommandOnlyAfterLaunch() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        let configuration = ProjectRunConfiguration(
+            id: "run",
+            projectID: projectRoot.path,
+            name: "服务",
+            command: "printf old",
+            workingDirectory: "."
+        )
+        var document = ProjectRecordDocument(runConfigurations: [configuration])
+        document.addDirect([projectRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        let factory = FakeProjectRunEngineFactory()
+        factory.startError = FakeProjectRunError.launchFailed
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        let draft = "  printf new\n"
+
+        XCTAssertTrue(coordinator.updateRunConfiguration(
+            configuration,
+            name: configuration.name,
+            command: draft,
+            workingDirectory: configuration.workingDirectory
+        ))
+        let staged = try XCTUnwrap(coordinator.runConfigurations().first)
+        XCTAssertEqual(staged.command, draft)
+        XCTAssertEqual(try store.load().runConfigurations.first?.command, configuration.command)
+        guard case let .needsTrust(request) = coordinator.run(staged, projectRoot: projectRoot.path) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(request.command, draft)
+        guard case .rejected = coordinator.confirmTrustAndRun(request) else {
+            return XCTFail("启动失败必须保留 launch draft")
+        }
+        XCTAssertEqual(try store.load().trustedProjectRoots, [projectRoot.path])
+        XCTAssertEqual(try store.load().runConfigurations.first?.command, configuration.command)
+
+        factory.engines[0].startError = nil
+        XCTAssertEqual(coordinator.run(staged, projectRoot: projectRoot.path), .started)
+        XCTAssertEqual(try store.load().runConfigurations.first?.command, draft)
+        XCTAssertEqual(coordinator.runConfigurations().first?.command, draft)
     }
 
     func testStopEscalatesTheProcessGroupAndApplicationExitKillsLiveSessions() throws {
@@ -348,15 +391,14 @@ final class ProjectRunSessionsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let projectRoot = directory.appendingPathComponent("project")
         try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
-        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
         let factory = FakeProjectRunEngineFactory()
         let scheduler = FakeProjectRunScheduler()
         let coordinator = ProjectRunCoordinator(
-            engineFactory: factory,
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: scheduler
         )
         let first = ProjectRunConfiguration(
@@ -414,15 +456,14 @@ final class ProjectRunSessionsTests: XCTestCase {
         for item in [workingDirectory, outside] {
             try FileManager.default.createDirectory(at: item, withIntermediateDirectories: true)
         }
-        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
         let factory = FakeProjectRunEngineFactory()
         let shellProvider = FakeProjectRunShellProvider(path: "/bin/zsh")
         let coordinator = ProjectRunCoordinator(
-            engineFactory: factory,
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
             shellProvider: shellProvider,
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         let configuration = ProjectRunConfiguration(
@@ -524,13 +565,13 @@ final class ProjectRunSessionsTests: XCTestCase {
         let secondRoot = directory.appendingPathComponent("second")
         try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
-        let defaultsName = "ProjectRunSessionsTests-\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let projectsModel = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
         let coordinator = ProjectRunCoordinator(
-            engineFactory: SwiftTermProjectRunEngineFactory(),
+            projectsModel: projectsModel,
+            makeEngine: { SwiftTermProjectRunEngine() },
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            defaults: defaults,
             scheduler: FakeProjectRunScheduler()
         )
         let first = ProjectRunConfiguration(
@@ -582,9 +623,6 @@ final class ProjectRunSessionsTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let projectsModel = ProjectsViewModel(
-            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        )
         let firstHost = NSHostingController(rootView: AnyView(
             ProjectTerminalView(terminalView: firstTerminal).id(first.id)
         ))
@@ -708,11 +746,13 @@ final class ProjectRunSessionsTests: XCTestCase {
 }
 
 @MainActor
-private final class FakeProjectRunEngineFactory: ProjectRunEngineFactory {
+private final class FakeProjectRunEngineFactory {
     private(set) var engines: [FakeProjectRunEngine] = []
+    var startError: Error?
 
     func makeEngine() -> any ProjectRunProcessEngine {
         let engine = FakeProjectRunEngine()
+        engine.startError = startError
         engines.append(engine)
         return engine
     }
@@ -732,6 +772,7 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
     private(set) var launches: [Launch] = []
     private(set) var signals: [Int32] = []
     var signalSucceeds = true
+    var startError: Error?
 
     func start(
         executable: String,
@@ -739,6 +780,7 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
         loginName: String,
         workingDirectory: String
     ) throws {
+        if let startError { throw startError }
         launches.append(.init(
             executable: executable,
             arguments: arguments,
@@ -759,8 +801,14 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
 
 private enum FakeProjectRunError: LocalizedError {
     case unavailableShell
+    case launchFailed
 
-    var errorDescription: String? { "Default Login Shell 不可用" }
+    var errorDescription: String? {
+        switch self {
+        case .unavailableShell: "Default Login Shell 不可用"
+        case .launchFailed: "PTY 启动失败"
+        }
+    }
 }
 
 private final class FakeProjectRunShellProvider: ProjectRunShellProviding {

@@ -82,13 +82,14 @@ final class ProjectRecordsTests: XCTestCase {
 
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         let model = ProjectsViewModel(store: store)
+        let coordinator = ProjectRunCoordinator(projectsModel: model)
         model.addDirect([project])
         model.addDirect([nested])
-        for _ in 0 ..< 100 where model.isRefreshingProjects {
+        for _ in 0 ..< 100 where coordinator.isRefreshingProjects {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let suggestions = model.runSuggestions(projectID: project.path)
+        let suggestions = coordinator.runSuggestions(projectID: project.path)
         XCTAssertEqual(Set(suggestions.map(\.command)), [
             "uv run serve-api", "uv run inline", "uv run dotted",
             "cargo run --bin gated --features server",
@@ -98,40 +99,41 @@ final class ProjectRecordsTests: XCTestCase {
             "services/api", "services/dotted", "services/inline", "tools/runner",
         ])
         XCTAssertFalse(suggestions.contains { $0.command.contains("variable") || $0.command.contains("implicit") })
-        XCTAssertTrue(model.runSuggestions(projectID: directory.appendingPathComponent("missing").path).isEmpty)
+        XCTAssertTrue(coordinator.runSuggestions(projectID: directory.appendingPathComponent("missing").path).isEmpty)
         let firstIDs = suggestions.map(\.id)
 
-        model.refreshProjects()
-        for _ in 0 ..< 100 where model.isRefreshingProjects {
+        coordinator.refreshProjects()
+        for _ in 0 ..< 100 where coordinator.isRefreshingProjects {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertEqual(model.runSuggestions(projectID: project.path).map(\.id), firstIDs)
+        XCTAssertEqual(coordinator.runSuggestions(projectID: project.path).map(\.id), firstIDs)
 
-        let pythonSuggestion = try XCTUnwrap(model.runSuggestions(projectID: project.path).first {
+        let pythonSuggestion = try XCTUnwrap(coordinator.runSuggestions(projectID: project.path).first {
             $0.command == "uv run serve-api"
         })
-        let adopted = try XCTUnwrap(model.adoptSuggestion(pythonSuggestion))
-        XCTAssertFalse(model.runSuggestions(projectID: project.path).contains {
+        let adopted = try XCTUnwrap(coordinator.adoptSuggestion(pythonSuggestion))
+        XCTAssertFalse(coordinator.runSuggestions(projectID: project.path).contains {
             $0.sourceIdentity == adopted.sourceIdentity
         })
-        XCTAssertTrue(model.updateRunConfiguration(
+        XCTAssertTrue(coordinator.updateRunConfiguration(
             adopted,
             name: "API",
-            command: "uv run serve-api --reload",
+            command: adopted.command,
             workingDirectory: adopted.workingDirectory
         ))
         try FileManager.default.removeItem(at: python.appendingPathComponent("pyproject.toml"))
-        model.refreshProjects()
-        for _ in 0 ..< 100 where model.isRefreshingProjects {
+        coordinator.refreshProjects()
+        for _ in 0 ..< 100 where coordinator.isRefreshingProjects {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let saved = try XCTUnwrap(model.runConfigurations(projectID: project.path).first)
-        XCTAssertEqual(saved.command, "uv run serve-api --reload")
-        XCTAssertFalse(model.isSuggestionSourceAvailable(saved))
+        let saved = try XCTUnwrap(coordinator.runConfigurations(projectID: project.path).first)
+        XCTAssertEqual(saved.command, "uv run serve-api")
+        XCTAssertFalse(coordinator.isSuggestionSourceAvailable(saved))
     }
 
-    func testRunSuggestionsFilterNodeScriptsAndAddOneComposePerComponent() throws {
+    @MainActor
+    func testRunSuggestionsFilterNodeScriptsAndAddOneComposePerComponent() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -139,8 +141,15 @@ final class ProjectRecordsTests: XCTestCase {
             .write(to: root.appendingPathComponent("package.json"))
         try Data("services:\n  web:\n    image: nginx\n".utf8).write(to: root.appendingPathComponent("compose.yaml"))
 
-        let analysis = ProjectRequirementsScanner().scan(projectRoot: root)
-        let suggestions = ProjectRunSuggestionScanner().scan(projectRoot: root.path, analysis: analysis)
+        let model = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+        )
+        let coordinator = ProjectRunCoordinator(projectsModel: model)
+        model.addDirect([root])
+        for _ in 0 ..< 100 where coordinator.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let suggestions = coordinator.runSuggestions(projectID: root.path)
 
         XCTAssertEqual(suggestions.map(\.command), ["docker compose up", "pnpm run dev", "pnpm run start:web"])
         XCTAssertEqual(Set(suggestions.map(\.workingDirectory)), ["."])
@@ -350,6 +359,27 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(document.records.map(\.path), ["/Projects/alpha"])
         XCTAssertEqual(document.ignoredProjects.map(\.path), ["/Projects/beta"])
         XCTAssertTrue(document.runConfigurations.isEmpty)
+        XCTAssertTrue(document.trustedProjectRoots.isEmpty)
+    }
+
+    func testVersionTwoStoreMigratesProjectTrustIntoTheApplicationSupportDocument() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("project-records.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(#"""
+        {
+          "schemaVersion": 2,
+          "records": [],
+          "ignoredProjects": [],
+          "runConfigurations": []
+        }
+        """#.utf8).write(to: fileURL)
+
+        let document = try ProjectRecordStore(fileURL: fileURL).load()
+
+        XCTAssertEqual(document.schemaVersion, ProjectRecordDocument.currentSchemaVersion)
+        XCTAssertTrue(document.trustedProjectRoots.isEmpty)
     }
 
     @MainActor
@@ -374,7 +404,7 @@ final class ProjectRecordsTests: XCTestCase {
         let alphaRun = try XCTUnwrap(model.createRunConfiguration(
             projectID: alpha.path,
             name: "开发服务器",
-            command: "npm run dev",
+            command: "  npm run dev\n",
             workingDirectory: "scripts",
             sourceIdentity: "package.json#scripts.dev"
         ))
@@ -387,6 +417,7 @@ final class ProjectRecordsTests: XCTestCase {
 
         XCTAssertEqual(model.runConfigurations(projectID: alpha.path).map(\.id), [alphaRun.id])
         XCTAssertEqual(model.runConfigurations().map(\.id), [alphaRun.id, betaRun.id])
+        XCTAssertEqual(alphaRun.command, "  npm run dev\n")
         XCTAssertTrue(model.updateRunConfiguration(
             alphaRun,
             name: "开发",

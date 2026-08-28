@@ -243,11 +243,6 @@ protocol ProjectRunProcessEngine: AnyObject {
     func signalProcessGroups(_ signal: Int32) -> Bool
 }
 
-@MainActor
-protocol ProjectRunEngineFactory {
-    func makeEngine() -> any ProjectRunProcessEngine
-}
-
 protocol ProjectRunShellProviding {
     func defaultLoginShell() throws -> String
 }
@@ -295,13 +290,6 @@ struct MainProjectRunScheduler: ProjectRunScheduling {
             guard !Task.isCancelled else { return }
             action()
         }
-    }
-}
-
-@MainActor
-struct SwiftTermProjectRunEngineFactory: ProjectRunEngineFactory {
-    func makeEngine() -> any ProjectRunProcessEngine {
-        SwiftTermProjectRunEngine()
     }
 }
 
@@ -585,12 +573,7 @@ final class ProjectRunSession: ObservableObject, Identifiable {
 }
 
 struct ProjectRunWorkingDirectory {
-    static func resolve(projectRoot: String, relativePath: String) throws -> (relativePath: String, path: String) {
-        let storedRoot = URL(fileURLWithPath: projectRoot, isDirectory: true).standardizedFileURL
-        let root = storedRoot.resolvingSymlinksInPath().standardizedFileURL
-        guard root.path == storedRoot.path else {
-            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
-        }
+    static func normalize(relativePath: String) throws -> String {
         let trimmedPath = relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         let relativePath = trimmedPath.isEmpty ? "." : trimmedPath
         guard !NSString(string: relativePath).isAbsolutePath else {
@@ -599,6 +582,16 @@ struct ProjectRunWorkingDirectory {
         guard !relativePath.split(separator: "/", omittingEmptySubsequences: false).contains("..") else {
             throw ProjectRunConfigurationError.workingDirectoryOutsideProject
         }
+        return relativePath
+    }
+
+    static func resolve(projectRoot: String, relativePath: String) throws -> (relativePath: String, path: String) {
+        let storedRoot = URL(fileURLWithPath: projectRoot, isDirectory: true).standardizedFileURL
+        let root = storedRoot.resolvingSymlinksInPath().standardizedFileURL
+        guard root.path == storedRoot.path else {
+            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
+        }
+        let relativePath = try normalize(relativePath: relativePath)
         let unresolved = root.appendingPathComponent(relativePath, isDirectory: true).standardizedFileURL
         guard unresolved.path == root.path || unresolved.path.hasPrefix(root.path + "/") else {
             throw ProjectRunConfigurationError.workingDirectoryOutsideProject
@@ -625,31 +618,120 @@ struct ProjectRunWorkingDirectory {
 final class ProjectRunCoordinator: ObservableObject {
     @Published private(set) var sessions: [String: ProjectRunSession] = [:]
 
-    private static let trustedRootsKey = "trustedProjectRunRoots"
-    private let engineFactory: any ProjectRunEngineFactory
+    private let projectsModel: ProjectsViewModel
+    private let makeEngine: () -> any ProjectRunProcessEngine
     private let shellProvider: any ProjectRunShellProviding
-    private let defaults: UserDefaults
     private let scheduler: any ProjectRunScheduling
+    private var commandDrafts: [String: String] = [:]
 
     init(
-        engineFactory: any ProjectRunEngineFactory,
+        projectsModel: ProjectsViewModel,
+        makeEngine: @escaping () -> any ProjectRunProcessEngine,
         shellProvider: any ProjectRunShellProviding,
-        defaults: UserDefaults = .standard,
         scheduler: any ProjectRunScheduling
     ) {
-        self.engineFactory = engineFactory
+        self.projectsModel = projectsModel
+        self.makeEngine = makeEngine
         self.shellProvider = shellProvider
-        self.defaults = defaults
         self.scheduler = scheduler
     }
 
-    convenience init(defaults: UserDefaults = .standard) {
+    convenience init(projectsModel: ProjectsViewModel) {
         self.init(
-            engineFactory: SwiftTermProjectRunEngineFactory(),
+            projectsModel: projectsModel,
+            makeEngine: { SwiftTermProjectRunEngine() },
             shellProvider: LiveProjectRunShellProvider(),
-            defaults: defaults,
             scheduler: MainProjectRunScheduler()
         )
+    }
+
+    func runConfigurations(projectID: String? = nil) -> [ProjectRunConfiguration] {
+        projectsModel.runConfigurations(projectID: projectID).map { configuration in
+            guard let command = commandDrafts[configuration.id] else { return configuration }
+            var draft = configuration
+            draft.command = command
+            return draft
+        }
+    }
+
+    func runSuggestions(projectID: String? = nil) -> [ProjectRunSuggestion] {
+        projectsModel.runSuggestions(projectID: projectID)
+    }
+
+    var isRefreshingProjects: Bool {
+        projectsModel.isRefreshingProjects
+    }
+
+    func refreshProjects() {
+        projectsModel.refreshProjects()
+        objectWillChange.send()
+    }
+
+    func isSuggestionSourceAvailable(_ configuration: ProjectRunConfiguration) -> Bool {
+        projectsModel.isSuggestionSourceAvailable(configuration)
+    }
+
+    @discardableResult
+    func adoptSuggestion(_ suggestion: ProjectRunSuggestion) -> ProjectRunConfiguration? {
+        projectsModel.adoptSuggestion(suggestion)
+    }
+
+    @discardableResult
+    func createRunConfiguration(
+        projectID: String,
+        name: String,
+        command: String,
+        workingDirectory: String,
+        sourceIdentity: String? = nil
+    ) -> ProjectRunConfiguration? {
+        projectsModel.createRunConfiguration(
+            projectID: projectID,
+            name: name,
+            command: command,
+            workingDirectory: workingDirectory,
+            sourceIdentity: sourceIdentity
+        )
+    }
+
+    @discardableResult
+    func updateRunConfiguration(
+        _ configuration: ProjectRunConfiguration,
+        name: String,
+        command: String,
+        workingDirectory: String
+    ) -> Bool {
+        guard let remembered = projectsModel.runConfigurations().first(where: { $0.id == configuration.id }),
+              projectsModel.updateRunConfiguration(
+                  remembered,
+                  name: name,
+                  command: command,
+                  workingDirectory: workingDirectory,
+                  rememberCommand: false
+              ) else { return false }
+        if command == remembered.command {
+            commandDrafts.removeValue(forKey: configuration.id)
+        } else {
+            commandDrafts[configuration.id] = command
+        }
+        objectWillChange.send()
+        return true
+    }
+
+    @discardableResult
+    func deleteRunConfiguration(_ configuration: ProjectRunConfiguration) -> Bool {
+        guard projectsModel.deleteRunConfiguration(configuration) else { return false }
+        commandDrafts.removeValue(forKey: configuration.id)
+        objectWillChange.send()
+        return true
+    }
+
+    func refreshRequirements(machineSnapshot: MachineSnapshot?) {
+        projectsModel.refreshRequirements(machineSnapshot: machineSnapshot)
+        objectWillChange.send()
+    }
+
+    func hasCommandDraft(configurationID: String) -> Bool {
+        commandDrafts[configurationID] != nil
     }
 
     func session(for configurationID: String) -> ProjectRunSession? {
@@ -689,7 +771,7 @@ final class ProjectRunCoordinator: ObservableObject {
                 command: configuration.command,
                 workingDirectory: directory.path
             )
-            guard trustedRoots.contains(projectRoot) else { return .needsTrust(request) }
+            guard projectsModel.isProjectRunTrusted(projectRoot) else { return .needsTrust(request) }
             return launch(request)
         } catch {
             return reject(configurationID: configuration.id, error: error)
@@ -697,9 +779,9 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func confirmTrustAndRun(_ request: ProjectRunTrustRequest) -> ProjectRunActionResult {
-        var roots = trustedRoots
-        roots.insert(request.projectRoot)
-        defaults.set(Array(roots).sorted(), forKey: Self.trustedRootsKey)
+        guard projectsModel.trustProjectRunRoot(request.projectRoot) else {
+            return .rejected(projectsModel.operationError ?? "Project Trust 保存失败")
+        }
         return launch(request)
     }
 
@@ -726,8 +808,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func removeProjects(
-        projectIDs: Set<String>,
-        from projectsModel: ProjectsViewModel
+        projectIDs: Set<String>
     ) -> ProjectRemovalSummary? {
         let configurationIDs = Set(
             projectsModel.runConfigurations()
@@ -749,8 +830,8 @@ final class ProjectRunCoordinator: ObservableObject {
         }) else { return nil }
         for configurationID in configurationIDs {
             sessions.removeValue(forKey: configurationID)
+            commandDrafts.removeValue(forKey: configurationID)
         }
-        defaults.set(Array(trustedRoots.subtracting(projectIDs)).sorted(), forKey: Self.trustedRootsKey)
         objectWillChange.send()
         return summary
     }
@@ -776,10 +857,6 @@ final class ProjectRunCoordinator: ObservableObject {
         sessions.removeValue(forKey: configurationID)
     }
 
-    private var trustedRoots: Set<String> {
-        Set(defaults.stringArray(forKey: Self.trustedRootsKey) ?? [])
-    }
-
     private func launch(_ request: ProjectRunTrustRequest) -> ProjectRunActionResult {
         guard sessions[request.configuration.id]?.state.isLive != true else {
             return .rejected("该运行配置已有活动会话")
@@ -801,6 +878,15 @@ final class ProjectRunCoordinator: ObservableObject {
             )
             session.lastSuccessfulCommand = request.configuration.command
             session.state = .running
+            if commandDrafts[request.configuration.id] != nil,
+               projectsModel.updateRunConfiguration(
+                   request.configuration,
+                   name: request.configuration.name,
+                   command: request.configuration.command,
+                   workingDirectory: request.configuration.workingDirectory
+               ) {
+                commandDrafts.removeValue(forKey: request.configuration.id)
+            }
             objectWillChange.send()
             return .started
         } catch {
@@ -809,7 +895,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     private func makeSession(for configurationID: String) -> ProjectRunSession {
-        let session = ProjectRunSession(configurationID: configurationID, engine: engineFactory.makeEngine())
+        let session = ProjectRunSession(configurationID: configurationID, engine: makeEngine())
         session.engine.onExit = { [weak self, weak session] exitCode in
             guard let self, let session else { return }
             if session.state == .stopping {

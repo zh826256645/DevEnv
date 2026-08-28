@@ -472,26 +472,29 @@ struct ProjectRunSuggestionScanner: Sendable {
 }
 
 struct ProjectRecordDocument: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
 
     let schemaVersion: Int
     var records: [ProjectRecord]
     var ignoredProjects: [IgnoredProject]
     var runConfigurations: [ProjectRunConfiguration]
+    var trustedProjectRoots: [String]
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, records, ignoredProjects, runConfigurations
+        case schemaVersion, records, ignoredProjects, runConfigurations, trustedProjectRoots
     }
 
     init(
         records: [ProjectRecord] = [],
         ignoredProjects: [IgnoredProject] = [],
-        runConfigurations: [ProjectRunConfiguration] = []
+        runConfigurations: [ProjectRunConfiguration] = [],
+        trustedProjectRoots: [String] = []
     ) {
         schemaVersion = Self.currentSchemaVersion
         self.records = records
         self.ignoredProjects = ignoredProjects
         self.runConfigurations = runConfigurations
+        self.trustedProjectRoots = trustedProjectRoots
     }
 
     init(from decoder: Decoder) throws {
@@ -503,6 +506,9 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         runConfigurations = storedSchemaVersion == 1
             ? []
             : try values.decode([ProjectRunConfiguration].self, forKey: .runConfigurations)
+        trustedProjectRoots = storedSchemaVersion < 3
+            ? []
+            : try values.decode([String].self, forKey: .trustedProjectRoots)
     }
 
     mutating func mergeDiscovered(
@@ -563,6 +569,7 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         records.removeAll { projectIDs.contains($0.id) }
         ignoredProjects.removeAll { projectIDs.contains($0.id) }
         runConfigurations.removeAll { projectIDs.contains($0.projectID) }
+        trustedProjectRoots.removeAll { projectIDs.contains($0) }
         for project in projects where !ignoredPaths.contains(project.id) {
             ignoredProjects.append(IgnoredProject(
                 path: project.id,
@@ -997,6 +1004,20 @@ final class ProjectsViewModel: ObservableObject {
         return suggestionStore[configuration.projectID]?.contains { $0.sourceIdentity == sourceIdentity } == true
     }
 
+    func isProjectRunTrusted(_ projectRoot: String) -> Bool {
+        document.trustedProjectRoots.contains(projectRoot)
+    }
+
+    @discardableResult
+    func trustProjectRunRoot(_ projectRoot: String) -> Bool {
+        guard !mutationsArePaused else { return false }
+        guard !isProjectRunTrusted(projectRoot) else { return true }
+        return applyDocumentChange {
+            $0.trustedProjectRoots.append(projectRoot)
+            $0.trustedProjectRoots.sort()
+        }
+    }
+
     @discardableResult
     func adoptSuggestion(_ suggestion: ProjectRunSuggestion) -> ProjectRunConfiguration? {
         guard !document.runConfigurations.contains(where: {
@@ -1035,7 +1056,7 @@ final class ProjectsViewModel: ObservableObject {
                 workingDirectory: input.workingDirectory,
                 sourceIdentity: sourceIdentity?.isEmpty == false ? sourceIdentity : nil
             )
-            guard applyRunConfigurationChange({ $0.runConfigurations.append(configuration) }) else { return nil }
+            guard applyDocumentChange({ $0.runConfigurations.append(configuration) }) else { return nil }
             resultMessage = "已创建运行配置“\(configuration.name)”"
             return configuration
         } catch {
@@ -1049,7 +1070,8 @@ final class ProjectsViewModel: ObservableObject {
         _ configuration: ProjectRunConfiguration,
         name: String,
         command: String,
-        workingDirectory: String
+        workingDirectory: String,
+        rememberCommand: Bool = true
     ) -> Bool {
         guard !mutationsArePaused else { return false }
         do {
@@ -1068,11 +1090,11 @@ final class ProjectsViewModel: ObservableObject {
                 id: existing.id,
                 projectID: existing.projectID,
                 name: input.name,
-                command: input.command,
+                command: rememberCommand ? input.command : existing.command,
                 workingDirectory: input.workingDirectory,
                 sourceIdentity: existing.sourceIdentity
             )
-            guard applyRunConfigurationChange({ $0.runConfigurations[index] = updated }) else { return false }
+            guard applyDocumentChange({ $0.runConfigurations[index] = updated }) else { return false }
             resultMessage = "已更新运行配置“\(updated.name)”"
             return true
         } catch {
@@ -1085,7 +1107,7 @@ final class ProjectsViewModel: ObservableObject {
     func deleteRunConfiguration(_ configuration: ProjectRunConfiguration) -> Bool {
         guard !mutationsArePaused,
               document.runConfigurations.contains(where: { $0.id == configuration.id }) else { return false }
-        guard applyRunConfigurationChange({ document in
+        guard applyDocumentChange({ document in
             document.runConfigurations.removeAll { $0.id == configuration.id }
         }) else { return false }
         resultMessage = "已删除运行配置“\(configuration.name)”"
@@ -1325,16 +1347,10 @@ final class ProjectsViewModel: ObservableObject {
         }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw ProjectRunConfigurationError.nameRequired }
-        let command = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !command.isEmpty else { throw ProjectRunConfigurationError.commandRequired }
-        let trimmedDirectory = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-        let relativePath = trimmedDirectory.isEmpty ? "." : trimmedDirectory
-        guard !NSString(string: relativePath).isAbsolutePath else {
-            throw ProjectRunConfigurationError.workingDirectoryMustBeRelative
+        guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ProjectRunConfigurationError.commandRequired
         }
-        guard !relativePath.split(separator: "/", omittingEmptySubsequences: false).contains("..") else {
-            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
-        }
+        let relativePath = try ProjectRunWorkingDirectory.normalize(relativePath: workingDirectory)
         var projectRootIsDirectory: ObjCBool = false
         let projectRootIsAvailable = FileManager.default.fileExists(
             atPath: project.path,
@@ -1350,7 +1366,7 @@ final class ProjectsViewModel: ObservableObject {
         return (name, command, directory.relativePath)
     }
 
-    private func applyRunConfigurationChange(
+    private func applyDocumentChange(
         _ change: (inout ProjectRecordDocument) -> Void
     ) -> Bool {
         operationError = nil
