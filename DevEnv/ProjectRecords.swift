@@ -5,6 +5,10 @@ enum ProjectAvailability: Equatable, Sendable {
     case unknown
     case available
     case unavailable(String)
+
+    var isUnavailable: Bool {
+        if case .unavailable = self { true } else { false }
+    }
 }
 
 enum ProjectRootBoundary: String, Codable, Equatable, Sendable {
@@ -923,32 +927,11 @@ final class ProjectsViewModel: ObservableObject {
         if relativePath == existingWorkingDirectory, !projectRootIsAvailable {
             return (name, command, relativePath)
         }
-        let root = URL(fileURLWithPath: project.path, isDirectory: true)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-            .standardizedFileURL
-        let unresolvedDirectory = root
-            .appendingPathComponent(relativePath, isDirectory: true)
-            .standardizedFileURL
-        guard unresolvedDirectory.path == root.path
-                || unresolvedDirectory.path.hasPrefix(root.path + "/") else {
-            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
-        }
-        let directory = unresolvedDirectory.resolvingSymlinksInPath().standardizedFileURL
-        guard directory.path == root.path || directory.path.hasPrefix(root.path + "/") else {
-            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
-        }
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) else {
-            throw ProjectRunConfigurationError.workingDirectoryMissing
-        }
-        guard isDirectory.boolValue else {
-            throw ProjectRunConfigurationError.workingDirectoryNotDirectory
-        }
-        let normalizedDirectory = directory.path == root.path
-            ? "."
-            : String(directory.path.dropFirst(root.path.count + 1))
-        return (name, command, normalizedDirectory)
+        let directory = try ProjectRunWorkingDirectory.resolve(
+            projectRoot: project.path,
+            relativePath: relativePath
+        )
+        return (name, command, directory.relativePath)
     }
 
     private func applyRunConfigurationChange(

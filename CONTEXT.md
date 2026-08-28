@@ -32,6 +32,14 @@ _Avoid_: Project Snapshot, Project Files
 DevEnv 保存、归属于一个 Project Record 的运行意图，包含稳定身份、名称、命令、Project Root 相对工作目录和可选来源身份；它不是 Project Requirement 或 Project Requirements Summary，不表示项目可运行，也不执行命令。
 _Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
 
+**Project Run Suggestion**:
+DevEnv 从项目声明中只读识别、可由用户选择保存为 Project Run Configuration 的候选运行意图；它不会自动执行，也不表示项目可信或可运行。
+_Avoid_: Auto Run, Project Requirement, Runnable Status
+
+**Project Run Session**:
+用户从已保存的 Project Run Configuration 显式启动、仅存在于当前 App 进程中的交互式 PTY 会话；它保留本次进程状态、内存中的终端输出和退出码，但不持久化为 Project Record 或 Machine Snapshot。
+_Avoid_: Shell Session, Terminal Application, Machine Snapshot
+
 **Ignored Project**:
 用户从 DevEnv 删除后不再由 Project Search Root 自动恢复的 Project Root；直接重新添加该目录或由用户恢复时解除忽略。
 _Avoid_: Deleted Project, Unavailable Project
