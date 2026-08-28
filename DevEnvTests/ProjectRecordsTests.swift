@@ -2,6 +2,153 @@ import XCTest
 @testable import DevEnv
 
 final class ProjectRecordsTests: XCTestCase {
+    @MainActor
+    func testPythonAndCargoRunSuggestionsStayStaticAndFollowProjectBoundaries() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let project = directory.appendingPathComponent("project")
+        let python = project.appendingPathComponent("services/api")
+        let cargo = project.appendingPathComponent("tools/runner")
+        let ambiguous = project.appendingPathComponent("services/ambiguous")
+        let inline = project.appendingPathComponent("services/inline")
+        let dotted = project.appendingPathComponent("services/dotted")
+        let duplicate = project.appendingPathComponent("services/duplicate")
+        let implicit = project.appendingPathComponent("tools/implicit/src")
+        let nested = project.appendingPathComponent("nested/project")
+        for item in [python, cargo, ambiguous, inline, dotted, duplicate, implicit, nested] {
+            try FileManager.default.createDirectory(at: item, withIntermediateDirectories: true)
+        }
+        try Data("""
+        [project]
+        name = "api"
+        [project.scripts] # statically declared commands
+        "serve-api" = "api.main:run"
+        variable = "${MODULE}:run"
+        [tool.uv]
+        required-version = ">=0.8"
+        """.utf8).write(to: python.appendingPathComponent("pyproject.toml"))
+        try Data().write(to: python.appendingPathComponent("uv.lock"))
+        try Data("""
+        [[bin]]
+        name = "server"
+        path = "src/server.rs"
+        [[bin]]
+        name = "worker"
+        path = "src/worker.rs"
+        [[bin]]
+        name = "gated"
+        required-features = ["server"]
+        """.utf8).write(to: cargo.appendingPathComponent("Cargo.toml"))
+        try Data("""
+        [project]
+        dynamic = ["scripts"]
+        [project.scripts]
+        serve = "ambiguous:run"
+        """.utf8).write(to: ambiguous.appendingPathComponent("pyproject.toml"))
+        try Data().write(to: ambiguous.appendingPathComponent("uv.lock"))
+        try Data("""
+        [project]
+        scripts = { inline = "inline:run" }
+        [tool.uv]
+        required-version = ">=0.8"
+        """.utf8).write(to: inline.appendingPathComponent("pyproject.toml"))
+        try Data().write(to: inline.appendingPathComponent("uv.lock"))
+        try Data("""
+        project.scripts.dotted = "dotted:run"
+        [tool.uv]
+        required-version = ">=0.8"
+        """.utf8).write(to: dotted.appendingPathComponent("pyproject.toml"))
+        try Data().write(to: dotted.appendingPathComponent("uv.lock"))
+        try Data("""
+        [project]
+        scripts.same = "duplicate:first"
+        scripts.same = "duplicate:second"
+        scripts.other = "duplicate:other"
+        scripts = { inline = "duplicate:inline" }
+        [tool.uv]
+        required-version = ">=0.8"
+        """.utf8).write(to: duplicate.appendingPathComponent("pyproject.toml"))
+        try Data().write(to: duplicate.appendingPathComponent("uv.lock"))
+        try Data("[package]\nname = \"implicit\"\n".utf8)
+            .write(to: implicit.deletingLastPathComponent().appendingPathComponent("Cargo.toml"))
+        try Data().write(to: implicit.appendingPathComponent("main.rs"))
+        try Data("""
+        [project.scripts]
+        hidden = "nested:run"
+        [tool.uv]
+        required-version = ">=0.8"
+        """.utf8).write(to: nested.appendingPathComponent("pyproject.toml"))
+        try Data().write(to: nested.appendingPathComponent("uv.lock"))
+
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        let model = ProjectsViewModel(store: store)
+        model.addDirect([project])
+        model.addDirect([nested])
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let suggestions = model.runSuggestions(projectID: project.path)
+        XCTAssertEqual(Set(suggestions.map(\.command)), [
+            "uv run serve-api", "uv run inline", "uv run dotted",
+            "cargo run --bin gated --features server",
+            "cargo run --bin server", "cargo run --bin worker",
+        ])
+        XCTAssertEqual(Set(suggestions.map(\.workingDirectory)), [
+            "services/api", "services/dotted", "services/inline", "tools/runner",
+        ])
+        XCTAssertFalse(suggestions.contains { $0.command.contains("variable") || $0.command.contains("implicit") })
+        XCTAssertTrue(model.runSuggestions(projectID: directory.appendingPathComponent("missing").path).isEmpty)
+        let firstIDs = suggestions.map(\.id)
+
+        model.refreshProjects()
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.runSuggestions(projectID: project.path).map(\.id), firstIDs)
+
+        let pythonSuggestion = try XCTUnwrap(model.runSuggestions(projectID: project.path).first {
+            $0.command == "uv run serve-api"
+        })
+        let adopted = try XCTUnwrap(model.adoptSuggestion(pythonSuggestion))
+        XCTAssertFalse(model.runSuggestions(projectID: project.path).contains {
+            $0.sourceIdentity == adopted.sourceIdentity
+        })
+        XCTAssertTrue(model.updateRunConfiguration(
+            adopted,
+            name: "API",
+            command: "uv run serve-api --reload",
+            workingDirectory: adopted.workingDirectory
+        ))
+        try FileManager.default.removeItem(at: python.appendingPathComponent("pyproject.toml"))
+        model.refreshProjects()
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let saved = try XCTUnwrap(model.runConfigurations(projectID: project.path).first)
+        XCTAssertEqual(saved.command, "uv run serve-api --reload")
+        XCTAssertFalse(model.isSuggestionSourceAvailable(saved))
+    }
+
+    func testRunSuggestionsFilterNodeScriptsAndAddOneComposePerComponent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"name":"demo","packageManager":"pnpm@9","scripts":{"dev":"vite","start:web":"vite","build":"x","test":"x","predev":"x"}}"#.utf8)
+            .write(to: root.appendingPathComponent("package.json"))
+        try Data("services:\n  web:\n    image: nginx\n".utf8).write(to: root.appendingPathComponent("compose.yaml"))
+
+        let analysis = ProjectRequirementsScanner().scan(projectRoot: root)
+        let suggestions = ProjectRunSuggestionScanner().scan(projectRoot: root.path, analysis: analysis)
+
+        XCTAssertEqual(suggestions.map(\.command), ["docker compose up", "pnpm run dev", "pnpm run start:web"])
+        XCTAssertEqual(Set(suggestions.map(\.workingDirectory)), ["."])
+        XCTAssertEqual(Set(suggestions.map(\.sourceIdentity)), [
+            "compose.yaml#compose", "package.json#scripts.dev", "package.json#scripts.start:web"
+        ])
+    }
+
     func testBatchDiscoveryFindsProjectRootsAndSkipsExcludedTreesAndSymlinks() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

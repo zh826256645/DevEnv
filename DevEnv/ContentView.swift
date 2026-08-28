@@ -503,6 +503,7 @@ struct ContentView: View {
     @State private var runConfigurationCommand = ""
     @State private var runConfigurationWorkingDirectory = "."
     @State private var runConfigurationSaveAttempted = false
+    @State private var runConfigurationSourceIdentity: String?
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
     @State private var pendingProjectRunTrust: ProjectRunTrustRequest?
     @State private var selectedRunConfigurationID: String?
@@ -1159,7 +1160,8 @@ struct ContentView: View {
                     Button("前往项目页面") { selectPage(.projects) }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if projectsModel.runConfigurations(projectID: runProjectFilterID).isEmpty {
+            } else if projectsModel.runConfigurations(projectID: runProjectFilterID).isEmpty
+                && projectsModel.runSuggestions(projectID: runProjectFilterID).isEmpty {
                 ContentUnavailableView {
                     Label("没有运行配置", systemImage: "play.rectangle")
                 } description: {
@@ -1172,6 +1174,17 @@ struct ContentView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
+                        let suggestions = projectsModel.runSuggestions(projectID: runProjectFilterID)
+                        if !suggestions.isEmpty {
+                            GroupBox("运行建议（只读发现）") {
+                                VStack(spacing: 8) {
+                                    ForEach(suggestions) { suggestion in
+                                        runSuggestionRow(suggestion)
+                                    }
+                                }
+                                .padding(4)
+                            }
+                        }
                         if let error = projectsModel.operationError {
                             Label("项目操作失败：\(error)", systemImage: "exclamationmark.triangle.fill")
                                 .foregroundStyle(.orange)
@@ -1256,6 +1269,22 @@ struct ContentView: View {
                     Text(configuration.workingDirectory)
                         .font(.body.monospaced())
                         .textSelection(.enabled)
+                }
+                if configuration.sourceIdentity != nil {
+                    Label(
+                        projectsModel.isSuggestionSourceAvailable(configuration)
+                            ? "来源：项目声明"
+                            : "来源不可用：项目声明已消失",
+                        systemImage: projectsModel.isSuggestionSourceAvailable(configuration)
+                            ? "doc.text"
+                            : "doc.badge.ellipsis"
+                    )
+                    .foregroundStyle(projectsModel.isSuggestionSourceAvailable(configuration) ? Color.secondary : Color.orange)
+                    .accessibilityLabel(
+                        projectsModel.isSuggestionSourceAvailable(configuration)
+                            ? "来源为项目声明"
+                            : "来源不可用，项目声明已消失"
+                    )
                 }
                 projectRunState(session?.state ?? .inactive)
                 if let session, selectedRunConfigurationID == configuration.id {
@@ -1385,6 +1414,37 @@ struct ContentView: View {
         runConfigurationCommand = ""
         runConfigurationWorkingDirectory = "."
         runConfigurationSaveAttempted = false
+        runConfigurationSourceIdentity = nil
+        isShowingRunConfigurationEditor = true
+    }
+
+    private func runSuggestionRow(_ suggestion: ProjectRunSuggestion) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(suggestion.name).font(.headline)
+                Text("\(suggestion.sourceDescription) · \(suggestion.workingDirectory)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(suggestion.command)
+                    .font(.body.monospaced())
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            Button("编辑并采纳") { beginAdoptingSuggestion(suggestion) }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("编辑并采纳运行建议 \(suggestion.name)")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func beginAdoptingSuggestion(_ suggestion: ProjectRunSuggestion) {
+        editingRunConfiguration = nil
+        runConfigurationProjectID = suggestion.projectID
+        runConfigurationName = suggestion.name
+        runConfigurationCommand = suggestion.command
+        runConfigurationWorkingDirectory = suggestion.workingDirectory
+        runConfigurationSaveAttempted = false
+        runConfigurationSourceIdentity = suggestion.sourceIdentity
         isShowingRunConfigurationEditor = true
     }
 
@@ -1395,6 +1455,7 @@ struct ContentView: View {
         runConfigurationCommand = configuration.command
         runConfigurationWorkingDirectory = configuration.workingDirectory
         runConfigurationSaveAttempted = false
+        runConfigurationSourceIdentity = configuration.sourceIdentity
         isShowingRunConfigurationEditor = true
     }
 
@@ -1412,7 +1473,8 @@ struct ContentView: View {
                 projectID: runConfigurationProjectID,
                 name: runConfigurationName,
                 command: runConfigurationCommand,
-                workingDirectory: runConfigurationWorkingDirectory
+                workingDirectory: runConfigurationWorkingDirectory,
+                sourceIdentity: runConfigurationSourceIdentity
             ) != nil
         }
         if succeeded { isShowingRunConfigurationEditor = false }

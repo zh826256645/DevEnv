@@ -106,6 +106,371 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+struct ProjectRunSuggestion: Equatable, Identifiable, Sendable {
+    let id: String
+    let projectID: String
+    let name: String
+    let command: String
+    let workingDirectory: String
+    let sourceIdentity: String
+    let sourceDescription: String
+
+    init(
+        projectID: String,
+        name: String,
+        command: String,
+        workingDirectory: String,
+        sourceIdentity: String,
+        sourceDescription: String
+    ) {
+        self.projectID = projectID
+        self.name = name
+        self.command = command
+        self.workingDirectory = workingDirectory
+        self.sourceIdentity = sourceIdentity
+        self.sourceDescription = sourceDescription
+        id = "\(projectID):\(sourceIdentity)"
+    }
+}
+
+/// Static, local-only run suggestion discovery. It never invokes project tools.
+struct ProjectRunSuggestionScanner: Sendable {
+    private static let composeNames = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"]
+    private static let packageManagers: Set<String> = ["npm", "pnpm", "yarn", "bun"]
+    private static let runScriptBases: Set<String> = ["dev", "start", "serve"]
+    private static let nonRunScriptBases: Set<String> = ["build", "test", "lint", "migrate", "migration", "check", "typecheck"]
+
+    func scan(projectRoot: String, analysis: ProjectRequirementsAnalysis) -> [ProjectRunSuggestion] {
+        let root = URL(fileURLWithPath: projectRoot, isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        guard analysis.rootPath == root.path else { return [] }
+        var suggestions: [ProjectRunSuggestion] = []
+        for component in analysis.components {
+            let directory = component.relativePath == "."
+                ? root
+                : root.appendingPathComponent(component.relativePath, isDirectory: true)
+            if component.manifestNames.contains("package.json"),
+               let manager = uniquePackageManager(component),
+               let scripts = packageScripts(at: directory.appendingPathComponent("package.json")) {
+                for name in scripts.keys.sorted() where isRunScript(name) {
+                    let packageRelative = relativePath(directory.appendingPathComponent("package.json"), from: root)
+                    let source = "\(packageRelative)#scripts.\(name)"
+                    suggestions.append(ProjectRunSuggestion(
+                        projectID: root.path,
+                        name: "Node.js · \(name)",
+                        command: "\(manager) run \(name)",
+                        workingDirectory: component.relativePath,
+                        sourceIdentity: source,
+                        sourceDescription: "\(packageRelative) · scripts.\(name)"
+                    ))
+                }
+            }
+            if component.manifestNames.contains("pyproject.toml"),
+               component.requirements.contains(where: { $0.capability == "uv" }) {
+                let manifest = directory.appendingPathComponent("pyproject.toml")
+                let relative = relativePath(manifest, from: root)
+                for entry in pythonEntries(at: manifest) {
+                    suggestions.append(ProjectRunSuggestion(
+                        projectID: root.path,
+                        name: "Python · \(entry)",
+                        command: "uv run \(entry)",
+                        workingDirectory: component.relativePath,
+                        sourceIdentity: "\(relative)#project.scripts.\(entry)",
+                        sourceDescription: "\(relative) · project.scripts.\(entry)"
+                    ))
+                }
+            }
+            if component.manifestNames.contains("Cargo.toml") {
+                let manifest = directory.appendingPathComponent("Cargo.toml")
+                let relative = relativePath(manifest, from: root)
+                for target in cargoBinTargets(at: manifest) {
+                    let features = target.features.isEmpty
+                        ? ""
+                        : " --features \(target.features.joined(separator: ","))"
+                    suggestions.append(ProjectRunSuggestion(
+                        projectID: root.path,
+                        name: "Cargo · \(target.name)",
+                        command: "cargo run --bin \(target.name)\(features)",
+                        workingDirectory: component.relativePath,
+                        sourceIdentity: "\(relative)#bin.\(target.name)",
+                        sourceDescription: "\(relative) · bin.\(target.name)"
+                    ))
+                }
+            }
+            if let composeName = Self.composeNames.first(where: component.manifestNames.contains),
+               isReadable(directory.appendingPathComponent(composeName)) {
+                let relative = relativePath(directory.appendingPathComponent(composeName), from: root)
+                suggestions.append(ProjectRunSuggestion(
+                    projectID: root.path,
+                    name: "Compose · \(composeName)",
+                    command: "docker compose up",
+                    workingDirectory: component.relativePath,
+                    sourceIdentity: "\(relative)#compose",
+                    sourceDescription: composeName
+                ))
+            }
+        }
+        return suggestions.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+    }
+
+    private func uniquePackageManager(_ component: ProjectComponent) -> String? {
+        let managers = Set(component.requirements.compactMap { requirement in
+            Self.packageManagers.contains(requirement.capability) ? requirement.capability : nil
+        })
+        return managers.count == 1 ? managers.first : nil
+    }
+
+    private func packageScripts(at file: URL) -> [String: String]? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+              let size = attributes[.size] as? NSNumber,
+              size.intValue <= ProjectRequirementsScanner.maxManifestBytes,
+              let data = try? Data(contentsOf: file),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let scripts = object["scripts"] as? [String: Any] else { return nil }
+        return scripts.reduce(into: [:]) { result, entry in
+            if let value = entry.value as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result[entry.key] = value
+            }
+        }
+    }
+
+    private func pythonEntries(at file: URL) -> [String] {
+        guard let text = manifestText(at: file) else { return [] }
+        var section: [String] = []
+        var scriptsMode: String?
+        var entries: [String: Int] = [:]
+        func addEntry(_ name: String, _ rawValue: Substring) {
+            guard isSafeCommandName(name),
+                  let target = staticTomlString(rawValue),
+                  target.range(
+                    of: #"^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_.]*$"#,
+                    options: .regularExpression
+                  ) != nil else { return }
+            entries[name, default: 0] += 1
+        }
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = tomlLineWithoutComment(String(rawLine))
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                guard !line.hasPrefix("[["),
+                      let path = staticTomlKeyPath(String(line.dropFirst().dropLast())) else {
+                    section = []
+                    continue
+                }
+                section = path
+                if section == ["project", "scripts"] {
+                    guard scriptsMode == nil else { return [] }
+                    scriptsMode = "table"
+                }
+                continue
+            }
+            guard let separator = unquotedIndex(of: "=", in: line),
+                  let keyPath = staticTomlKeyPath(String(line[..<separator])) else { continue }
+            let value = line[line.index(after: separator)...]
+            let path = section + keyPath
+            if path == ["project", "dynamic"] {
+                guard let dynamic = staticTomlStringArray(value) else { return [] }
+                if dynamic.contains("scripts") { return [] }
+            } else if section == ["project"], keyPath == ["scripts"] {
+                guard scriptsMode == nil, let inlineEntries = staticTomlInlineTable(value) else { return [] }
+                scriptsMode = "inline"
+                for (name, target) in inlineEntries { addEntry(name, target[target.startIndex...]) }
+            } else if path.count == 3, Array(path.prefix(2)) == ["project", "scripts"] {
+                if section.isEmpty || section == ["project"] {
+                    guard scriptsMode == nil || scriptsMode == "dotted" else { return [] }
+                    scriptsMode = "dotted"
+                }
+                addEntry(path[2], value)
+            }
+        }
+        guard entries.values.allSatisfy({ $0 == 1 }) else { return [] }
+        return entries.keys.sorted()
+    }
+
+    private func cargoBinTargets(at file: URL) -> [(name: String, features: [String])] {
+        guard let text = manifestText(at: file) else { return [] }
+        var inBin = false
+        var currentNames: [String] = []
+        var currentFeatures: [String]? = []
+        var sawRequiredFeatures = false
+        var targets: [String: [[String]]] = [:]
+        func finishTarget() {
+            if currentNames.count == 1, let currentFeatures {
+                targets[currentNames[0], default: []].append(currentFeatures)
+            }
+            currentNames.removeAll()
+            currentFeatures = []
+            sawRequiredFeatures = false
+        }
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = tomlLineWithoutComment(String(rawLine))
+            if line == "[[bin]]" {
+                finishTarget()
+                inBin = true
+                continue
+            }
+            if line.hasPrefix("[") {
+                finishTarget()
+                inBin = false
+                continue
+            }
+            guard inBin, let separator = unquotedIndex(of: "=", in: line),
+                  let keyPath = staticTomlKeyPath(String(line[..<separator])),
+                  keyPath.count == 1 else { continue }
+            let key = keyPath[0]
+            let value = line[line.index(after: separator)...]
+            if key == "required-features" {
+                guard !sawRequiredFeatures else { currentFeatures = nil; continue }
+                sawRequiredFeatures = true
+                currentFeatures = staticTomlStringArray(value).flatMap { features in
+                    features.allSatisfy(isSafeCargoFeature) ? features : nil
+                }
+            } else if key == "name", let name = staticTomlString(value), isSafeCommandName(name) {
+                currentNames.append(name)
+            }
+        }
+        finishTarget()
+        return targets.compactMap { name, declarations in
+            declarations.count == 1 ? (name, declarations[0]) : nil
+        }.sorted { $0.name < $1.name }
+    }
+
+    private func manifestText(at file: URL) -> String? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+              let size = attributes[.size] as? NSNumber,
+              size.intValue <= ProjectRequirementsScanner.maxManifestBytes,
+              let data = try? Data(contentsOf: file) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func staticTomlString(_ rawValue: Substring) -> String? {
+        let value = tomlLineWithoutComment(String(rawValue))
+        guard value.count >= 2, let first = value.first, first == value.last,
+              first == "\"" || first == "'" else { return nil }
+        let result = String(value.dropFirst().dropLast())
+        return result.contains(first) || result.contains("\\") ? nil : result
+    }
+
+    private func staticTomlKey(_ rawValue: String) -> String? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isSafeCommandName(value) { return value }
+        return staticTomlString(value[value.startIndex...]).flatMap { isSafeCommandName($0) ? $0 : nil }
+    }
+
+    private func staticTomlKeyPath(_ rawValue: String) -> [String]? {
+        guard let parts = splitStaticToml(rawValue, separator: ".") else { return nil }
+        let keys = parts.compactMap(staticTomlKey)
+        return keys.count == parts.count ? keys : nil
+    }
+
+    private func staticTomlStringArray(_ rawValue: Substring) -> [String]? {
+        let value = tomlLineWithoutComment(String(rawValue))
+        guard value.first == "[", value.last == "]",
+              let parts = splitStaticToml(String(value.dropFirst().dropLast()), separator: ",") else { return nil }
+        if parts.count == 1, parts[0].trimmingCharacters(in: .whitespaces).isEmpty { return [] }
+        let strings = parts.compactMap { part in
+            staticTomlString(part[part.startIndex...])
+        }
+        return strings.count == parts.count ? strings : nil
+    }
+
+    private func staticTomlInlineTable(_ rawValue: Substring) -> [(String, String)]? {
+        let value = tomlLineWithoutComment(String(rawValue))
+        guard value.first == "{", value.last == "}",
+              let parts = splitStaticToml(String(value.dropFirst().dropLast()), separator: ",") else { return nil }
+        var entries: [(String, String)] = []
+        for part in parts {
+            guard let separator = unquotedIndex(of: "=", in: part),
+                  let key = staticTomlKey(String(part[..<separator])),
+                  staticTomlString(part[part.index(after: separator)...]) != nil else { return nil }
+            entries.append((key, String(part[part.index(after: separator)...])))
+        }
+        return entries
+    }
+
+    private func splitStaticToml(_ value: String, separator: Character) -> [String]? {
+        var quote: Character?
+        var start = value.startIndex
+        var parts: [String] = []
+        for index in value.indices {
+            let character = value[index]
+            if character == "\\" { return nil }
+            if let currentQuote = quote {
+                if character == currentQuote { quote = nil }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character == separator {
+                parts.append(String(value[start..<index]))
+                start = value.index(after: index)
+            }
+        }
+        guard quote == nil else { return nil }
+        parts.append(String(value[start...]))
+        return parts
+    }
+
+    private func unquotedIndex(of needle: Character, in value: String) -> String.Index? {
+        var quote: Character?
+        for index in value.indices {
+            let character = value[index]
+            if let currentQuote = quote {
+                if character == currentQuote { quote = nil }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character == needle {
+                return index
+            }
+        }
+        return nil
+    }
+
+    private func tomlLineWithoutComment(_ rawValue: String) -> String {
+        var quote: Character?
+        for index in rawValue.indices {
+            let character = rawValue[index]
+            if let currentQuote = quote {
+                if character == currentQuote { quote = nil }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character == "#" {
+                return String(rawValue[..<index]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isSafeCommandName(_ value: String) -> Bool {
+        value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil
+    }
+
+    private func isSafeCargoFeature(_ value: String) -> Bool {
+        value.range(of: #"^[A-Za-z0-9][A-Za-z0-9_./+:-]*$"#, options: .regularExpression) != nil
+    }
+
+    private func isRunScript(_ name: String) -> Bool {
+        let lowercased = name.lowercased()
+        guard !Self.runScriptBases.contains(lowercased) else { return true }
+        let parts = lowercased.split { ":/-".contains($0) || $0 == "." }
+        guard parts.count > 1,
+              let runIndex = parts.firstIndex(where: { Self.runScriptBases.contains(String($0)) }),
+              runIndex == parts.startIndex || runIndex == parts.index(before: parts.endIndex) else { return false }
+        return !parts.contains { Self.nonRunScriptBases.contains(String($0)) }
+    }
+
+    private func isReadable(_ file: URL) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+              let size = attributes[.size] as? NSNumber,
+              size.intValue <= ProjectRequirementsScanner.maxManifestBytes else { return false }
+        return (try? Data(contentsOf: file)) != nil
+    }
+
+    private func relativePath(_ file: URL, from root: URL) -> String {
+        let rootPath = root.standardizedFileURL.path
+        let path = file.standardizedFileURL.path
+        guard path != rootPath else { return "." }
+        return String(path.dropFirst(rootPath.count + 1))
+    }
+}
+
 struct ProjectRecordDocument: Codable, Equatable, Sendable {
     static let currentSchemaVersion = 2
 
@@ -535,6 +900,7 @@ final class ProjectsViewModel: ObservableObject {
     @Published private(set) var operationError: String?
     @Published private(set) var storageError: String?
     @Published private(set) var analyses: [String: ProjectRequirementsAnalysis] = [:]
+    @Published private(set) var suggestionStore: [String: [ProjectRunSuggestion]] = [:]
     @Published private(set) var projectNotices: [String: [ProjectNotice]] = [:]
     @Published private(set) var staleProjectIDs: Set<String> = []
     @Published private(set) var refreshingProjectIDs: Set<String> = []
@@ -614,6 +980,35 @@ final class ProjectsViewModel: ObservableObject {
                 if projectOrder != .orderedSame { return projectOrder == .orderedAscending }
                 return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
             }
+    }
+
+    func runSuggestions(projectID: String? = nil) -> [ProjectRunSuggestion] {
+        let savedSources: Set<String> = Set(document.runConfigurations.compactMap { configuration in
+            guard projectID == nil || configuration.projectID == projectID else { return nil }
+            return configuration.sourceIdentity.map { "\(configuration.projectID):\($0)" }
+        })
+        let values = (projectID.map { suggestionStore[$0] ?? [] } ?? suggestionStore.values.flatMap { $0 })
+            .filter { !savedSources.contains($0.id) }
+        return values.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+    }
+
+    func isSuggestionSourceAvailable(_ configuration: ProjectRunConfiguration) -> Bool {
+        guard let sourceIdentity = configuration.sourceIdentity else { return true }
+        return suggestionStore[configuration.projectID]?.contains { $0.sourceIdentity == sourceIdentity } == true
+    }
+
+    @discardableResult
+    func adoptSuggestion(_ suggestion: ProjectRunSuggestion) -> ProjectRunConfiguration? {
+        guard !document.runConfigurations.contains(where: {
+            $0.projectID == suggestion.projectID && $0.sourceIdentity == suggestion.sourceIdentity
+        }) else { return nil }
+        return createRunConfiguration(
+            projectID: suggestion.projectID,
+            name: suggestion.name,
+            command: suggestion.command,
+            workingDirectory: suggestion.workingDirectory,
+            sourceIdentity: suggestion.sourceIdentity
+        )
     }
 
     @discardableResult
@@ -742,6 +1137,10 @@ final class ProjectsViewModel: ObservableObject {
         analyses = analyses.mapValues {
             scanner.recalculate($0, machineSnapshot: machineSnapshot)
         }
+        let suggestionScanner = ProjectRunSuggestionScanner()
+        for (path, analysis) in analyses {
+            suggestionStore[path] = suggestionScanner.scan(projectRoot: path, analysis: analysis)
+        }
     }
 
     func refreshProjects() {
@@ -807,6 +1206,7 @@ final class ProjectsViewModel: ObservableObject {
         for projectID in projectIDs {
             displayedNewProjectIDs.remove(projectID)
             analyses.removeValue(forKey: projectID)
+            suggestionStore.removeValue(forKey: projectID)
             projectNotices.removeValue(forKey: projectID)
             staleProjectIDs.remove(projectID)
             refreshingProjectIDs.remove(projectID)
@@ -833,6 +1233,7 @@ final class ProjectsViewModel: ObservableObject {
             let backupURL = try store.recreatePreservingBackup()
             document = ProjectRecordDocument()
             analyses = [:]
+            suggestionStore = [:]
             projectNotices = [:]
             staleProjectIDs = []
             refreshingProjectIDs = []
@@ -853,24 +1254,30 @@ final class ProjectsViewModel: ObservableObject {
         guard generation == refreshGeneration else { return }
         guard let index = document.records.firstIndex(where: { $0.path == path }) else { return }
         document.records[index].availability = availability
-        if let analysis, analysis.notices.isEmpty {
-            analyses[path] = ProjectRequirementsScanner().recalculate(
-                analysis,
-                machineSnapshot: machineSnapshot
-            )
-            projectNotices.removeValue(forKey: path)
-            staleProjectIDs.remove(path)
-        } else if let analysis {
-            projectNotices[path] = analysis.notices
-            if analyses[path] == nil {
+        if let analysis {
+            if analysis.notices.isEmpty {
                 analyses[path] = ProjectRequirementsScanner().recalculate(
                     analysis,
                     machineSnapshot: machineSnapshot
                 )
+                projectNotices.removeValue(forKey: path)
+                staleProjectIDs.remove(path)
+            } else {
+                projectNotices[path] = analysis.notices
+                if analyses[path] == nil {
+                    analyses[path] = ProjectRequirementsScanner().recalculate(
+                        analysis,
+                        machineSnapshot: machineSnapshot
+                    )
+                }
+                staleProjectIDs.insert(path)
             }
-            staleProjectIDs.insert(path)
+            suggestionStore[path] = ProjectRunSuggestionScanner().scan(projectRoot: path, analysis: analysis)
         } else if analyses[path] != nil {
             staleProjectIDs.insert(path)
+            suggestionStore.removeValue(forKey: path)
+        } else {
+            suggestionStore[path] = []
         }
         refreshingProjectIDs.remove(path)
     }
