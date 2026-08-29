@@ -1650,10 +1650,12 @@ struct ContentView: View {
                 .textSelection(.enabled)
                 .lineLimit(1)
                 .truncationMode(.middle)
-            Spacer(minLength: 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .clipped()
             Button { copy(value) } label: { Image(systemName: "doc.on.doc") }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
+                .fixedSize()
                 .help("复制")
         }
         .padding(.horizontal, 12)
