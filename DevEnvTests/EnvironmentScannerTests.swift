@@ -66,7 +66,7 @@ final class EnvironmentScannerTests: XCTestCase {
             ]
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 13)
+        XCTAssertEqual(snapshot.schemaVersion, 14)
         XCTAssertEqual(snapshot.terminalApplications.map(\.name), ["Terminal", "Ghostty", "WezTerm"])
         XCTAssertEqual(snapshot.terminalApplications.map(\.version), ["2.15", "1.2.0", nil])
         XCTAssertEqual(snapshot.shellInstallations.map(\.path), ["/opt/homebrew/bin/fish", "/bin/zsh", "/bin/bash"])
@@ -88,6 +88,39 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.issues.filter {
             $0.hasPrefix("Default Login Shell：") || $0.hasPrefix("Shell Installation：")
         }, ["Default Login Shell：读取失败", "Shell Installation：读取失败"])
+    }
+
+    func testPackageManagerScanReportsEffectiveToolsWithoutActivatingCorepack() {
+        let recorder = CommandRecorder()
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/tools", "/fallback"],
+            executables: [
+                "/tools/uv", "/tools/bun", "/tools/npm", "/tools/pnpm", "/tools/yarn",
+                "/fallback/npm",
+            ],
+            resolvedPaths: [
+                "/tools/npm": "/opt/node/bin/npm-cli.js",
+                "/tools/pnpm": "/opt/node/lib/node_modules/corepack/dist/pnpm.js",
+            ],
+            commandOutputs: [
+                "/tools/uv --version": "uv 0.8.14 (abc123 2026-08-01)\n",
+                "/tools/bun --version": "1.2.20\n",
+                "/tools/npm --version": "11.5.2\n",
+            ],
+            commandStatuses: ["/tools/yarn --version": 1],
+            recorder: recorder
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.packageManagers.map(\.id), ["uv", "bun", "npm", "pnpm", "yarn"])
+        XCTAssertEqual(snapshot.packageManagers.map(\.state), [
+            .available, .available, .available, .configured, .failed,
+        ])
+        XCTAssertEqual(snapshot.packageManagers.map(\.version), ["0.8.14", "1.2.20", "11.5.2", nil, nil])
+        XCTAssertEqual(snapshot.packageManagers[2].actualExecutable, "/opt/node/bin/npm-cli.js")
+        XCTAssertEqual(snapshot.packageManagers[3].executable, "/tools/pnpm")
+        XCTAssertFalse(recorder.commands.contains { $0.executable == "/tools/pnpm" })
+        XCTAssertFalse(recorder.commands.contains { $0.executable == "/fallback/npm" })
+        XCTAssertEqual(snapshot.issues.filter { $0.hasPrefix("包管理器：") }, ["包管理器：Yarn 版本读取失败"])
     }
 
     func testGitCLIUsesFirstExecutableInPath() {
@@ -473,7 +506,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 13)
+        XCTAssertEqual(snapshot.schemaVersion, 14)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -2025,7 +2058,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV13SnapshotRoundTripsEnvironmentConfigurationAndV12IsRejected() throws {
+    func testV14SnapshotRoundTripsPackageManagersAndV13IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -2033,7 +2066,7 @@ final class EnvironmentScannerTests: XCTestCase {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
             environment: ["HOME": "/Users/test", "GH_TOKEN": "recognizable-token-19"],
-            executables: ["/bin/git", "/bin/git-lfs", "/bin/gh", "/bin/node"],
+            executables: ["/bin/git", "/bin/git-lfs", "/bin/gh", "/bin/node", "/bin/npm"],
             commandOutputs: [
                 "/bin/git --version": "git version 2.49.0 (Apple Git-154)\n",
                 "/bin/git-lfs version": "git-lfs/3.7.0 (GitHub; darwin arm64)\n",
@@ -2047,6 +2080,7 @@ final class EnvironmentScannerTests: XCTestCase {
                 "/bin/git config --global --null --get-all credential.helper": "osxkeychain\0store --file=/tmp/credentials\0",
                 "/bin/gh config get git_protocol --host github.com": "https\n",
                 "/bin/node": "v22.0.0\n",
+                "/bin/npm --version": "11.5.2\n",
                 "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncnode\nf7\ntIPv4\nn127.0.0.1:3000\n",
             ],
             existingFiles: ["/Users/test/.config/gh/hosts.yml", "/Users/test/.gitignore"],
@@ -2061,7 +2095,8 @@ final class EnvironmentScannerTests: XCTestCase {
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 13)
+        XCTAssertEqual(store.load()?.schemaVersion, 14)
+        XCTAssertEqual(store.load()?.packageManagers.first { $0.id == "npm" }?.version, "11.5.2")
         XCTAssertEqual(store.load()?.terminalApplications.first?.name, "Terminal")
         XCTAssertEqual(store.load()?.shellInstallations.first?.path, "/bin/zsh")
         XCTAssertTrue(store.load()?.shellInstallations.first?.isDefault == true)
@@ -2101,7 +2136,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 12
+        json["schemaVersion"] = 13
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }

@@ -205,6 +205,15 @@ struct ProjectRequirementsScanner: Sendable {
     private static let databaseCapabilities: Set<String> = [
         "postgresql", "mysql", "mariadb", "mongodb", "redis", "mysql-compatible",
     ]
+    private static let packageManagerCapabilities: Set<String> = ["uv", "bun", "npm", "pnpm", "yarn"]
+    private static let packageManagerLockCapabilities: [String: String] = [
+        "uv.lock": "uv",
+        "bun.lock": "bun",
+        "bun.lockb": "bun",
+        "package-lock.json": "npm",
+        "pnpm-lock.yaml": "pnpm",
+        "yarn.lock": "yarn",
+    ]
 
     func scan(
         projectRoot: URL,
@@ -320,6 +329,12 @@ struct ProjectRequirementsScanner: Sendable {
                 default: break
                 }
             }
+            resolvePackageManagerRequirements(
+                &requirements,
+                manifestNames: names,
+                componentRelativePath: relativePath,
+                notices: &notices
+            )
             let localPython = discoverVenv(at: directory)
             let evaluated = evaluate(
                 requirements: requirements,
@@ -476,6 +491,7 @@ struct ProjectRequirementsScanner: Sendable {
             let name = entry.lastPathComponent
             if Self.primaryManifestNames.contains(name)
                 || Self.versionFileCapabilities[name] != nil
+                || Self.packageManagerLockCapabilities[name] != nil
                 || name == "rust-toolchain" || name == "rust-toolchain.toml"
                 || name == ".tool-versions" || name == "mise.toml" || name == ".mise.toml"
                 || name.hasSuffix(".gemspec") || name.hasSuffix(".rockspec") {
@@ -486,7 +502,8 @@ struct ProjectRequirementsScanner: Sendable {
         let hasPrimaryManifest = names.contains(where: {
             Self.primaryManifestNames.contains($0) || $0.hasSuffix(".gemspec") || $0.hasSuffix(".rockspec")
         })
-        if !names.isEmpty && (relative == "." || hasPrimaryManifest) {
+        let hasNonLockManifest = names.contains { Self.packageManagerLockCapabilities[$0] == nil }
+        if !names.isEmpty && (hasPrimaryManifest || relative == "." && hasNonLockManifest) {
             result[relative, default: []].formUnion(names)
         }
         for entry in entries {
@@ -528,6 +545,7 @@ struct ProjectRequirementsScanner: Sendable {
         func add(_ capability: String, _ expression: String, _ field: String) {
             requirements.append(ProjectRequirement(capability: capability, expression: expression, relativePath: relative, field: field))
         }
+        var notices: [ProjectNotice] = []
         if let engines = object["engines"] as? [String: Any] {
             for key in ["node", "npm", "yarn", "pnpm", "bun"] {
                 if let expression = engines[key] as? String { add(key, expression, "engines.\(key)") }
@@ -535,9 +553,23 @@ struct ProjectRequirementsScanner: Sendable {
         }
         if let packageManager = object["packageManager"] as? String {
             let parts = packageManager.split(separator: "@", maxSplits: 1).map(String.init)
-            if let first = parts.first, ["npm", "yarn", "pnpm", "bun"].contains(first) {
-                add(first, parts.dropFirst().first ?? "*", "packageManager")
-            } else { add("packageManager", packageManager, "packageManager") }
+            if let first = parts.first, Self.packageManagerCapabilities.contains(first) {
+                add(first, normalizedPackageManagerExpression(parts.dropFirst().first), "packageManager")
+            } else {
+                notices.append(ProjectNotice(relativePath: relative, message: "packageManager 声明不支持：\(packageManager)"))
+            }
+        }
+        if let packageManager = (object["devEngines"] as? [String: Any])?["packageManager"] as? [String: Any],
+           let name = packageManager["name"] as? String {
+            if Self.packageManagerCapabilities.contains(name) {
+                add(
+                    name,
+                    normalizedPackageManagerExpression(packageManager["version"] as? String),
+                    "devEngines.packageManager.version"
+                )
+            } else {
+                notices.append(ProjectNotice(relativePath: relative, message: "devEngines.packageManager 声明不支持：\(name)"))
+            }
         }
         for key in ["os", "cpu"] {
             if let value = object[key] as? String { add(key, value, key) }
@@ -556,7 +588,78 @@ struct ProjectRequirementsScanner: Sendable {
                 }
             }
         }
-        return (object["name"] as? String, requirements, [])
+        return (object["name"] as? String, requirements, notices)
+    }
+
+    private func normalizedPackageManagerExpression(_ expression: String?) -> String {
+        expression?.split(separator: "+", maxSplits: 1).first.map(String.init) ?? "*"
+    }
+
+    private func resolvePackageManagerRequirements(
+        _ requirements: inout [ProjectRequirement],
+        manifestNames: [String],
+        componentRelativePath: String,
+        notices: inout [ProjectNotice]
+    ) {
+        let managerRequirements = requirements.filter { Self.packageManagerCapabilities.contains($0.capability) }
+        let explicit = managerRequirements.filter {
+            $0.field == "packageManager"
+                || $0.field == "devEngines.packageManager.version"
+                || $0.field == "tool.uv.required-version"
+        }
+        let engines = managerRequirements.filter { $0.field.hasPrefix("engines.") }
+        let explicitTools = Set(explicit.map(\.capability))
+        let lockTools = Set(manifestNames.compactMap { Self.packageManagerLockCapabilities[$0] })
+        let engineTools = Set(engines.map(\.capability))
+
+        let selected: String?
+        if explicitTools.count > 1 {
+            selected = nil
+            notices.append(packageManagerNotice(
+                componentRelativePath,
+                "包管理器声明互相矛盾：\(explicitTools.sorted().joined(separator: "、"))"
+            ))
+        } else if let explicitTool = explicitTools.first {
+            selected = explicitTool
+        } else if lockTools.union(engineTools).count > 1 {
+            selected = nil
+            notices.append(packageManagerNotice(
+                componentRelativePath,
+                "包管理器线索互相矛盾，无法判断：\(lockTools.union(engineTools).sorted().joined(separator: "、"))"
+            ))
+        } else {
+            selected = lockTools.union(engineTools).first
+        }
+
+        guard let selected else {
+            requirements.removeAll { Self.packageManagerCapabilities.contains($0.capability) }
+            return
+        }
+        if let lockName = manifestNames.first(where: { Self.packageManagerLockCapabilities[$0] == selected }) {
+            requirements.append(ProjectRequirement(
+                capability: selected,
+                expression: "*",
+                relativePath: componentRelativePath == "." ? lockName : "\(componentRelativePath)/\(lockName)",
+                field: lockName
+            ))
+        }
+        let ignored = (explicitTools.union(lockTools).union(engineTools)).subtracting([selected]).sorted()
+        if !ignored.isEmpty {
+            notices.append(packageManagerNotice(
+                componentRelativePath,
+                "已按 \(selected) 声明忽略其他包管理器线索：\(ignored.joined(separator: "、"))"
+            ))
+        }
+        requirements.removeAll {
+            Self.packageManagerCapabilities.contains($0.capability) && $0.capability != selected
+        }
+    }
+
+    private func packageManagerNotice(_ componentRelativePath: String, _ message: String) -> ProjectNotice {
+        ProjectNotice(
+            relativePath: componentRelativePath == "." ? "." : componentRelativePath,
+            message: message
+        )
     }
 
     private func parsePyProject(file: URL, root: URL) -> (name: String?, requirements: [ProjectRequirement], notices: [ProjectNotice]) {
@@ -579,6 +682,8 @@ struct ProjectRequirementsScanner: Sendable {
             guard let expression = tomlString(value) else { continue }
             if section == "project" && key == "requires-python" {
                 requirements.append(ProjectRequirement(capability: "python", expression: expression, relativePath: relative, field: "project.requires-python"))
+            } else if section == "tool.uv" && key == "required-version" {
+                requirements.append(ProjectRequirement(capability: "uv", expression: expression, relativePath: relative, field: "tool.uv.required-version"))
             } else if section == "tool.poetry.dependencies" && key == "python" {
                 requirements.append(ProjectRequirement(capability: "python", expression: expression, relativePath: relative, field: "tool.poetry.dependencies.python"))
             } else if (section == "project" || section == "tool.poetry") && key == "name" {
@@ -1383,7 +1488,8 @@ struct ProjectRequirementsScanner: Sendable {
             }
             if capability != "git"
                 && !Self.runtimeCapabilities.contains(capability)
-                && !Self.databaseCapabilities.contains(capability) {
+                && !Self.databaseCapabilities.contains(capability)
+                && !Self.packageManagerCapabilities.contains(capability) {
                 for index in indices {
                     evaluated[index].satisfaction = .undetermined
                     evaluated[index].matches = []
@@ -1476,6 +1582,18 @@ struct ProjectRequirementsScanner: Sendable {
                   let version = machineSnapshot.gitCLI.version?.firstMatch(of: /\d+(?:\.\d+){0,2}/).map({ String($0.output) }) else { return [] }
             return [(version, machineSnapshot.gitCLI.executable ?? "Git CLI", nil, true, nil)]
         }
+        if Self.packageManagerCapabilities.contains(capability) {
+            guard let manager = machineSnapshot.packageManagers.first(where: { $0.id == capability }),
+                  manager.state == .available || manager.state == .configured,
+                  let executable = manager.executable else { return [] }
+            return [(
+                manager.version ?? "版本无法判断",
+                executable,
+                manager.state == .configured ? "Corepack" : "PATH",
+                true,
+                nil
+            )]
+        }
         if Self.databaseCapabilities.contains(capability) {
             let ids = databaseIDs(for: capability)
             return machineSnapshot.databaseInstallationOverviews
@@ -1526,6 +1644,13 @@ struct ProjectRequirementsScanner: Sendable {
                 return machineSnapshot.gitCLI.version?.firstMatch(of: /\d+(?:\.\d+){0,2}/) == nil
             }
         }
+        if Self.packageManagerCapabilities.contains(capability) {
+            guard let manager = machineSnapshot.packageManagers.first(where: { $0.id == capability }) else {
+                return false
+            }
+            return manager.state == .configured || manager.state == .failed
+                || manager.state == .available && manager.version == nil
+        }
         if Self.databaseCapabilities.contains(capability) {
             let ids = databaseIDs(for: capability)
             let overviews = machineSnapshot.databaseInstallationOverviews.filter { ids.contains($0.id.lowercased()) }
@@ -1549,6 +1674,14 @@ struct ProjectRequirementsScanner: Sendable {
             let version = machineSnapshot.gitCLI.version ?? "版本不可读"
             let path = machineSnapshot.gitCLI.executable ?? "Git CLI"
             return ["\(version) · \(path) · \(machineSnapshot.gitCLI.state.rawValue)"]
+        }
+        if Self.packageManagerCapabilities.contains(capability) {
+            guard let manager = machineSnapshot.packageManagers.first(where: { $0.id == capability }) else {
+                return ["未发现相关 Machine Environment 证据"]
+            }
+            return [
+                "\(manager.version ?? "版本不可读") · \(manager.executable ?? manager.name) · \(manager.state.rawValue)",
+            ]
         }
         if Self.databaseCapabilities.contains(capability) {
             let ids = databaseIDs(for: capability)

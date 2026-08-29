@@ -16,6 +16,7 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 
 - 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见开发语言的只读扫描和最新快照持久化。
 - 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源安装版本发现。
+- 已完成 uv、Bun、npm、pnpm 与 Yarn 的当前 `PATH` 工具扫描，并与项目声明及锁文件比较。
 - 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
 - 已完成当前 `PATH` 首个生效 Git CLI、Git LFS、用户级配置与脱敏后的 GitHub Authentication Configuration 只读扫描。
 - 已完成受支持 Terminal Application 与注册 Shell Installation、Default Login Shell 的只读扫描。
@@ -570,6 +571,7 @@ Apple Silicon first
 * [x] macOS 系统与系统卷只读扫描
 * [x] 最新 Machine Snapshot 持久化
 * [x] PATH 与 Homebrew Availability 扫描
+* [x] Homebrew、uv、Bun、npm、pnpm 与 Yarn 包管理器状态
 * [x] Node.js、Python、Go、Java、Rust、Ruby 与 Lua 扫描
 * [x] 安装版本、路径、来源与多版本展示
 * [x] 当前生效安装版本与 PATH 版本冲突识别
@@ -667,7 +669,7 @@ v0.1 范围已冻结；新增能力进入后续里程碑。
 
 允许用户直接添加 Project Root，或通过一次性的 Project Search Root 批量发现项目。DevEnv 会持久化 Project Record，以增量扫描更新可用状态和 `New` 标记，并允许只从 DevEnv 移除或恢复项目记录，不修改原目录。
 
-按 Project Component 静态读取 Node.js、Python、Go、Java、Rust、Ruby 与 Lua 的项目清单和版本文件，并支持 `.tool-versions`、`mise.toml`、`.mise.toml`、Compose 文件、包管理器以及 `package.json` 的系统与架构条件。项目代码、Shell 配置和动态清单表达式不会被执行。
+按 Project Component 静态读取 Node.js、Python、Go、Java、Rust、Ruby 与 Lua 的项目清单和版本文件，并支持 `.tool-versions`、`mise.toml`、`.mise.toml`、Compose 文件、`packageManager`、`devEngines.packageManager`、`[tool.uv].required-version` 与 uv、Bun、npm、pnpm、Yarn 锁文件，以及 `package.json` 的系统与架构条件。项目代码、Shell 配置和动态清单表达式不会被执行。
 
 Project Database Requirement 来自受支持清单中的直接客户端依赖、数据库工具声明和默认 Compose 文件，并只与 Machine Snapshot 中 PostgreSQL、MySQL、MariaDB、MongoDB 或 Redis 对应的 Database Installation 比较；客户端版本与监听状态不作为满足条件。
 

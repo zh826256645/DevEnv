@@ -28,6 +28,18 @@ _Avoid_: Package Root, Working Directory
 DevEnv 对一个已发现 Project Root 保存的轻量身份记录；原目录暂时不可用时记录仍可保留，删除记录不会删除或修改原目录。
 _Avoid_: Project Snapshot, Project Files
 
+**Project Run Configuration**:
+DevEnv 保存、归属于一个 Project Record 的运行意图，包含稳定身份、名称、命令、Project Root 相对工作目录和可选来源身份；它不是 Project Requirement 或 Project Requirements Summary，不表示项目可运行，也不执行命令。
+_Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
+
+**Project Run Suggestion**:
+DevEnv 从项目声明中只读识别、可由用户选择保存为 Project Run Configuration 的候选运行意图；它不会自动执行，也不表示项目可信或可运行。
+_Avoid_: Auto Run, Project Requirement, Runnable Status
+
+**Project Run Session**:
+用户从已保存的 Project Run Configuration 显式启动、仅存在于当前 App 进程中的交互式 PTY 会话；它保留本次进程状态、内存中的终端输出和退出码，但不持久化为 Project Record 或 Machine Snapshot。
+_Avoid_: Shell Session, Terminal Application, Machine Snapshot
+
 **Ignored Project**:
 用户从 DevEnv 删除后不再由 Project Search Root 自动恢复的 Project Root；直接重新添加该目录或由用户恢复时解除忽略。
 _Avoid_: Deleted Project, Unavailable Project
@@ -79,6 +91,18 @@ _Avoid_: Issue, Error, Health Problem
 **Machine Snapshot**:
 一次 Environment Scan 产生的、描述主机基础信息与当前 App 运行用户可见开发工具状态的结果。
 _Avoid_: Environment, System Profile
+
+**Package Manager Tool**:
+当前 App `PATH` 对 uv、Bun、npm、pnpm 或 Yarn 首先解析到的可执行工具，包含调用路径、可确认的实际路径、版本和读取状态；它不枚举未进入 `PATH` 的其他安装。
+_Avoid_: Runtime Installation, Package, Package Manager Environment
+
+**Corepack Proxy Configuration**:
+当前 `PATH` 已存在指向 Corepack 的 pnpm 或 Yarn 代理；Environment Scan 只记录已配置事实和路径，不执行代理获取版本，也不触发下载或激活。
+_Avoid_: Installed Package Manager, Available Version
+
+**Project Package Manager Requirement**:
+Project Component 从显式工具声明、受支持的版本字段或单一锁文件得到的 Package Manager Tool 要求；显式选择优先，同一 Project Component 内来源无法唯一确定时产生 Project Notice 而不猜测。
+_Avoid_: Dependency Requirement, Lockfile Version
 
 **Terminal Application**:
 当前 App 运行用户在该 Mac 上可发现的、提供交互式终端界面的已安装应用；不表示启动 DevEnv 的终端会话。
