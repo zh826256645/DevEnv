@@ -496,6 +496,7 @@ struct ContentView: View {
     @State private var expandedProjectRequirementID: String?
     @State private var projectSearchText = ""
     @State private var runProjectFilterID: String?
+    @State private var isRunSuggestionsExpanded = false
     @State private var isShowingRunConfigurationEditor = false
     @State private var editingRunConfiguration: ProjectRunConfiguration?
     @State private var runConfigurationProjectID = ""
@@ -507,6 +508,8 @@ struct ContentView: View {
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
     @State private var pendingProjectRunTrust: ProjectRunTrustRequest?
     @State private var selectedRunConfigurationID: String?
+    @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
+    @State private var runSearchText = ""
     @FocusState private var focusedCopyPath: String?
     @FocusState private var projectSearchIsFocused: Bool
     @FocusState private var projectAddIsFocused: Bool
@@ -1116,8 +1119,8 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("运行")
-                        .font(.title2.bold())
-                    Text("\(runCoordinator.runConfigurations(projectID: runProjectFilterID).count) 个已保存运行配置")
+                        .font(.system(size: 29, weight: .bold))
+                    Text("管理和运行项目的开发、启动或调试命令")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -1133,196 +1136,511 @@ struct ContentView: View {
                 Button(action: beginCreatingRunConfiguration) {
                     Label("新建配置", systemImage: "plus")
                 }
+                .buttonStyle(.borderedProminent)
                 .disabled(projectsModel.records.isEmpty || projectsModel.mutationsArePaused)
                 .accessibilityLabel("新建运行配置")
             }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 17)
+            .padding(.horizontal, 4)
+            .padding(.bottom, 18)
 
-            Divider()
-
-            if let storageError = projectsModel.storageError {
-                GroupBox {
-                    Label("项目记录存储已暂停：\(storageError)", systemImage: "externaldrive.badge.exclamationmark")
-                        .foregroundStyle(.orange)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(28)
-            } else if projectsModel.records.isEmpty && runCoordinator.runConfigurations().isEmpty {
-                ContentUnavailableView {
-                    Label("尚未添加项目", systemImage: "folder.badge.plus")
-                } description: {
-                    Text("请先在“项目”页面添加 Project Root，再创建运行配置。")
-                } actions: {
-                    Button("前往项目页面") { selectPage(.projects) }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if runCoordinator.runConfigurations(projectID: runProjectFilterID).isEmpty
-                && runCoordinator.runSuggestions(projectID: runProjectFilterID).isEmpty {
-                ContentUnavailableView {
-                    Label("没有运行配置", systemImage: "play.rectangle")
-                } description: {
-                    Text(runProjectFilterID == nil ? "为项目保存名称、命令和 Project Root 相对工作目录。" : "当前项目尚未保存运行配置。")
-                } actions: {
-                    Button("新建配置", action: beginCreatingRunConfiguration)
-                        .disabled(projectsModel.mutationsArePaused)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        let suggestions = runCoordinator.runSuggestions(projectID: runProjectFilterID)
-                        if !suggestions.isEmpty {
-                            GroupBox("运行建议（只读发现）") {
-                                VStack(spacing: 8) {
-                                    ForEach(suggestions) { suggestion in
-                                        runSuggestionRow(suggestion)
-                                    }
-                                }
-                                .padding(4)
-                            }
-                        }
-                        if let error = projectsModel.operationError {
-                            Label("项目操作失败：\(error)", systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .accessibilityLabel("项目操作失败，\(error)")
-                        }
-                        ForEach(runCoordinator.activeConfigurationsFirst(
-                            runCoordinator.runConfigurations(projectID: runProjectFilterID)
-                        )) { configuration in
-                            runConfigurationCard(configuration)
-                        }
-                    }
-                    .frame(maxWidth: 900)
-                    .frame(maxWidth: .infinity)
-                    .padding(28)
-                }
-            }
+            runsPageContent
         }
+        .padding(24)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear(perform: selectFirstRunConfigurationIfNeeded)
         .onChange(of: projectsModel.records.map(\.id)) { _, projectIDs in
             if let runProjectFilterID, !projectIDs.contains(runProjectFilterID) {
                 self.runProjectFilterID = nil
             }
         }
+        .onChange(of: runProjectFilterID) { _, _ in
+            isRunSuggestionsExpanded = false
+            selectedRunConfigurationID = visibleRunConfigurations.first?.id
+        }
+        .onChange(of: runSearchText) { _, _ in
+            if !visibleRunConfigurations.contains(where: { $0.id == selectedRunConfigurationID }) {
+                selectedRunConfigurationID = visibleRunConfigurations.first?.id
+            }
+        }
     }
 
-    private func runConfigurationCard(_ configuration: ProjectRunConfiguration) -> some View {
+    private func runStorageErrorView(_ error: String) -> some View {
+        GroupBox {
+            Label("项目记录存储已暂停：\(error)", systemImage: "externaldrive.badge.exclamationmark")
+                .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(28)
+    }
+
+    @ViewBuilder
+    private var runsPageContent: some View {
+        if let storageError = projectsModel.storageError {
+            runStorageErrorView(storageError)
+        } else if projectsModel.records.isEmpty && runCoordinator.runConfigurations().isEmpty {
+            ContentUnavailableView {
+                Label("尚未添加项目", systemImage: "folder.badge.plus")
+            } description: {
+                Text("请先在“项目”页面添加 Project Root，再创建运行配置。")
+            } actions: {
+                Button("前往项目页面") { selectPage(.projects) }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if runCoordinator.runConfigurations(projectID: runProjectFilterID).isEmpty
+            && selectedRunSuggestions.isEmpty {
+            ContentUnavailableView {
+                Label("没有运行配置", systemImage: "play.rectangle")
+            } description: {
+                Text(runEmptyDescription)
+            } actions: {
+                Button("新建配置", action: beginCreatingRunConfiguration)
+                    .disabled(projectsModel.mutationsArePaused)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            VStack(spacing: 14) {
+                GeometryReader { geometry in
+                    HStack(spacing: 12) {
+                        runConfigurationSidebar
+                            .frame(
+                                width: min(max(geometry.size.width * 0.20, 240), 320),
+                                height: geometry.size.height
+                            )
+                        runConfigurationDetail
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .frame(height: geometry.size.height, alignment: .topLeading)
+                            .layoutPriority(1)
+                    }
+                }
+                runSafetyNotice
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var runEmptyDescription: String {
+        runProjectFilterID == nil ? "为项目保存名称、命令和 Project Root 相对工作目录。" : "当前项目尚未保存运行配置。"
+    }
+
+    private var selectedRunSuggestions: [ProjectRunSuggestion] {
+        guard let projectID = runProjectFilterID else { return [] }
+        return runCoordinator.runSuggestions(projectID: projectID)
+    }
+
+    private var visibleRunConfigurations: [ProjectRunConfiguration] {
+        let configurations = runCoordinator.activeConfigurationsFirst(
+            runCoordinator.runConfigurations(projectID: runProjectFilterID)
+        )
+        guard !runSearchText.isEmpty else { return configurations }
+        return configurations.filter {
+            $0.name.localizedCaseInsensitiveContains(runSearchText)
+                || $0.command.localizedCaseInsensitiveContains(runSearchText)
+        }
+    }
+
+    private var runningConfigurations: [ProjectRunConfiguration] {
+        visibleRunConfigurations.filter { runCoordinator.session(for: $0.id)?.state.isLive == true }
+    }
+
+    private var stoppedConfigurations: [ProjectRunConfiguration] {
+        visibleRunConfigurations.filter { runCoordinator.session(for: $0.id)?.state.isLive != true }
+    }
+
+    private var selectedRunConfiguration: ProjectRunConfiguration? {
+        guard let selectedRunConfigurationID else { return visibleRunConfigurations.first }
+        return visibleRunConfigurations.first { $0.id == selectedRunConfigurationID }
+            ?? visibleRunConfigurations.first
+    }
+
+    private func selectFirstRunConfigurationIfNeeded() {
+        if selectedRunConfigurationID == nil {
+            selectedRunConfigurationID = visibleRunConfigurations.first?.id
+        }
+    }
+
+    private var runConfigurationSidebar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("搜索配置名称或命令", text: $runSearchText)
+                    .textFieldStyle(.plain)
+                Text("⌘F")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.10)))
+            .padding(14)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    runConfigurationSection(title: "运行中", count: runningConfigurations.count, configurations: runningConfigurations)
+                    runConfigurationSection(title: "未启动", count: stoppedConfigurations.count, configurations: stoppedConfigurations)
+                    HStack {
+                        Image(systemName: "eye.slash")
+                        Text("已忽略 0")
+                        Spacer()
+                        Image(systemName: "chevron.down")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 18)
+                }
+                .padding(.bottom, 16)
+            }
+            .scrollIndicators(.hidden)
+
+            if !selectedRunSuggestions.isEmpty {
+                Divider().opacity(0.5)
+                DisclosureGroup(isExpanded: $isRunSuggestionsExpanded) {
+                    VStack(spacing: 8) {
+                        ForEach(selectedRunSuggestions) { suggestion in
+                            runSuggestionRow(suggestion)
+                        }
+                    }
+                    .padding(.top, 8)
+                } label: {
+                    Label("运行建议", systemImage: "lightbulb")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(14)
+            }
+        }
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
+    }
+
+    private var runSafetyNotice: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.shield.fill")
+                .foregroundStyle(.blue)
+                .padding(7)
+                .background(Color.blue.opacity(0.12), in: Circle())
+            Text("首次运行某个项目时，将展示完整命令和工作目录，请确认信任后运行")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("了解更多") { }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
+    }
+
+    private func runConfigurationSection(
+        title: String,
+        count: Int,
+        configurations: [ProjectRunConfiguration]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(title == "运行中" ? Color.blue : Color.secondary)
+                    .frame(width: 8, height: 8)
+                Text("\(title)  \(count)")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(title == "运行中" ? Color.blue : Color.primary)
+                Spacer()
+                Image(systemName: "chevron.up")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+
+            ForEach(configurations) { configuration in
+                runConfigurationRow(configuration)
+            }
+            if !configurations.isEmpty {
+                Divider().padding(.horizontal, 14).padding(.top, 4)
+            }
+        }
+    }
+
+    private func runConfigurationRow(_ configuration: ProjectRunConfiguration) -> some View {
+        let session = runCoordinator.session(for: configuration.id)
+        let isSelected = selectedRunConfiguration?.id == configuration.id
+        let isLive = session?.state.isLive == true
+        return Button {
+            selectedRunConfigurationID = configuration.id
+        } label: {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(isLive ? Color.green : Color.secondary.opacity(0.7))
+                    .frame(width: 9, height: 9)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(configuration.name)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text("\(projectsModel.records.first { $0.id == configuration.projectID }?.title ?? "未知项目") · \(configuration.command)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Text(isLive ? "运行中" : "未启动")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isLive ? Color.green : Color.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background((isLive ? Color.green : Color.secondary).opacity(0.12), in: Capsule())
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(isSelected ? Color.blue.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isSelected ? Color.blue : Color.primary.opacity(0.08), lineWidth: isSelected ? 1.5 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+    }
+
+    @ViewBuilder
+    private var runConfigurationDetail: some View {
+        if let configuration = selectedRunConfiguration {
+            runConfigurationDetail(configuration)
+        } else {
+            ContentUnavailableView("选择一个运行配置", systemImage: "play.rectangle")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func runConfigurationDetail(_ configuration: ProjectRunConfiguration) -> some View {
         let project = projectsModel.records.first { $0.id == configuration.projectID }
         let session = runCoordinator.session(for: configuration.id)
-        return GroupBox {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "play.rectangle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.blue)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(configuration.name)
+        let state = session?.state ?? .inactive
+        return VStack(alignment: .leading, spacing: 12) {
+                VStack(spacing: 0) {
+                    HStack(alignment: .top, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .center, spacing: 9) {
+                                Text(configuration.name)
+                                    .font(.title2.bold())
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                                    .layoutPriority(1)
+                                    .frame(minHeight: 24, alignment: .center)
+                                projectRunStatusBadge(state)
+                            }
+                            Text(project.map { "\($0.title)" } ?? "所属项目记录不存在")
+                                .font(.callout).foregroundStyle(.secondary)
+                            Text(project?.path ?? "").font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer()
+                        HStack(spacing: 6) {
+                            if state == .stopping {
+                                Button {
+                                    runCoordinator.stop(configurationID: configuration.id)
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                        Text("正在停止")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
+                                .controlSize(.regular)
+                                .frame(width: 88, height: 36)
+                                .disabled(true)
+                            } else if state.isLive {
+                                Button("停止", role: .destructive) { runCoordinator.stop(configurationID: configuration.id) }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.red)
+                                    .controlSize(.regular)
+                                    .frame(width: 56, height: 36)
+                            } else {
+                                Button(session == nil ? "运行" : "重新运行") { run(configuration, project: project) }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.regular)
+                                    .frame(width: 56, height: 36)
+                                    .disabled(project == nil || project?.availability.isUnavailable == true)
+                            }
+                            Button("编辑") { beginEditingRunConfiguration(configuration) }
+                                .controlSize(.regular)
+                                .frame(width: 56, height: 36)
+                                .disabled(projectsModel.mutationsArePaused || state.isLive)
+                            Menu { Button("删除", role: .destructive) { pendingRunConfigurationDeletion = configuration } } label: {
+                                Image(systemName: "ellipsis")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .controlSize(.regular)
+                            .frame(width: 32, height: 36)
+                        }
+                    }
+                    .padding(16)
+
+                    Divider().opacity(0.45)
+
+                    VStack(alignment: .leading, spacing: 0) {
+                        runDetailRow("命令") {
+                            runDetailField(configuration.command)
+                        }
+                        runDetailRow("工作目录") {
+                            runDetailField(configuration.workingDirectory == "." ? "项目根目录（.）" : configuration.workingDirectory)
+                        }
+                        runDetailRow("来源") {
+                            if configuration.sourceIdentity != nil {
+                                Text(runCoordinator.isSuggestionSourceAvailable(configuration) ? "来自 package.json scripts" : "项目声明已消失")
+                                    .foregroundStyle(runCoordinator.isSuggestionSourceAvailable(configuration) ? Color.secondary : Color.orange)
+                            } else { Text("手动创建").foregroundStyle(.secondary) }
+                        }
+                        if let project {
+                            runDetailRow("创建时间") { Text(formatted(project.firstDiscoveredAt)).foregroundStyle(.secondary) }
+                            runDetailRow("更新时间") { Text(formatted(project.lastDiscoveredAt)).foregroundStyle(.secondary) }
+                            runDetailRow("信任状态", showsDivider: false) {
+                                Text(projectsModel.isProjectRunTrusted(project.path) ? "首次运行已确认信任" : "首次运行时需要确认")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        if runCoordinator.hasCommandDraft(configurationID: configuration.id) {
+                            Label("命令修改将在成功启动后保存", systemImage: "clock.arrow.circlepath").foregroundStyle(.secondary).padding(.vertical, 10)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+                    .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.primary.opacity(0.10)))
+                    .padding(10)
+                }
+                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("终端会话")
                             .font(.headline)
-                        Text(project.map { "\($0.title)  ·  \($0.path)" } ?? "所属项目记录不存在")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                    }
-                    Spacer()
-                    if session?.state.isLive == true {
-                        Button("停止", role: .destructive) {
-                            runCoordinator.stop(configurationID: configuration.id)
+                            .frame(minHeight: 24, alignment: .center)
+                        projectRunStatusBadge(state)
+                        Spacer()
+                        if session != nil, !state.isLive {
+                            Button("重新运行") { run(configuration, project: project) }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(project == nil || project?.availability.isUnavailable == true)
                         }
-                        .accessibilityLabel("停止运行配置 \(configuration.name)")
-                    } else {
-                        Button(session == nil ? "运行" : "重新运行") {
-                            run(configuration, project: project)
+                        if session?.lastSuccessfulCommand != nil, !state.isLive {
+                            Button("关闭终端") { runCoordinator.closeTerminal(configurationID: configuration.id) }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(project == nil || project?.availability.isUnavailable == true)
-                        .accessibilityLabel("\(session == nil ? "运行" : "重新运行")运行配置 \(configuration.name)")
-                    }
-                    Button("编辑") { beginEditingRunConfiguration(configuration) }
-                        .disabled(projectsModel.mutationsArePaused || session?.state.isLive == true)
-                        .accessibilityLabel("编辑运行配置 \(configuration.name)")
-                    Button("删除", role: .destructive) {
-                        pendingRunConfigurationDeletion = configuration
-                    }
-                    .disabled(projectsModel.mutationsArePaused || session?.state.isLive == true)
-                    .accessibilityLabel("删除运行配置 \(configuration.name)")
-                    if session?.lastSuccessfulCommand != nil {
-                        Button(selectedRunConfigurationID == configuration.id ? "正在查看" : "查看终端") {
-                            selectedRunConfigurationID = configuration.id
+                        Button {
+                            expandedTerminalConfiguration = configuration
+                        } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .foregroundStyle(.secondary)
                         }
-                        .disabled(selectedRunConfigurationID == configuration.id)
-                        .accessibilityLabel("查看运行配置 \(configuration.name) 的终端")
+                        .buttonStyle(.borderless)
+                        .disabled(session?.lastSuccessfulCommand == nil)
+                        .help("放大终端")
                     }
-                }
-                Divider()
-                LabeledContent("命令") {
-                    Text(configuration.command)
-                        .font(.body.monospaced())
-                        .textSelection(.enabled)
-                }
-                if runCoordinator.hasCommandDraft(configurationID: configuration.id) {
-                    Label("命令修改将在成功启动后保存", systemImage: "clock.arrow.circlepath")
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel("命令修改已暂存，将在成功启动后保存")
-                }
-                LabeledContent("工作目录") {
-                    Text(configuration.workingDirectory)
-                        .font(.body.monospaced())
-                        .textSelection(.enabled)
-                }
-                if configuration.sourceIdentity != nil {
-                    Label(
-                        runCoordinator.isSuggestionSourceAvailable(configuration)
-                            ? "来源：项目声明"
-                            : "来源不可用：项目声明已消失",
-                        systemImage: runCoordinator.isSuggestionSourceAvailable(configuration)
-                            ? "doc.text"
-                            : "doc.badge.ellipsis"
-                    )
-                    .foregroundStyle(runCoordinator.isSuggestionSourceAvailable(configuration) ? Color.secondary : Color.orange)
-                    .accessibilityLabel(
-                        runCoordinator.isSuggestionSourceAvailable(configuration)
-                            ? "来源为项目声明"
-                            : "来源不可用，项目声明已消失"
-                    )
-                }
-                projectRunState(session?.state ?? .inactive)
-                if let session, selectedRunConfigurationID == configuration.id {
-                    if session.lastSuccessfulCommand != nil {
+                    if let session,
+                       session.lastSuccessfulCommand != nil,
+                       expandedTerminalConfiguration?.id != configuration.id {
                         ProjectTerminalView(terminalView: session.terminalView)
-                            .frame(minHeight: 260, idealHeight: 320)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .id(configuration.id)
+                            .frame(minHeight: 280, idealHeight: 360, maxHeight: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                             .accessibilityLabel("运行配置 \(configuration.name) 的终端")
-                    }
-                    if !session.state.isLive {
-                        Button("关闭终端") {
-                            runCoordinator.closeTerminal(configurationID: configuration.id)
-                            selectedRunConfigurationID = nil
-                        }
-                        .accessibilityLabel("关闭并清除运行配置 \(configuration.name) 的终端输出")
+                    } else {
+                        Text("运行配置后，终端输出会显示在这里")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
+                            .background(Color.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
-                if let project {
-                    switch project.availability {
-                    case .available:
-                        EmptyView()
-                    case .unknown:
-                        Label("正在确认项目是否可用", systemImage: "clock")
-                            .foregroundStyle(.secondary)
-                    case let .unavailable(reason):
-                        Label("项目不可用，不能执行：\(reason)", systemImage: "folder.badge.questionmark")
-                            .foregroundStyle(.orange)
-                            .accessibilityLabel("项目不可用，不能执行，\(reason)")
-                    }
-                } else {
-                    Label("所属项目记录不存在，不能执行", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                }
+                .padding(16)
+                .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
+                .frame(maxHeight: .infinity, alignment: .topLeading)
             }
-            .padding(4)
+            .frame(maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .sheet(item: $expandedTerminalConfiguration) { configuration in
+            expandedTerminalView(configuration)
         }
+    }
+
+    private func expandedTerminalView(_ configuration: ProjectRunConfiguration) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(configuration.name).font(.title2.bold())
+                Spacer()
+                Button("关闭") { expandedTerminalConfiguration = nil }
+                    .keyboardShortcut(.cancelAction)
+            }
+            if let session = runCoordinator.session(for: configuration.id), session.lastSuccessfulCommand != nil {
+                ProjectTerminalView(terminalView: session.terminalView)
+                    .frame(minWidth: 780, minHeight: 480)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                ContentUnavailableView("终端会话不可用", systemImage: "terminal")
+                    .frame(minWidth: 780, minHeight: 480)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 820, minHeight: 560)
+    }
+
+    private func runDetailRow<Content: View>(
+        _ title: String,
+        showsDivider: Bool = true,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .center, spacing: 18) {
+            Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).frame(width: 74, alignment: .leading)
+            content()
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 7)
+        .overlay(alignment: .bottom) {
+            if showsDivider { Divider().opacity(0.45) }
+        }
+    }
+
+    private func runDetailField(_ value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(value)
+                .font(.body.monospaced())
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            Button { copy(value) } label: { Image(systemName: "doc.on.doc") }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("复制")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Color.primary.opacity(0.065), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func projectRunStatusBadge(_ state: ProjectRunSessionState) -> some View {
+        let live = state.isLive
+        return Label(live ? "运行中" : "未启动", systemImage: live ? "checkmark.circle.fill" : "circle.fill")
+            .font(.caption2.weight(.semibold))
+            .fixedSize()
+            .foregroundStyle(live ? Color.green : Color.secondary)
+            .padding(.horizontal, 7)
+            .frame(height: 20)
+            .background((live ? Color.green : Color.secondary).opacity(0.13), in: Capsule())
     }
 
     @ViewBuilder
