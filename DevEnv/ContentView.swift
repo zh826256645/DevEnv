@@ -1,6 +1,16 @@
 import AppKit
 import SwiftUI
 
+private enum AppTheme {
+    static let accent = Color(red: 0.08, green: 0.38, blue: 0.95)
+    static let canvas = Color(red: 0.95, green: 0.975, blue: 1.0)
+    static let sidebar = Color(red: 0.91, green: 0.95, blue: 1.0)
+    static let cardSubtle = Color.white.opacity(0.58)
+    static let cardSurface = Color.white.opacity(0.76)
+    static let cardRaised = Color.white.opacity(0.88)
+    static let innerCard = Color(red: 0.96, green: 0.975, blue: 1.0).opacity(0.38)
+}
+
 struct ProjectTerminalView: NSViewRepresentable {
     let terminalView: NSView
 
@@ -523,6 +533,7 @@ struct ContentView: View {
     var body: some View {
         navigation(model.snapshot)
         .frame(minWidth: 720, minHeight: 560)
+        .tint(AppTheme.accent)
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -797,6 +808,8 @@ struct ContentView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
+                .background(AppTheme.sidebar)
                 .padding(.top, 14)
 
                 Divider()
@@ -810,7 +823,7 @@ struct ContentView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                         .background(
-                            selectedPage == .settings ? Color.accentColor.opacity(0.15) : Color.clear,
+                            selectedPage == .settings ? AppTheme.accent.opacity(0.16) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 8)
                         )
                 }
@@ -818,10 +831,13 @@ struct ContentView: View {
                 .padding(10)
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
+            .background(AppTheme.sidebar)
+            .shadow(color: AppTheme.accent.opacity(0.10), radius: 18, x: 5, y: 0)
         } detail: {
             page(snapshot)
         }
         .navigationTitle("")
+        .background(AppTheme.canvas)
     }
 
     @ViewBuilder
@@ -886,6 +902,7 @@ struct ContentView: View {
             .padding(28)
             }
             .id(page)
+            .background(AppTheme.canvas)
         }
     }
 
@@ -938,6 +955,7 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(32)
+        .background(AppTheme.canvas)
     }
 
     private var unavailableView: some View {
@@ -1105,6 +1123,7 @@ struct ContentView: View {
                 .accessibilityElement(children: .contain)
             }
         }
+        .background(AppTheme.canvas)
         .onAppear(perform: selectFirstProjectIfNeeded)
         .onChange(of: projectsModel.records.map(\.id)) { _, _ in
             selectFirstProjectIfNeeded()
@@ -1146,7 +1165,7 @@ struct ContentView: View {
             runsPageContent
         }
         .padding(24)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(AppTheme.canvas)
         .onAppear(perform: selectFirstRunConfigurationIfNeeded)
         .onChange(of: projectsModel.records.map(\.id)) { _, projectIDs in
             if let runProjectFilterID, !projectIDs.contains(runProjectFilterID) {
@@ -1310,7 +1329,7 @@ struct ContentView: View {
                 .padding(14)
             }
         }
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
     }
 
@@ -1340,7 +1359,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
     }
 
@@ -1544,11 +1563,11 @@ struct ContentView: View {
                         }
                     }
                     .padding(10)
-                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+                    .background(AppTheme.innerCard, in: RoundedRectangle(cornerRadius: 11))
                     .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.primary.opacity(0.10)))
                     .padding(10)
                 }
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+                .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 14))
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -1588,14 +1607,53 @@ struct ContentView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                             .accessibilityLabel("运行配置 \(configuration.name) 的终端")
                     } else {
-                        Text("运行配置后，终端输出会显示在这里")
-                            .font(.callout).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
-                            .background(Color.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 8))
+                        ZStack {
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.04, green: 0.08, blue: 0.16),
+                                    Color(red: 0.08, green: 0.15, blue: 0.29)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+
+                            VStack(spacing: 12) {
+                                Image(systemName: "terminal.fill")
+                                    .font(.system(size: 30, weight: .semibold))
+                                    .foregroundStyle(AppTheme.accent)
+                                    .frame(width: 64, height: 64)
+                                    .background(AppTheme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                            .stroke(AppTheme.accent.opacity(0.35), lineWidth: 1)
+                                    }
+                                Text("终端会话尚未启动")
+                                    .font(.headline.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                Text("运行配置后，终端输出会显示在这里")
+                                    .font(.callout)
+                                    .foregroundStyle(.white.opacity(0.62))
+                                Text("⌘↵ 运行配置")
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.white.opacity(0.72))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 7)
+                                    .background(.white.opacity(0.10), in: Capsule())
+                            }
+                            .padding(24)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(AppTheme.accent.opacity(0.28), lineWidth: 1)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("终端会话尚未启动，运行配置后终端输出会显示在这里")
                     }
                 }
                 .padding(16)
-                .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+                .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
                 .frame(maxHeight: .infinity, alignment: .topLeading)
             }
@@ -1644,7 +1702,9 @@ struct ContentView: View {
     }
 
     private func runDetailField(_ value: String) -> some View {
-        HStack(spacing: 8) {
+        let showsCopyButton = hoveredPath == value || focusedCopyPath == value || copiedPath == value
+
+        return HStack(spacing: 8) {
             Text(value)
                 .font(.body.monospaced())
                 .textSelection(.enabled)
@@ -1652,16 +1712,22 @@ struct ContentView: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .clipped()
-            Button { copy(value) } label: { Image(systemName: "doc.on.doc") }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .fixedSize()
-                .help("复制")
+            copyButton(value, help: "复制")
+                .opacity(showsCopyButton ? 1 : 0)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
-        .background(Color.primary.opacity(0.065), in: RoundedRectangle(cornerRadius: 8))
+        .background(AppTheme.innerCard, in: RoundedRectangle(cornerRadius: 8))
+        .contentShape(Rectangle())
+        .onHover { isHovering in
+            if isHovering {
+                hoveredPath = value
+            } else if hoveredPath == value {
+                hoveredPath = nil
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: showsCopyButton)
     }
 
     private func projectRunStatusBadge(_ state: ProjectRunSessionState) -> some View {
@@ -1905,11 +1971,11 @@ struct ContentView: View {
                     }
                 }
             }
-            .accentColor(Color(red: 143.0 / 255, green: 203.0 / 255, blue: 235.0 / 255))
+            .tint(AppTheme.accent)
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+        .background(AppTheme.sidebar.opacity(0.78))
     }
 
     private func projectListRow(_ project: ProjectRecord) -> some View {
@@ -2229,7 +2295,7 @@ struct ContentView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, minHeight: 72, maxHeight: 72, alignment: .topLeading)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(.separator.opacity(0.65), lineWidth: 1)
@@ -2249,7 +2315,7 @@ struct ContentView: View {
                     if index < requirements.count - 1 { Divider() }
                 }
             }
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.22), in: RoundedRectangle(cornerRadius: 14))
+            .background(AppTheme.innerCard, in: RoundedRectangle(cornerRadius: 14))
             .overlay {
                 RoundedRectangle(cornerRadius: 14)
                     .stroke(.separator.opacity(0.75), lineWidth: 1)
@@ -2814,7 +2880,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+                .fill(AppTheme.cardSurface)
                 .overlay {
                     RoundedRectangle(cornerRadius: 15, style: .continuous)
                         .stroke(Color.primary.opacity(0.10))
@@ -2846,7 +2912,7 @@ struct ContentView: View {
         .padding(18)
         .background {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
+                .fill(AppTheme.cardSubtle)
                 .overlay {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .stroke(Color.primary.opacity(0.08))
@@ -2886,7 +2952,7 @@ struct ContentView: View {
                 }
                 .font(.callout)
                 .padding(.vertical, 10)
-                .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 10))
+                .background(AppTheme.innerCard, in: RoundedRectangle(cornerRadius: 10))
                 .overlay {
                     RoundedRectangle(cornerRadius: 10)
                         .stroke(Color.primary.opacity(0.10))
@@ -2920,7 +2986,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, minHeight: 54)
         .background {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(Color.primary.opacity(0.012))
+                .fill(AppTheme.innerCard)
                 .overlay {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .stroke(Color.primary.opacity(0.08))
@@ -3026,7 +3092,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+                .fill(AppTheme.cardSurface)
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.primary.opacity(0.10))
@@ -3154,7 +3220,7 @@ struct ContentView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 9)
-                                .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                                .background(AppTheme.innerCard, in: RoundedRectangle(cornerRadius: 10))
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 10)
                                         .stroke(Color.primary.opacity(0.09))
@@ -3185,7 +3251,7 @@ struct ContentView: View {
         )
         .background {
             RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
+                .fill(AppTheme.cardSubtle)
                 .overlay {
                     RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
                         .stroke(highlightsStatus ? Color.orange.opacity(0.55) : Color.primary.opacity(0.10))
@@ -3439,7 +3505,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 11))
+        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 11))
         .overlay {
             RoundedRectangle(cornerRadius: 11)
                 .stroke(installation.error == nil ? Color.primary.opacity(0.10) : Color.orange.opacity(0.45))
@@ -3583,7 +3649,7 @@ struct ContentView: View {
             )
         }
         .padding(4)
-        .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .background(AppTheme.cardSubtle, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .stroke(Color.primary.opacity(0.10))
@@ -3729,7 +3795,7 @@ struct ContentView: View {
         .padding(.vertical, 14)
         .background {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
+                .fill(AppTheme.cardSubtle)
                 .overlay {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .stroke(Color.primary.opacity(0.10))
@@ -3862,7 +3928,7 @@ struct ContentView: View {
         .padding(.vertical, 14)
         .background {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
+                .fill(AppTheme.cardSubtle)
                 .overlay {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .stroke(Color.primary.opacity(0.10))
@@ -4512,7 +4578,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                .fill(AppTheme.cardRaised)
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.primary.opacity(0.09))
@@ -4968,7 +5034,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                .fill(AppTheme.cardRaised)
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.primary.opacity(0.09))
@@ -5200,7 +5266,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                .fill(AppTheme.cardRaised)
                 .overlay {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(Color.primary.opacity(0.09))
@@ -5536,16 +5602,8 @@ struct ContentView: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .help(path)
-            Button {
-                copy(path)
-            } label: {
-                Label(copiedPath == path ? "已复制" : "复制", systemImage: copiedPath == path ? "checkmark" : "doc.on.doc")
-            }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-            .focused($focusedCopyPath, equals: path)
+            copyButton(path, help: "复制路径")
             .opacity(showsCopyButton ? 1 : 0)
-            .help("复制路径")
         }
         .contentShape(Rectangle())
         .onHover { isHovering in
@@ -5556,6 +5614,18 @@ struct ContentView: View {
             }
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: showsCopyButton)
+    }
+
+    private func copyButton(_ value: String, help: String) -> some View {
+        Button {
+            copy(value)
+        } label: {
+            Label(copiedPath == value ? "已复制" : "复制", systemImage: copiedPath == value ? "checkmark" : "doc.on.doc")
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .focused($focusedCopyPath, equals: value)
+        .help(help)
     }
 
     private var currentNotices: [String] {
