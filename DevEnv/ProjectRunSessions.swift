@@ -105,7 +105,12 @@ enum ProjectRunProcessSnapshotReader {
                 count: byteCapacity / MemoryLayout<pid_t>.size
             )
             let byteCount = processes.withUnsafeMutableBytes {
-                proc_listpids(type, typeInfo, $0.baseAddress, Int32($0.count))
+                proc_listpids(
+                    type,
+                    typeInfo,
+                    $0.baseAddress,
+                    Int32($0.count * MemoryLayout<pid_t>.size)
+                )
             }
             guard byteCount > 0 else { return nil }
             if byteCount < byteCapacity {
@@ -307,6 +312,7 @@ private func projectRunOwnershipMonitorHandler(
 
 @MainActor
 final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preconcurrency LocalProcessTerminalViewDelegate {
+    private static let scrollbackLines = 5_000
     let terminal = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
     var terminalView: NSView { terminal }
     var onExit: ((Int32?) -> Void)?
@@ -322,6 +328,7 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
 
     override init() {
         super.init()
+        terminal.terminal.changeHistorySize(Self.scrollbackLines)
         terminal.processDelegate = self
     }
 
@@ -468,12 +475,19 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
             guard processes.insert(process).inserted else { continue }
             let capacity = Int(proc_listchildpids(process, nil, 0))
             guard capacity > 0 else { continue }
-            var children = [pid_t](repeating: 0, count: capacity)
+            var children = [pid_t](
+                repeating: 0,
+                count: (capacity + MemoryLayout<pid_t>.size - 1) / MemoryLayout<pid_t>.size
+            )
             let count = children.withUnsafeMutableBytes {
-                proc_listchildpids(process, $0.baseAddress, Int32($0.count))
+                proc_listchildpids(
+                    process,
+                    $0.baseAddress,
+                    Int32($0.count * MemoryLayout<pid_t>.size)
+                )
             }
             if count > 0 {
-                pending.append(contentsOf: children.prefix(Int(count)))
+                pending.append(contentsOf: children.prefix(Int(count) / MemoryLayout<pid_t>.size))
             }
         }
         return Set(processes.compactMap { process in
