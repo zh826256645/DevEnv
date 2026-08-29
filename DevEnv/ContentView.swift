@@ -8,7 +8,7 @@ private enum AppTheme {
     static let cardSubtle = Color.white.opacity(0.58)
     static let cardSurface = Color.white.opacity(0.76)
     static let cardRaised = Color.white.opacity(0.88)
-    static let innerCard = Color(red: 0.96, green: 0.975, blue: 1.0).opacity(0.38)
+    static let innerCard = Color.gray.opacity(0.10)
 }
 
 struct ProjectTerminalView: NSViewRepresentable {
@@ -1786,54 +1786,153 @@ struct ContentView: View {
 
     private var runConfigurationEditor: some View {
         VStack(spacing: 0) {
-            Form {
-                Picker("项目", selection: $runConfigurationProjectID) {
-                    ForEach(projectsModel.records) { project in
-                        Text(project.title).tag(project.id)
-                    }
-                }
-                .disabled(editingRunConfiguration != nil)
-                .accessibilityLabel("运行配置所属项目")
-                TextField("名称", text: $runConfigurationName)
-                    .focused($runConfigurationNameIsFocused)
-                    .accessibilityLabel("运行配置名称")
-                TextField("命令", text: $runConfigurationCommand)
-                    .font(.body.monospaced())
-                    .accessibilityLabel("运行命令")
-                TextField("工作目录", text: $runConfigurationWorkingDirectory)
-                    .font(.body.monospaced())
-                    .accessibilityLabel("Project Root 相对工作目录")
-                Text("工作目录使用 Project Root 相对路径；根目录填写 .")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                if editingRunConfiguration != nil {
-                    Text("命令修改在成功启动后保存；启动失败时保留上次可用命令。")
-                        .font(.callout)
+            HStack(spacing: 12) {
+                Image(systemName: editingRunConfiguration == nil ? "plus" : "slider.horizontal.3")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(AppTheme.accent.gradient, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(editingRunConfiguration == nil ? "新建运行配置" : "编辑运行配置")
+                        .font(.headline.weight(.semibold))
+                    Text("设置项目的启动命令和工作目录")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if runConfigurationSaveAttempted, let error = projectsModel.operationError {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .accessibilityLabel("运行配置保存失败，\(error)")
+                Spacer()
+                Button { isShowingRunConfigurationEditor = false } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("取消编辑运行配置")
             }
-            .formStyle(.grouped)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 14) {
+                    runConfigurationEditorField("项目", systemImage: "folder") {
+                        Picker("项目", selection: $runConfigurationProjectID) {
+                            ForEach(projectsModel.records) { project in
+                                Text(project.title).tag(project.id)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .disabled(editingRunConfiguration != nil)
+                        .accessibilityLabel("运行配置所属项目")
+                    }
+
+                    runConfigurationEditorField("名称", systemImage: "textformat") {
+                        TextField("例如：前端开发服务器", text: $runConfigurationName)
+                            .textFieldStyle(.plain)
+                            .focused($runConfigurationNameIsFocused)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 9)
+                            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.11))
+                            }
+                            .accessibilityLabel("运行配置名称")
+                    }
+
+                    runConfigurationEditorField("命令", systemImage: "terminal") {
+                        TextEditor(text: $runConfigurationCommand)
+                            .font(.body.monospaced())
+                            .scrollContentBackground(.hidden)
+                            .scrollIndicators(.hidden)
+                            .frame(height: 72)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.11))
+                            }
+                            .accessibilityLabel("运行命令")
+                    }
+
+                    runConfigurationEditorField("工作目录", systemImage: "location") {
+                        TextField(".", text: $runConfigurationWorkingDirectory)
+                            .textFieldStyle(.plain)
+                            .font(.body.monospaced())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 9)
+                            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.11))
+                            }
+                            .accessibilityLabel("Project Root 相对工作目录")
+                    }
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        Label("启动参数说明", systemImage: "info.circle")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(AppTheme.accent)
+                        Text("工作目录使用 Project Root 相对路径；根目录填写 .")
+                        if editingRunConfiguration != nil {
+                            Text("命令修改将在成功启动后保存；启动失败时保留上次可用命令。")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(AppTheme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(AppTheme.accent.opacity(0.14))
+                    }
+
+                    if runConfigurationSaveAttempted, let error = projectsModel.operationError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("运行配置保存失败，\(error)")
+                    }
+                }
+                .padding(22)
+
             Divider()
             HStack {
                 Button("取消") { isShowingRunConfigurationEditor = false }
+                    .buttonStyle(.bordered)
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Button(editingRunConfiguration == nil ? "创建" : "保存", action: saveRunConfiguration)
+                Button(editingRunConfiguration == nil ? "创建配置" : "保存修改", action: saveRunConfiguration)
+                    .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(runConfigurationProjectID.isEmpty || projectsModel.mutationsArePaused)
             }
-            .padding()
+            .padding(.horizontal, 22)
+            .padding(.vertical, 14)
         }
-        .frame(width: 520, height: 410)
+        .frame(width: 540, height: 580)
         .onAppear {
             DispatchQueue.main.async { runConfigurationNameIsFocused = true }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    private func runConfigurationEditorField<Content: View>(
+            _ title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func beginCreatingRunConfiguration() {
