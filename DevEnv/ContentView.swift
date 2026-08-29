@@ -1212,7 +1212,7 @@ struct ContentView: View {
                             .layoutPriority(1)
                     }
                 }
-                runSafetyNotice
+                runSessionStatusBar
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
@@ -1223,8 +1223,7 @@ struct ContentView: View {
     }
 
     private var selectedRunSuggestions: [ProjectRunSuggestion] {
-        guard let projectID = runProjectFilterID else { return [] }
-        return runCoordinator.runSuggestions(projectID: projectID)
+        runCoordinator.runSuggestions(projectID: runProjectFilterID)
     }
 
     private var visibleRunConfigurations: [ProjectRunConfiguration] {
@@ -1315,19 +1314,29 @@ struct ContentView: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
     }
 
-    private var runSafetyNotice: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "checkmark.shield.fill")
-                .foregroundStyle(.blue)
+    private var runSessionStatusBar: some View {
+        let configuration = selectedRunConfiguration
+        let project = configuration.flatMap { selected in
+            projectsModel.records.first { $0.id == selected.projectID }
+        }
+        let state = configuration.flatMap { runCoordinator.session(for: $0.id)?.state } ?? .inactive
+        return HStack(spacing: 10) {
+            Image(systemName: state.isLive ? "checkmark.shield.fill" : "shield")
+                .foregroundStyle(state.isLive ? Color.green : Color.secondary)
                 .padding(7)
-                .background(Color.blue.opacity(0.12), in: Circle())
-            Text("首次运行某个项目时，将展示完整命令和工作目录，请确认信任后运行")
+                .background((state.isLive ? Color.green : Color.secondary).opacity(0.12), in: Circle())
+            projectRunState(state)
                 .font(.callout)
-                .foregroundStyle(.secondary)
             Spacer()
-            Button("了解更多") { }
+            if let project {
+                Text("最后更新：\(formatted(project.lastDiscoveredAt))")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Button("刷新状态") { runCoordinator.refreshProjects() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(runCoordinator.isRefreshingProjects)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -1428,6 +1437,12 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 12) {
                 VStack(spacing: 0) {
                     HStack(alignment: .top, spacing: 14) {
+                        Image(systemName: "terminal.fill")
+                            .font(.system(size: 23, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 50, height: 50)
+                            .background(Color.blue.gradient, in: RoundedRectangle(cornerRadius: 10))
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .center, spacing: 9) {
                                 Text(configuration.name)
@@ -1464,29 +1479,44 @@ struct ContentView: View {
                                     .buttonStyle(.borderedProminent)
                                     .tint(.red)
                                     .controlSize(.regular)
-                                    .frame(width: 56, height: 36)
+                                    .frame(minWidth: 60, minHeight: 36)
                             } else {
                                 Button(session == nil ? "运行" : "重新运行") { run(configuration, project: project) }
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.regular)
-                                    .frame(width: 56, height: 36)
+                                    .frame(minWidth: session == nil ? 60 : 76, minHeight: 36)
                                     .disabled(project == nil || project?.availability.isUnavailable == true)
                             }
                             Button("编辑") { beginEditingRunConfiguration(configuration) }
+                                .buttonStyle(.bordered)
                                 .controlSize(.regular)
-                                .frame(width: 56, height: 36)
+                                .frame(minWidth: 60, minHeight: 36)
                                 .disabled(projectsModel.mutationsArePaused || state.isLive)
                             Menu { Button("删除", role: .destructive) { pendingRunConfigurationDeletion = configuration } } label: {
                                 Image(systemName: "ellipsis")
+                                    .frame(width: 34, height: 22)
                             }
-                            .menuStyle(.borderlessButton)
+                            .menuStyle(.button)
                             .controlSize(.regular)
-                            .frame(width: 32, height: 36)
+                            .frame(minWidth: 42, minHeight: 36)
                         }
                     }
                     .padding(16)
 
-                    Divider().opacity(0.45)
+                    Text("配置详情")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.bottom, 10)
+                        .overlay(alignment: .bottom) {
+                            Rectangle()
+                                .fill(Color.accentColor)
+                                .frame(height: 3)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 10)
+                        .overlay(alignment: .bottom) {
+                            Divider().opacity(0.45)
+                        }
 
                     VStack(alignment: .leading, spacing: 0) {
                         runDetailRow("命令") {
@@ -1633,14 +1663,21 @@ struct ContentView: View {
     }
 
     private func projectRunStatusBadge(_ state: ProjectRunSessionState) -> some View {
-        let live = state.isLive
-        return Label(live ? "运行中" : "未启动", systemImage: live ? "checkmark.circle.fill" : "circle.fill")
+        let badge: (title: String, symbol: String, color: Color) = switch state {
+        case .inactive: ("未启动", "circle.fill", .secondary)
+        case .starting: ("正在启动", "hourglass", .blue)
+        case .running: ("运行中", "checkmark.circle.fill", .green)
+        case .stopping: ("正在停止", "stop.circle.fill", .orange)
+        case let .exited(code): (code == 0 ? "已结束" : "异常退出", code == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill", code == 0 ? .secondary : .orange)
+        case .launchFailed: ("启动失败", "exclamationmark.triangle.fill", .orange)
+        }
+        return Label(badge.title, systemImage: badge.symbol)
             .font(.caption2.weight(.semibold))
             .fixedSize()
-            .foregroundStyle(live ? Color.green : Color.secondary)
+            .foregroundStyle(badge.color)
             .padding(.horizontal, 7)
             .frame(height: 20)
-            .background((live ? Color.green : Color.secondary).opacity(0.13), in: Capsule())
+            .background(badge.color.opacity(0.13), in: Capsule())
     }
 
     @ViewBuilder
