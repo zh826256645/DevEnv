@@ -2,13 +2,40 @@ import AppKit
 import SwiftUI
 
 private enum AppTheme {
-    static let accent = Color(red: 0.08, green: 0.38, blue: 0.95)
-    static let canvas = Color(red: 0.95, green: 0.975, blue: 1.0)
-    static let sidebar = Color(red: 0.91, green: 0.95, blue: 1.0)
-    static let cardSubtle = Color.white.opacity(0.58)
-    static let cardSurface = Color.white.opacity(0.76)
-    static let cardRaised = Color.white.opacity(0.88)
-    static let innerCard = Color.gray.opacity(0.10)
+    static let accent = adaptive(
+        light: NSColor(red: 0.08, green: 0.38, blue: 0.95, alpha: 1),
+        dark: NSColor(red: 0.29, green: 0.57, blue: 1, alpha: 1)
+    )
+    static let canvas = adaptive(
+        light: NSColor(red: 0.95, green: 0.975, blue: 1, alpha: 1),
+        dark: NSColor(red: 0.05, green: 0.08, blue: 0.13, alpha: 1)
+    )
+    static let sidebar = adaptive(
+        light: NSColor(red: 0.91, green: 0.95, blue: 1, alpha: 1),
+        dark: NSColor(red: 0.07, green: 0.11, blue: 0.18, alpha: 1)
+    )
+    static let cardSubtle = adaptive(
+        light: NSColor(white: 1, alpha: 0.58),
+        dark: NSColor(red: 0.08, green: 0.13, blue: 0.21, alpha: 0.82)
+    )
+    static let cardSurface = adaptive(
+        light: NSColor(white: 1, alpha: 0.76),
+        dark: NSColor(red: 0.09, green: 0.15, blue: 0.24, alpha: 0.92)
+    )
+    static let cardRaised = adaptive(
+        light: NSColor(white: 1, alpha: 0.88),
+        dark: NSColor(red: 0.10, green: 0.17, blue: 0.27, alpha: 0.96)
+    )
+    static let innerCard = adaptive(
+        light: NSColor(white: 0.5, alpha: 0.10),
+        dark: NSColor(white: 1, alpha: 0.07)
+    )
+
+    private static func adaptive(light: NSColor, dark: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        })
+    }
 }
 
 struct ProjectTerminalView: NSViewRepresentable {
