@@ -1,13 +1,13 @@
 import Foundation
 
-enum ProjectRequirementSatisfactionState: String, Codable, Sendable {
+enum ProjectRequirementSatisfactionState: String, Codable, Equatable, Sendable {
     case satisfied
     case unsatisfied
     case undetermined
     case declarationConflict
 }
 
-enum ProjectRequirementsSummary: String, Codable, Sendable {
+enum ProjectRequirementsSummary: String, Codable, Equatable, Sendable {
     case satisfied
     case unsatisfied
     case undetermined

@@ -2,6 +2,31 @@ import XCTest
 @testable import DevEnv
 
 final class ProjectRecordsTests: XCTestCase {
+    func testProjectRepositoryStateReadsBranchDetachedHeadAndWorktreeMarker() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = root.appendingPathComponent("repository")
+        let nested = repository.appendingPathComponent("packages/app")
+        let gitDirectory = repository.appendingPathComponent(".git")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: gitDirectory, withIntermediateDirectories: true)
+        try Data("ref: refs/heads/feature/overview\n".utf8).write(to: gitDirectory.appendingPathComponent("HEAD"))
+
+        XCTAssertEqual(ProjectRepositoryState.read(projectRoot: nested.path), .branch("feature/overview"))
+
+        try Data("0123456789abcdef\n".utf8).write(to: gitDirectory.appendingPathComponent("HEAD"))
+        XCTAssertEqual(ProjectRepositoryState.read(projectRoot: nested.path), .detached("01234567"))
+
+        let worktree = root.appendingPathComponent("worktree")
+        let worktreeGit = root.appendingPathComponent("worktree-git")
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: worktreeGit, withIntermediateDirectories: true)
+        try Data("gitdir: ../worktree-git\n".utf8).write(to: worktree.appendingPathComponent(".git"))
+        try Data("ref: refs/heads/develop\n".utf8).write(to: worktreeGit.appendingPathComponent("HEAD"))
+        XCTAssertEqual(ProjectRepositoryState.read(projectRoot: worktree.path), .branch("develop"))
+        XCTAssertEqual(ProjectRepositoryState.read(projectRoot: root.appendingPathComponent("plain").path), .nonGit)
+    }
+
     @MainActor
     func testPythonAndCargoRunSuggestionsStayStaticAndFollowProjectBoundaries() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

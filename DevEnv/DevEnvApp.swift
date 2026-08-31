@@ -37,6 +37,6 @@ struct DevEnvApp: App {
             )
         }
         .windowToolbarStyle(.unifiedCompact)
-        .defaultSize(width: 1280, height: 820)
+        .defaultSize(width: 1280, height: 800)
     }
 }

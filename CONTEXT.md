@@ -37,8 +37,40 @@ DevEnv 从项目声明中只读识别、可由用户选择保存为 Project Run 
 _Avoid_: Auto Run, Project Requirement, Runnable Status
 
 **Project Run Session**:
-用户从已保存的 Project Run Configuration 显式启动、仅存在于当前 App 进程中的交互式 PTY 会话；它保留本次进程状态、内存中的终端输出和退出码，但不持久化为 Project Record 或 Machine Snapshot。
+用户从已保存的 Project Run Configuration 显式启动、仅存在于当前 App 进程中的交互式 PTY 会话；它保留本次实际启动命令、启动时间、进程状态、内存中的终端输出和退出码，但不持久化为 Project Record 或 Machine Snapshot。
 _Avoid_: Shell Session, Terminal Application, Machine Snapshot
+
+**Active Project Run Session**:
+处于“启动中”“运行中”“停止中”“重启中”或“重启失败”的 Project Run Session；“已退出”和“启动失败”的会话不属于活动会话。
+_Avoid_: Running Project, Active Project
+
+**Project Run Failure**:
+Project Run Session 未能启动、无法安全重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
+_Avoid_: Project Health, Project Error
+
+**Project Run Listener Binding**:
+监听进程能够被确证属于某个 Project Run Session 的 Listener Binding；无法可靠归属的绑定保持未知，不按 Project Root 或命令文本猜测。
+_Avoid_: Project Port, Inferred Session Port
+
+**Project Repository State**:
+对 Project Root 所属 Git 仓库当前分支或 detached HEAD 的即时观察结果；它不是 Project Run Session 启动时的仓库快照。
+_Avoid_: Git Tooling State, Launch Branch
+
+**Overview Attention**:
+与 Active Project Run Session 或尚未清除的 Project Run Failure 相关，或会降低总览可信度与整机安全性的明确风险集合；未运行项目的要求缺口和普通未安装、未启动状态不属于该集合。
+_Avoid_: Machine Health, Environment Issue, All Notices
+
+**Overview Attention Item**:
+Overview Attention 中一个可独立导航的风险：项目要求按 Project Root 与能力唯一，运行失败按 Project Run Session 唯一，端口暴露按会话汇总，扫描与磁盘风险各自唯一。
+_Avoid_: Notice Count, Duplicate Session Warning
+
+**Environment Snapshot Freshness**:
+最近一次成功 Environment Scan 距今不超过 24 小时；超过该时间的 Machine Snapshot 属于过期结果。
+_Avoid_: Dynamic Status Freshness
+
+**Run Status Freshness**:
+最近一次成功动态运行与监听状态观察距今不超过 60 秒；明确刷新失败时立即失去新鲜状态。
+_Avoid_: Environment Snapshot Freshness
 
 **Ignored Project**:
 用户从 DevEnv 删除后不再由 Project Search Root 自动恢复的 Project Root；直接重新添加该目录或由用户恢复时解除忽略。

@@ -105,6 +105,25 @@ private extension View {
         }
         .frame(minHeight: minHeight, alignment: .top)
     }
+
+    func overviewCard(cornerRadius: CGFloat = 15) -> some View {
+        background {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(AppTheme.cardSurface)
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(Color.primary.opacity(0.09))
+            }
+        }
+    }
+
+    func overviewListItemCard(cornerRadius: CGFloat = 9) -> some View {
+        background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(Color.primary.opacity(0.09))
+            }
+    }
 }
 
 struct LocalServiceDisplayGroup: Identifiable {
@@ -259,9 +278,32 @@ func localServiceNotices(_ services: [LocalServiceSnapshot]) -> [EnvironmentNoti
     }
 }
 
+func overviewVisibleRunLimit(cardHeight: CGFloat, itemCount: Int) -> Int {
+    guard itemCount > 0 else { return 0 }
+    return (1...min(4, itemCount)).reversed().first { count in
+        let footerHeight: CGFloat = itemCount > count ? 36 : 0
+        return 58 + CGFloat(count * 82 + max(0, count - 1) * 6) + footerHeight <= cardHeight
+    } ?? 1
+}
+
+func overviewVisibleAttentionLimit(cardHeight: CGFloat, itemCount: Int) -> Int {
+    min(itemCount, cardHeight >= (itemCount > 4 ? 320 : 284) ? 4 : 3)
+}
+
+func listenerBindingText(_ binding: ListenerBinding) -> String {
+    let rawAddress = if binding.address == "*" {
+        binding.family == .ipv4 ? "0.0.0.0" : "::"
+    } else {
+        binding.address
+    }
+    let address = binding.family == .ipv6 ? "[\(rawAddress)]" : rawAddress
+    return "\(address):\(binding.port)"
+}
+
 enum NoticeIdentity: Hashable {
     case message(String)
     case localService(ListenerBinding)
+    case overview(String)
 }
 
 @MainActor
@@ -320,6 +362,7 @@ final class EnvironmentViewModel: ObservableObject {
                 guard let self else { return }
                 if result.canPersist {
                     self.snapshot = result.snapshot
+                    self.dynamicStatusRefreshedAt = result.snapshot.scannedAt
                     self.dynamicRefreshError = nil
                 }
                 if let persistenceError {
@@ -447,6 +490,37 @@ struct ContentView: View {
         let executable: String
     }
 
+    private struct OverviewRun: Identifiable {
+        var id: String { configuration.id }
+        let configuration: ProjectRunConfiguration
+        let project: ProjectRecord
+        let session: ProjectRunSession
+        let bindings: [ListenerBinding]?
+        let repositoryState: ProjectRepositoryState
+    }
+
+    private enum OverviewAttentionDestination {
+        case run(String)
+        case project(String, capability: String)
+        case runtime(String)
+        case database(String)
+        case localServices
+        case environmentRefresh
+        case dynamicRefresh
+        case storage
+    }
+
+    private struct OverviewAttentionItem: Identifiable {
+        let id: String
+        let title: String
+        let detail: String
+        let systemImage: String
+        let tint: Color
+        let priority: Int
+        let occurredAt: Date?
+        let destination: OverviewAttentionDestination
+    }
+
     private enum Page: CaseIterable, Hashable {
         case overview
         case projects
@@ -454,6 +528,7 @@ struct ContentView: View {
         case runtimes
         case databases
         case localServices
+        case environment
         case settings
 
         static var primaryPages: [Page] { allCases.filter { $0 != .settings } }
@@ -467,6 +542,7 @@ struct ContentView: View {
             case .runtimes: "开发语言"
             case .databases: "数据库"
             case .localServices: "本地服务"
+            case .environment: "系统信息"
             case .settings: "设置"
             }
         }
@@ -479,6 +555,7 @@ struct ContentView: View {
             case .runtimes: "terminal"
             case .databases: "cylinder"
             case .localServices: "network"
+            case .environment: "info.circle"
             case .settings: "gearshape"
             }
         }
@@ -559,7 +636,7 @@ struct ContentView: View {
 
     var body: some View {
         navigation(model.snapshot)
-        .frame(minWidth: 720, minHeight: 560)
+        .frame(minWidth: 1100, minHeight: 720)
         .tint(AppTheme.accent)
         .toolbar {
             ToolbarItemGroup {
@@ -587,31 +664,42 @@ struct ContentView: View {
                 }
 
                 Button {
-                    if selectedPage?.usesProjectRecords == true {
+                    if selectedPage == .overview {
+                        model.scan()
+                        runCoordinator.refreshProjects()
+                    } else if selectedPage?.usesProjectRecords == true {
                         runCoordinator.refreshProjects()
                     } else {
                         model.scan()
                     }
                 } label: {
-                    if selectedPage?.usesProjectRecords == true
-                        ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                        : model.isBusy {
+                    if selectedPage == .overview
+                        ? (model.isBusy || projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                        : (selectedPage?.usesProjectRecords == true
+                            ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                            : model.isBusy) {
                         ProgressView().controlSize(.small)
                     } else {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
                 .accessibilityLabel(
-                    selectedPage?.usesProjectRecords == true
+                    selectedPage == .overview
+                        ? (model.isBusy || projectsModel.isRefreshingProjects ? "正在刷新总览" : "刷新总览")
+                        : selectedPage?.usesProjectRecords == true
                         ? (projectsModel.isScanning || projectsModel.isRefreshingProjects
                             ? "正在刷新项目"
                             : "刷新项目")
                         : (model.busyDescription ?? "重新扫描")
                 )
-                .help(selectedPage?.usesProjectRecords == true ? "刷新项目状态" : (model.busyDescription ?? "重新扫描"))
+                .help(selectedPage == .overview
+                    ? "刷新运行、项目与环境状态"
+                    : (selectedPage?.usesProjectRecords == true ? "刷新项目状态" : (model.busyDescription ?? "重新扫描")))
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(
-                    selectedPage?.usesProjectRecords == true
+                    selectedPage == .overview
+                        ? (model.isBusy || projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                        : selectedPage?.usesProjectRecords == true
                         ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
                         : model.isBusy
                 )
@@ -629,7 +717,10 @@ struct ContentView: View {
                 model.refreshDynamicStatus()
             }
         }
-        .onAppear(perform: updateRefreshActivity)
+        .onAppear {
+            updateRefreshActivity()
+            if selectedPage == .overview { runCoordinator.refreshProjects() }
+        }
         .onDisappear {
             if selectedPage == .projects { projectsModel.leaveProjects() }
         }
@@ -653,7 +744,15 @@ struct ContentView: View {
         }
         .onChange(of: model.snapshot?.scannedAt) {
             readNoticeIdentities.removeAll()
-            if selectedPage == .projects {
+            switch selectedPage {
+            case .projects?, .overview?:
+                runCoordinator.refreshRequirements(machineSnapshot: model.snapshot)
+            default:
+                break
+            }
+        }
+        .onChange(of: model.dynamicStatusRefreshedAt) {
+            if selectedPage == .overview {
                 runCoordinator.refreshRequirements(machineSnapshot: model.snapshot)
             }
         }
@@ -887,6 +986,8 @@ struct ContentView: View {
                 if page == .projects { projectsPage } else { runsPage }
             }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else if page == .overview, let snapshot {
+            overviewPage(snapshot)
         } else {
             ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -901,11 +1002,7 @@ struct ContentView: View {
 
                 switch page {
                 case .overview:
-                    if let snapshot {
-                        overviewMetricsSection(snapshot)
-                        topOverviewSection(snapshot)
-                        environmentSection(snapshot)
-                    }
+                    EmptyView()
                 case .projects:
                     EmptyView()
                 case .runs:
@@ -916,6 +1013,11 @@ struct ContentView: View {
                     if let snapshot { databasePage(snapshot.databaseInstallationOverviews) }
                 case .localServices:
                     if let snapshot { localServicesSection(snapshot) }
+                case .environment:
+                    if let snapshot {
+                        environmentSection(snapshot)
+                        systemSection(snapshot.system)
+                    }
                 case .settings:
                     settingsPage
                 }
@@ -963,6 +1065,10 @@ struct ContentView: View {
         }
         if page == .runs, previousPage != .runs {
             runCoordinator.refreshProjects()
+        }
+        if page == .overview, previousPage != .overview {
+            runCoordinator.refreshProjects()
+            runCoordinator.refreshRequirements(machineSnapshot: model.snapshot)
         }
         if page == .settings { settingsDraft = model.autoRefreshSettings }
     }
@@ -1423,13 +1529,19 @@ struct ContentView: View {
     private func runConfigurationRow(_ configuration: ProjectRunConfiguration) -> some View {
         let session = runCoordinator.session(for: configuration.id)
         let isSelected = selectedRunConfiguration?.id == configuration.id
-        let isLive = session?.state.isLive == true
+        let state = session?.state ?? .inactive
+        let isLive = state.isLive
+        let status: (title: String, color: Color) = switch state {
+        case .restarting: ("重启中", .blue)
+        case .restartFailed: ("重启失败", .orange)
+        default: (isLive ? "运行中" : "未启动", isLive ? .green : .secondary)
+        }
         return Button {
             selectedRunConfigurationID = configuration.id
         } label: {
             HStack(spacing: 10) {
                 Circle()
-                    .fill(isLive ? Color.green : Color.secondary.opacity(0.7))
+                    .fill(status.color)
                     .frame(width: 9, height: 9)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(configuration.name)
@@ -1442,12 +1554,12 @@ struct ContentView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 4)
-                Text(isLive ? "运行中" : "未启动")
+                Text(status.title)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(isLive ? Color.green : Color.secondary)
+                    .foregroundStyle(status.color)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
-                    .background((isLive ? Color.green : Color.secondary).opacity(0.12), in: Capsule())
+                    .background(status.color.opacity(0.12), in: Capsule())
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.secondary)
@@ -1505,7 +1617,19 @@ struct ContentView: View {
                         }
                         Spacer()
                         HStack(spacing: 6) {
-                            if state == .stopping {
+                            if state == .restarting {
+                                Button {} label: {
+                                    HStack(spacing: 6) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                        Text("正在重启")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.regular)
+                                .frame(width: 96, height: 36)
+                                .disabled(true)
+                            } else if state == .stopping {
                                 Button {
                                     runCoordinator.stop(configurationID: configuration.id)
                                 } label: {
@@ -1520,6 +1644,20 @@ struct ContentView: View {
                                 .controlSize(.regular)
                                 .frame(width: 88, height: 36)
                                 .disabled(true)
+                            } else if state.canRestart {
+                                Button("重启") {
+                                    guard let project else { return }
+                                    runCoordinator.restart(configuration, project: project)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.regular)
+                                .frame(minWidth: 60, minHeight: 36)
+                                .disabled(project == nil || project?.availability.isUnavailable == true)
+                                Button("停止", role: .destructive) { runCoordinator.stop(configurationID: configuration.id) }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.red)
+                                    .controlSize(.regular)
+                                    .frame(minWidth: 60, minHeight: 36)
                             } else if state.isLive {
                                 Button("停止", role: .destructive) { runCoordinator.stop(configurationID: configuration.id) }
                                     .buttonStyle(.borderedProminent)
@@ -1610,6 +1748,11 @@ struct ContentView: View {
                                 .controlSize(.small)
                                 .disabled(project == nil || project?.availability.isUnavailable == true)
                         }
+                        if session?.lastSuccessfulCommand != nil {
+                            Button("清空") { runCoordinator.clearTerminal(configurationID: configuration.id) }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
                         if session?.lastSuccessfulCommand != nil, !state.isLive {
                             Button("关闭终端") { runCoordinator.closeTerminal(configurationID: configuration.id) }
                                 .buttonStyle(.bordered)
@@ -1696,6 +1839,8 @@ struct ContentView: View {
             HStack {
                 Text(configuration.name).font(.title2.bold())
                 Spacer()
+                Button("清空") { runCoordinator.clearTerminal(configurationID: configuration.id) }
+                    .disabled(runCoordinator.session(for: configuration.id)?.lastSuccessfulCommand == nil)
                 Button("关闭") { expandedTerminalConfiguration = nil }
                     .keyboardShortcut(.cancelAction)
             }
@@ -1763,6 +1908,8 @@ struct ContentView: View {
         case .starting: ("正在启动", "hourglass", .blue)
         case .running: ("运行中", "checkmark.circle.fill", .green)
         case .stopping: ("正在停止", "stop.circle.fill", .orange)
+        case .restarting: ("正在重启", "arrow.clockwise.circle.fill", .blue)
+        case .restartFailed: ("重启失败", "exclamationmark.triangle.fill", .orange)
         case let .exited(code): (code == 0 ? "已结束" : "异常退出", code == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill", code == 0 ? .secondary : .orange)
         case .launchFailed: ("启动失败", "exclamationmark.triangle.fill", .orange)
         }
@@ -1789,6 +1936,12 @@ struct ContentView: View {
                 .foregroundStyle(.green)
         case .stopping:
             Label("正在停止", systemImage: "stop.circle")
+                .foregroundStyle(.orange)
+        case .restarting:
+            Label("正在重启", systemImage: "arrow.clockwise.circle.fill")
+                .foregroundStyle(.blue)
+        case let .restartFailed(message):
+            Label("重启失败：\(message)", systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
         case let .exited(code):
             Label("已退出（退出码 \(code)）", systemImage: code == 0 ? "checkmark.circle" : "xmark.circle")
@@ -2147,14 +2300,17 @@ struct ContentView: View {
                     if projectsModel.staleProjectIDs.contains(project.id) {
                         Text("过期")
                     }
+                    if hasActiveSession {
+                        HStack(spacing: 5) {
+                            Image(systemName: "play.circle.fill")
+                            Text("运行中")
+                        }
+                        .padding(.leading, 3)
+                        .foregroundStyle(.green)
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(projectSummaryColor(summary))
-                if hasActiveSession {
-                    Label("运行中", systemImage: "play.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                }
             }
         }
         .opacity(project.availability == .available ? 1 : 0.72)
@@ -2931,6 +3087,929 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func overviewPage(_ snapshot: MachineSnapshot) -> some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let runs = overviewRuns(snapshot)
+            let attention = overviewAttentionItems(snapshot, runs: runs, now: context.date)
+
+            VStack(alignment: .leading, spacing: 12) {
+                overviewHeader(snapshot, now: context.date)
+
+                GeometryReader { geometry in
+                    let attentionWidth = min(max(geometry.size.width * 0.32, 280), 350)
+                    let visibleRunLimit = overviewVisibleRunLimit(
+                        cardHeight: geometry.size.height,
+                        itemCount: runs.count
+                    )
+                    let visibleAttentionLimit = overviewVisibleAttentionLimit(
+                        cardHeight: geometry.size.height,
+                        itemCount: attention.count
+                    )
+                    HStack(alignment: .top, spacing: 12) {
+                        overviewRunningCard(runs, visibleLimit: visibleRunLimit, now: context.date)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        overviewAttentionCard(attention, visibleLimit: visibleAttentionLimit)
+                            .frame(width: attentionWidth)
+                            .frame(maxHeight: .infinity)
+                    }
+                }
+                .frame(minHeight: 322)
+
+                overviewEnvironmentSummary(snapshot)
+                overviewBaseConfiguration(snapshot)
+                overviewSystemSummary(snapshot.system)
+            }
+            .frame(maxWidth: 1100, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .background(AppTheme.canvas)
+    }
+
+    private func overviewHeader(_ snapshot: MachineSnapshot, now: Date) -> some View {
+        let isRefreshing = model.isBusy || projectsModel.isScanning || projectsModel.isRefreshingProjects
+        let dynamicUpdatedAt = model.dynamicStatusRefreshedAt ?? snapshot.scannedAt
+        let isStale = now.timeIntervalSince(dynamicUpdatedAt) > 60
+            || now.timeIntervalSince(snapshot.scannedAt) > 24 * 60 * 60
+
+        return VStack(alignment: .leading, spacing: 5) {
+            Text("总览")
+                .font(.system(size: 30, weight: .bold))
+            HStack(spacing: 8) {
+                Text("运行状态：\(relativeUpdateText(dynamicUpdatedAt, now: now)) · 环境扫描：\(relativeCompletionText(snapshot.scannedAt, now: now))")
+                if isRefreshing {
+                    Label("正在更新", systemImage: "arrow.triangle.2.circlepath")
+                } else if isStale {
+                    Label("状态可能已过期", systemImage: "clock.badge.exclamationmark")
+                        .foregroundStyle(.orange)
+                }
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func overviewRunningCard(_ runs: [OverviewRun], visibleLimit: Int, now: Date) -> some View {
+        let visibleRuns = Array(runs.prefix(visibleLimit))
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("运行会话")
+                    .font(.title3.bold())
+                Text(runs.count.formatted())
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.07), in: Capsule())
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 48)
+
+            if runs.isEmpty {
+                Button {
+                    selectPage(.runs)
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("当前没有运行会话")
+                            .font(.callout.weight(.semibold))
+                        Text("启动运行配置后，会在这里显示实时状态")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Text("查看运行配置")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.top, 2)
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(visibleRuns) { run in
+                        overviewRunRow(run, now: now)
+                    }
+
+                    if runs.count > visibleRuns.count {
+                        Button("还有 \(runs.count - visibleRuns.count) 个运行会话") {
+                            selectPage(.runs)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 16)
+                        .frame(height: 30, alignment: .leading)
+                    }
+                }
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
+            }
+        }
+        .overviewCard()
+    }
+
+    private func overviewRunRow(_ run: OverviewRun, now: Date) -> some View {
+        let summary = projectsModel.summary(for: run.project)
+        let tint = overviewRunColor(run.session.state)
+        return Button {
+            selectedRunConfigurationID = run.configuration.id
+            selectPage(.runs)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 8, height: 8)
+                    .padding(.top, 9)
+                    .accessibilityHidden(true)
+
+                overviewRunLogo(run)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(run.project.title)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        if run.session.state == .running, let startedAt = run.session.startedAt {
+                            Text("已运行 \(runDuration(from: startedAt, now: now))")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .fixedSize()
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        HStack(spacing: 5) {
+                            Text(run.configuration.name)
+                            Text("·")
+                                .foregroundStyle(.tertiary)
+                            Text(repositoryStateText(run.repositoryState))
+                                .monospaced()
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+
+                        Spacer(minLength: 4)
+
+                        Text(projectRunStateTitle(run.session.state))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(tint)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(tint.opacity(0.10), in: Capsule())
+                            .fixedSize()
+
+                        Divider().frame(height: 16)
+
+                        Label(overviewPortsText(run), systemImage: "network")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+
+                        Divider().frame(height: 16)
+
+                        TimelineView(.periodic(from: .now, by: 2)) { _ in
+                            Label("内存 \(overviewMemoryText(run))", systemImage: "memorychip")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .fixedSize()
+                        }
+
+                        Divider().frame(height: 16)
+
+                        Label(
+                            overviewProjectRequirementText(summary),
+                            systemImage: projectSummarySymbol(summary)
+                        )
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(projectSummaryColor(summary))
+                        .fixedSize()
+                    }
+
+                    Text(run.session.lastSuccessfulCommand ?? run.configuration.command)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overviewListItemCard()
+        .accessibilityLabel("\(run.project.title)，\(run.configuration.name)，\(projectRunStateTitle(run.session.state))")
+    }
+
+    @ViewBuilder
+    private func overviewRunLogo(_ run: OverviewRun) -> some View {
+        if let brand = overviewRunBrand(run) {
+            runtimeLogo(brand, size: 42, padding: 7, cornerRadius: 9)
+        } else {
+            Image(systemName: "terminal.fill")
+                .font(.system(size: 21, weight: .medium))
+                .foregroundStyle(.blue)
+                .frame(width: 42, height: 42)
+                .background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func overviewRunBrand(_ run: OverviewRun) -> (assetName: String, color: Color)? {
+        guard let analysis = projectsModel.analyses[run.project.id] else { return nil }
+        let componentCapabilities = analysis.components
+            .first { $0.relativePath == run.configuration.workingDirectory }?
+            .requirements.map(\.capability) ?? []
+        return (componentCapabilities + analysis.requirements.map(\.capability))
+            .lazy.compactMap(runtimeBrand).first
+    }
+
+    private func overviewAttentionCard(_ items: [OverviewAttentionItem], visibleLimit: Int) -> some View {
+        let visibleItems = Array(items.prefix(visibleLimit))
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("需要关注")
+                    .font(.title3.bold())
+                if !items.isEmpty {
+                    Text(items.count.formatted())
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 48)
+
+            if items.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("当前没有需要处理的问题")
+                        .font(.callout.weight(.semibold))
+                    Text("运行会话和环境扫描状态正常")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(visibleItems) { item in
+                        overviewAttentionRow(item)
+                    }
+
+                    if items.count > visibleItems.count {
+                        Button("查看全部 \(items.count) 项提醒") { isShowingNotifications = true }
+                            .buttonStyle(.plain)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 14)
+                            .frame(height: 30, alignment: .leading)
+                    }
+                }
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
+            }
+        }
+        .overviewCard()
+    }
+
+    private func overviewAttentionRow(_ item: OverviewAttentionItem) -> some View {
+        Button { navigate(to: item.destination) } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: item.systemImage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(item.tint)
+                    .frame(width: 18, height: 20)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(item.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 3)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 3)
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overviewListItemCard()
+    }
+
+    private func overviewEnvironmentSummary(_ snapshot: MachineSnapshot) -> some View {
+        let projectSummaries = projectsModel.records.compactMap { projectsModel.summary(for: $0) }
+        let satisfiedProjects = projectSummaries.count { $0 == .satisfied }
+        let unsatisfiedProjects = projectSummaries.count { $0 == .unsatisfied }
+        let otherProjects = projectsModel.records.count - satisfiedProjects - unsatisfiedProjects
+        let discoveredRuntimes = snapshot.runtimes.filter { runtime in
+            runtime.installations.contains { $0.state == .discovered }
+        }
+        let runtimeVersionKeys: [String] = discoveredRuntimes.flatMap { runtime -> [String] in
+            runtime.installations.compactMap { installation in
+                guard installation.state == .discovered, let version = installation.version else { return nil }
+                return "\(runtime.id):\(version)"
+            }
+        }
+        let runtimeVersions = Set(runtimeVersionKeys)
+        let installations = snapshot.databaseInstallationOverviews.flatMap(\.installations)
+        let listeningInstallations = installations.count { $0.listeningState == .listening }
+        let processCount = Set(snapshot.localServices.map(\.pid)).count
+        let portCount = Set(snapshot.localServices.flatMap { $0.bindings.map(\.port) }).count
+        let runtimeResultsArePartial = snapshot.runtimes.contains { $0.state == .failed }
+        let databaseResultsArePartial = snapshot.databaseInstallationOverviews.contains {
+            $0.discoveryState == .unknown || $0.listeningState == .unknown
+        }
+        let localServiceResultsArePartial = snapshot.localServiceScanNotice != nil
+
+        return VStack(alignment: .leading, spacing: 7) {
+            Text("环境概况")
+                .font(.headline)
+            HStack(spacing: 10) {
+                overviewSummaryCard(
+                    title: "项目要求状态",
+                    value: "\(satisfiedProjects) 个项目满足",
+                    detail: "\(unsatisfiedProjects) 个不满足 · \(otherProjects) 个待判断",
+                    systemImage: "folder",
+                    tint: AppTheme.accent
+                ) { selectPage(.projects) }
+                overviewSummaryCard(
+                    title: "开发语言",
+                    value: "发现 \(discoveredRuntimes.count) 类",
+                    detail: runtimeResultsArePartial
+                        ? "\(runtimeVersions.count) 个安装版本 · 部分结果不可用"
+                        : "共 \(runtimeVersions.count) 个安装版本",
+                    systemImage: "terminal",
+                    tint: .purple
+                ) { selectPage(.runtimes) }
+                overviewSummaryCard(
+                    title: "数据库",
+                    value: "已安装 \(installations.count) 个",
+                    detail: databaseResultsArePartial
+                        ? "\(listeningInstallations) 个正在监听 · 部分结果不可用"
+                        : "\(listeningInstallations) 个正在监听",
+                    systemImage: "cylinder",
+                    tint: .orange
+                ) { selectPage(.databases) }
+                overviewSummaryCard(
+                    title: "本地服务",
+                    value: "\(processCount) 个监听进程",
+                    detail: localServiceResultsArePartial
+                        ? "共监听 \(portCount) 个端口 · 部分结果不可用"
+                        : "共监听 \(portCount) 个端口",
+                    systemImage: "network",
+                    tint: .cyan
+                ) { selectPage(.localServices) }
+            }
+        }
+    }
+
+    private func overviewSummaryCard(
+        title: String,
+        value: String,
+        detail: String,
+        systemImage: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 28, height: 28)
+                    .background(tint.opacity(0.11), in: RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(value)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overviewCard(cornerRadius: 12)
+    }
+
+    private func overviewBaseConfiguration(_ snapshot: MachineSnapshot) -> some View {
+        let pathManagers = snapshot.packageManagers.count {
+            $0.state == .available || $0.state == .configured
+        }
+        let terminals = snapshot.terminalApplications
+        let defaultShell = snapshot.shellInstallations.first(where: \.isDefault)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            Text("基础配置")
+                .font(.headline)
+            HStack(spacing: 0) {
+                overviewBaseItem(
+                    title: "包管理器",
+                    value: snapshot.homebrew.version.map { "Homebrew \($0)" }
+                        ?? (snapshot.homebrew.available ? "Homebrew" : "未发现 Homebrew"),
+                    detail: "另发现 \(pathManagers) 个 PATH 工具",
+                    assetName: "PackageManagerHomebrewLogo",
+                    systemImage: nil,
+                    isProblem: !snapshot.homebrew.available,
+                    tint: .orange,
+                    card: .packageManagers
+                )
+                Divider().frame(height: 44)
+                overviewBaseItem(
+                    title: "Git",
+                    value: snapshot.gitCLI.version ?? (snapshot.gitCLI.state == .available ? "可用" : "未发现"),
+                    detail: "当前生效 CLI",
+                    assetName: "GitLogo",
+                    systemImage: nil,
+                    isProblem: snapshot.gitCLI.state != .available,
+                    tint: .orange,
+                    card: .git
+                )
+                Divider().frame(height: 44)
+                overviewBaseItem(
+                    title: "Terminal",
+                    value: terminals.isEmpty ? "未发现" : "发现 \(terminals.count) 个",
+                    detail: terminals.isEmpty
+                        ? "未发现应用"
+                        : terminals.prefix(2).map(\.name).joined(separator: " · "),
+                    assetName: nil,
+                    systemImage: "macwindow.on.rectangle",
+                    isProblem: terminals.isEmpty,
+                    tint: .cyan,
+                    card: .terminal
+                )
+                Divider().frame(height: 44)
+                overviewBaseItem(
+                    title: "默认 Shell",
+                    value: defaultShell?.name ?? "未发现",
+                    detail: defaultShell?.path ?? "账户默认 Shell 不可用",
+                    assetName: nil,
+                    systemImage: "terminal",
+                    isProblem: defaultShell?.isAvailable != true,
+                    tint: .indigo,
+                    card: .shell
+                )
+            }
+            .frame(height: 68)
+            .overviewCard(cornerRadius: 12)
+        }
+    }
+
+    private func overviewBaseItem(
+        title: String,
+        value: String,
+        detail: String,
+        assetName: String?,
+        systemImage: String?,
+        isProblem: Bool,
+        tint: Color,
+        card: EnvironmentCard
+    ) -> some View {
+        let iconTint = isProblem ? Color.orange : tint
+        return Button {
+            expandedEnvironmentCard = card
+            selectPage(.environment)
+        } label: {
+            HStack(spacing: 10) {
+                Group {
+                    if let assetName {
+                        Image(assetName).resizable().scaledToFit().padding(6)
+                    } else if let systemImage {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 15, weight: .medium))
+                    }
+                }
+                .foregroundStyle(iconTint)
+                .frame(width: 30, height: 30)
+                .background(iconTint.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
+                .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(value)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(isProblem ? .orange : .primary)
+                        .lineLimit(1)
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func overviewSystemSummary(_ system: SystemSnapshot) -> some View {
+        let usedRatio: Double? = if let total = system.diskTotalBytes,
+                                    let free = system.diskFreeBytes,
+                                    total > 0 {
+            Double(total > free ? total - free : 0) / Double(total)
+        } else { nil }
+        let diskText = usedRatio.map {
+            "系统卷已使用 \($0.formatted(.percent.precision(.fractionLength(0))))"
+        } ?? "系统卷使用情况未知"
+        let lowDisk = (system.diskFreeBytes ?? .max) < 20 * 1_024 * 1_024 * 1_024
+
+        return HStack(spacing: 6) {
+            Image(systemName: "desktopcomputer")
+            Text("macOS \(system.macOSVersion ?? "未知") · \(system.architecture ?? "未知") · \(byteCount(system.memoryBytes)) 内存 · \(diskText)")
+        }
+        .font(.caption)
+        .foregroundStyle(lowDisk ? .orange : .secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func overviewRuns(_ snapshot: MachineSnapshot) -> [OverviewRun] {
+        let projects = Dictionary(uniqueKeysWithValues: projectsModel.records.map { ($0.id, $0) })
+        return runCoordinator.runConfigurations().compactMap { configuration in
+            guard let project = projects[configuration.projectID],
+                  let session = runCoordinator.session(for: configuration.id),
+                  session.state.isLive || session.failureMessage != nil else { return nil }
+            let bindings: [ListenerBinding]? = if session.state == .running,
+                                                  let processIDs = session.ownedProcessIDs {
+                Array(Set(snapshot.localServices
+                    .filter { processIDs.contains(pid_t($0.pid)) }
+                    .flatMap(\.bindings)))
+                    .sorted { lhs, rhs in
+                        lhs.port == rhs.port ? lhs.address < rhs.address : lhs.port < rhs.port
+                    }
+            } else { nil }
+            return OverviewRun(
+                configuration: configuration,
+                project: project,
+                session: session,
+                bindings: bindings,
+                repositoryState: ProjectRepositoryState.read(projectRoot: project.path)
+            )
+        }
+        .sorted { lhs, rhs in
+            let lhsStarting = lhs.session.state == .starting
+            let rhsStarting = rhs.session.state == .starting
+            if lhsStarting != rhsStarting { return lhsStarting }
+            let lhsDate = lhs.session.startedAt ?? .distantPast
+            let rhsDate = rhs.session.startedAt ?? .distantPast
+            if lhsDate != rhsDate { return lhsDate > rhsDate }
+            return lhs.configuration.id < rhs.configuration.id
+        }
+    }
+
+    private func overviewAttentionItems(
+        _ snapshot: MachineSnapshot,
+        runs: [OverviewRun],
+        now: Date
+    ) -> [OverviewAttentionItem] {
+        let configurations = runCoordinator.runConfigurations()
+        let projects = Dictionary(uniqueKeysWithValues: projectsModel.records.map { ($0.id, $0) })
+        var items: [OverviewAttentionItem] = configurations.compactMap { configuration in
+            guard let session = runCoordinator.session(for: configuration.id),
+                  let message = session.failureMessage else { return nil }
+            return OverviewAttentionItem(
+                id: "run-failure:\(configuration.id)",
+                title: "\(projects[configuration.projectID]?.title ?? configuration.name) 运行失败",
+                detail: "\(configuration.name)：\(message)",
+                systemImage: "exclamationmark.octagon.fill",
+                tint: .red,
+                priority: 0,
+                occurredAt: session.failureAt,
+                destination: .run(configuration.id)
+            )
+        }
+
+        let dynamicUpdatedAt = model.dynamicStatusRefreshedAt ?? snapshot.scannedAt
+        if let error = model.dynamicRefreshError {
+            items.append(OverviewAttentionItem(
+                id: "dynamic-refresh-failed",
+                title: "运行状态刷新失败",
+                detail: error,
+                systemImage: "clock.badge.exclamationmark",
+                tint: .orange,
+                priority: 1,
+                occurredAt: dynamicUpdatedAt,
+                destination: .dynamicRefresh
+            ))
+        } else if now.timeIntervalSince(dynamicUpdatedAt) > 60 {
+            items.append(OverviewAttentionItem(
+                id: "dynamic-status-stale",
+                title: "运行状态已过期",
+                detail: "超过 60 秒没有成功刷新监听状态",
+                systemImage: "clock.badge.exclamationmark",
+                tint: .orange,
+                priority: 1,
+                occurredAt: dynamicUpdatedAt,
+                destination: .dynamicRefresh
+            ))
+        }
+
+        if let error = model.scanError {
+            items.append(OverviewAttentionItem(
+                id: "environment-scan-failed",
+                title: "环境扫描失败",
+                detail: error,
+                systemImage: "exclamationmark.triangle.fill",
+                tint: .orange,
+                priority: 1,
+                occurredAt: snapshot.scannedAt,
+                destination: .environmentRefresh
+            ))
+        } else if now.timeIntervalSince(snapshot.scannedAt) > 24 * 60 * 60 {
+            items.append(OverviewAttentionItem(
+                id: "environment-snapshot-stale",
+                title: "环境扫描结果已过期",
+                detail: "超过 24 小时没有完成一次环境扫描",
+                systemImage: "clock.badge.exclamationmark",
+                tint: .orange,
+                priority: 1,
+                occurredAt: snapshot.scannedAt,
+                destination: .environmentRefresh
+            ))
+        }
+
+        let runtimeCapabilities: Set<String> = ["node", "python", "go", "java", "rust", "ruby", "lua"]
+        let databaseCapabilities: Set<String> = ["postgresql", "mysql", "mariadb", "mongodb", "redis", "mysql-compatible"]
+        let activeProjectIDs = Set(runs.filter { $0.session.state.isLive }.map { $0.project.id })
+        var runtimeProblemIDs: Set<String> = []
+
+        for projectID in activeProjectIDs.sorted() {
+            guard let project = projects[projectID], let analysis = projectsModel.analyses[projectID] else { continue }
+            for requirement in analysis.requirements {
+                let itemID = "project-requirement:\(projectID):\(requirement.capability)"
+                if runtimeCapabilities.contains(requirement.capability)
+                    && (requirement.satisfaction == .unsatisfied
+                        || requirement.satisfaction == .declarationConflict) {
+                    runtimeProblemIDs.insert(itemID)
+                    items.append(OverviewAttentionItem(
+                        id: itemID,
+                        title: "\(project.title) 的 \(projectCapabilityTitle(requirement.capability)) 要求未满足",
+                        detail: requirement.satisfaction == .declarationConflict
+                            ? "项目内存在无法同时满足的版本声明"
+                            : "要求 \(requirement.expression)",
+                        systemImage: "terminal.fill",
+                        tint: .red,
+                        priority: 2,
+                        occurredAt: nil,
+                        destination: .project(projectID, capability: requirement.capability)
+                    ))
+                    continue
+                }
+
+                if databaseCapabilities.contains(requirement.capability) {
+                    if requirement.satisfaction == .unsatisfied {
+                        items.append(OverviewAttentionItem(
+                            id: itemID,
+                            title: "\(project.title) 缺少 \(projectCapabilityTitle(requirement.capability))",
+                            detail: "未发现满足项目要求的数据库安装",
+                            systemImage: "cylinder.split.1x2.fill",
+                            tint: .red,
+                            priority: 2,
+                            occurredAt: nil,
+                            destination: .database(databaseDestinationID(requirement.capability))
+                        ))
+                    } else if !requirement.matches.isEmpty,
+                              requirement.matches.allSatisfy({ $0.listeningState == .notListening }) {
+                        items.append(OverviewAttentionItem(
+                            id: itemID,
+                            title: "\(projectCapabilityTitle(requirement.capability)) 当前未监听",
+                            detail: "\(project.title) 的数据库要求已匹配安装，但没有 TCP Listener Binding",
+                            systemImage: "cylinder.split.1x2.fill",
+                            tint: .red,
+                            priority: 2,
+                            occurredAt: nil,
+                            destination: .database(databaseDestinationID(requirement.capability))
+                        ))
+                    }
+                }
+            }
+        }
+
+        for projectID in activeProjectIDs.sorted() {
+            guard let project = projects[projectID], let analysis = projectsModel.analyses[projectID] else { continue }
+            for requirement in analysis.requirements where runtimeCapabilities.contains(requirement.capability) {
+                let itemID = "project-requirement:\(projectID):\(requirement.capability)"
+                guard !runtimeProblemIDs.contains(itemID),
+                      let runtime = snapshot.runtimes.first(where: { $0.id == requirement.capability }),
+                      runtime.hasPathVersionConflict else {
+                    continue
+                }
+                let effectiveVersion = runtime.installations.first(where: \.isEffective)?.version ?? "未知"
+                items.append(OverviewAttentionItem(
+                    id: "path-conflict:\(projectID):\(requirement.capability)",
+                    title: "\(projectCapabilityTitle(requirement.capability)) PATH 版本冲突",
+                    detail: "\(project.title)：要求 \(requirement.expression) · 当前生效 \(effectiveVersion)",
+                    systemImage: "point.3.connected.trianglepath.dotted",
+                    tint: .orange,
+                    priority: 4,
+                    occurredAt: nil,
+                    destination: .runtime(requirement.capability)
+                ))
+            }
+        }
+
+        for run in runs {
+            let exposed = Array(Set((run.bindings ?? []).filter { !$0.isLoopback })).sorted {
+                $0.port == $1.port ? $0.address < $1.address : $0.port < $1.port
+            }
+            guard !exposed.isEmpty else { continue }
+            items.append(OverviewAttentionItem(
+                id: "exposed-run:\(run.id)",
+                title: "\(run.project.title) 可能对局域网开放",
+                detail: "监听地址：\(exposed.map(listenerBindingText).joined(separator: " · "))",
+                systemImage: "antenna.radiowaves.left.and.right",
+                tint: .orange,
+                priority: 3,
+                occurredAt: run.session.startedAt,
+                destination: .localServices
+            ))
+        }
+
+        if let free = snapshot.system.diskFreeBytes, free < 20 * 1_024 * 1_024 * 1_024 {
+            items.append(OverviewAttentionItem(
+                id: "low-disk-space",
+                title: "系统卷可用空间不足",
+                detail: "当前可用 \(byteCount(free))，低于 20 GB",
+                systemImage: "internaldrive.fill",
+                tint: .orange,
+                priority: 5,
+                occurredAt: snapshot.scannedAt,
+                destination: .storage
+            ))
+        }
+
+        return items.sorted { lhs, rhs in
+            if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
+            let lhsDate = lhs.occurredAt ?? .distantPast
+            let rhsDate = rhs.occurredAt ?? .distantPast
+            if lhsDate != rhsDate { return lhsDate > rhsDate }
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
+    }
+
+    private var currentOverviewAttentionItems: [OverviewAttentionItem] {
+        guard let snapshot = model.snapshot else { return [] }
+        return overviewAttentionItems(snapshot, runs: overviewRuns(snapshot), now: Date())
+    }
+
+    private func navigate(to destination: OverviewAttentionDestination) {
+        isShowingNotifications = false
+        switch destination {
+        case let .run(configurationID):
+            selectedRunConfigurationID = configurationID
+            selectPage(.runs)
+        case let .project(projectID, capability):
+            selectedProjectID = projectID
+            expandedProjectRequirementID = capability
+            selectPage(.projects)
+        case let .runtime(runtimeID):
+            expandedRuntimeID = runtimeID
+            selectPage(.runtimes)
+        case let .database(databaseID):
+            expandedDatabaseID = databaseID
+            selectPage(.databases)
+        case .localServices:
+            selectedServiceTab = .local
+            selectPage(.localServices)
+        case .environmentRefresh:
+            model.scan()
+            runCoordinator.refreshProjects()
+        case .dynamicRefresh:
+            model.refreshDynamicStatus()
+        case .storage:
+            if let url = URL(string: "x-apple.systempreferences:com.apple.settings.Storage") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    private func overviewRunColor(_ state: ProjectRunSessionState) -> Color {
+        switch state {
+        case .starting: .blue
+        case .running: .green
+        case .stopping: .orange
+        case .restarting: .blue
+        case .restartFailed: .red
+        case .launchFailed: .red
+        case let .exited(code): code == 0 ? .secondary : .red
+        case .inactive: .secondary
+        }
+    }
+
+    private func overviewProjectRequirementText(_ summary: ProjectRequirementsSummary?) -> String {
+        switch summary {
+        case .satisfied: "满足"
+        case .unsatisfied: "未满足"
+        case .undetermined: "待判断"
+        case .declarationConflict: "声明冲突"
+        case .undeclared: "未声明"
+        case .unavailable: "不可用"
+        case nil: "待刷新"
+        }
+    }
+
+    private func projectRunStateTitle(_ state: ProjectRunSessionState) -> String {
+        switch state {
+        case .inactive: "未启动"
+        case .starting: "启动中"
+        case .running: "运行中"
+        case .stopping: "停止中"
+        case .restarting: "重启中"
+        case .restartFailed: "重启失败"
+        case let .exited(code): code == 0 ? "已退出" : "异常退出"
+        case .launchFailed: "启动失败"
+        }
+    }
+
+    private func repositoryStateText(_ state: ProjectRepositoryState) -> String {
+        switch state {
+        case let .branch(branch): branch
+        case let .detached(commit): "detached \(commit)"
+        case .nonGit: "非 Git 项目"
+        case .unknown: "Git 未知"
+        }
+    }
+
+    private func overviewPortsText(_ run: OverviewRun) -> String {
+        guard run.session.state == .running else { return "—" }
+        guard let bindings = run.bindings else { return "未知" }
+        let ports = Set(bindings.map(\.port)).sorted()
+        return ports.isEmpty ? "无监听端口" : ports.map { ":\($0)" }.joined(separator: " · ")
+    }
+
+    private func overviewMemoryText(_ run: OverviewRun) -> String {
+        guard run.session.state == .running else { return "—" }
+        guard let bytes = run.session.physicalMemoryBytes else { return "未知" }
+        return byteCount(bytes)
+    }
+
+    private func runDuration(from start: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(start)))
+        if seconds < 60 { return "<1 分钟" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes) 分钟" }
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        return remainder == 0 ? "\(hours) 小时" : "\(hours) 小时 \(remainder) 分"
+    }
+
+    private func relativeUpdateText(_ date: Date, now: Date) -> String {
+        let age = relativeAge(date, now: now)
+        return age == "刚刚" ? "刚刚更新" : "\(age)更新"
+    }
+
+    private func relativeCompletionText(_ date: Date, now: Date) -> String {
+        let age = relativeAge(date, now: now)
+        return age == "刚刚" ? "刚刚完成" : "\(age)完成"
+    }
+
+    private func relativeAge(_ date: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 { return "刚刚" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes) 分钟前" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours) 小时前" }
+        return "\(hours / 24) 天前"
+    }
+
+    private func databaseDestinationID(_ capability: String) -> String {
+        capability == "mysql-compatible" ? "mysql" : capability
     }
 
     private func topOverviewSection(_ snapshot: MachineSnapshot) -> some View {
@@ -4085,11 +5164,6 @@ struct ContentView: View {
             if let icon = NSRunningApplication(processIdentifier: pid)?.icon { return icon }
         }
         return nil
-    }
-
-    private func listenerBindingText(_ binding: ListenerBinding) -> String {
-        let address = binding.family == .ipv6 ? "[\(binding.address)]" : binding.address
-        return "\(address):\(binding.port)"
     }
 
     private func listenerBindingBadge(_ binding: ListenerBinding) -> some View {
@@ -5754,15 +6828,13 @@ struct ContentView: View {
         .help(help)
     }
 
-    private var currentNotices: [String] {
-        currentEnvironmentNotices.map(\.message)
-    }
+    private var currentNotices: [OverviewAttentionItem] { currentOverviewAttentionItems }
 
     private var hasUnreadNotices: Bool {
         !currentNoticeIdentities.isEmpty && !currentNoticeIdentities.isSubset(of: readNoticeIdentities)
     }
 
-    private func notificationsPopover(_ notices: [String]) -> some View {
+    private func notificationsPopover(_ notices: [OverviewAttentionItem]) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Label("通知", systemImage: "bell.fill")
@@ -5781,17 +6853,20 @@ struct ContentView: View {
                 ContentUnavailableView("暂无通知", systemImage: "checkmark.circle")
                     .frame(maxWidth: .infinity, minHeight: 100)
             } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(notices.indices, id: \.self) { index in
-                        Label(notices[index], systemImage: "exclamationmark.circle.fill")
-                            .foregroundStyle(.orange)
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(notices.enumerated()), id: \.element.id) { index, notice in
+                            overviewAttentionRow(notice)
+                            if index < notices.count - 1 { Divider().padding(.leading, 42) }
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxHeight: 420)
             }
         }
         .padding(16)
-        .frame(width: 340)
+        .frame(width: 380)
     }
 
     private func markCurrentNoticesRead() {
@@ -5799,7 +6874,7 @@ struct ContentView: View {
     }
 
     private var currentNoticeIdentities: Set<NoticeIdentity> {
-        Set(currentEnvironmentNotices.flatMap(\.identities))
+        Set(currentOverviewAttentionItems.map { .overview($0.id) })
     }
 
     private var currentEnvironmentNotices: [EnvironmentNotice] {
