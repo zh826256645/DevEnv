@@ -9,13 +9,29 @@ enum ProjectRunSessionState: Equatable, Sendable {
     case starting
     case running
     case stopping
+    case restarting
+    case restartFailed(String)
     case exited(Int32)
     case launchFailed(String)
 
     var isLive: Bool {
         switch self {
-        case .starting, .running, .stopping: true
+        case .starting, .running, .stopping, .restarting, .restartFailed: true
         case .inactive, .exited, .launchFailed: false
+        }
+    }
+
+    var isStopping: Bool {
+        switch self {
+        case .stopping, .restarting: true
+        default: false
+        }
+    }
+
+    var canRestart: Bool {
+        switch self {
+        case .running, .restartFailed: true
+        default: false
         }
     }
 }
@@ -119,6 +135,36 @@ enum ProjectRunProcessSnapshotReader {
             byteCapacity *= 2
         }
         return nil
+    }
+}
+
+enum ProjectRunPhysicalMemory {
+    static func total(processIDs: Set<pid_t>) -> UInt64? {
+        total(processIDs: processIDs, read: physicalFootprint)
+    }
+
+    static func total(
+        processIDs: Set<pid_t>,
+        read: (pid_t) -> UInt64?
+    ) -> UInt64? {
+        var total: UInt64 = 0
+        for processID in processIDs {
+            guard let bytes = read(processID) else { return nil }
+            let addition = total.addingReportingOverflow(bytes)
+            guard !addition.overflow else { return nil }
+            total = addition.partialValue
+        }
+        return total
+    }
+
+    private static func physicalFootprint(processID: pid_t) -> UInt64? {
+        var info = rusage_info_v4()
+        let status = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(processID, RUSAGE_INFO_V4, $0)
+            }
+        }
+        return status == 0 ? info.ri_phys_footprint : nil
     }
 }
 
@@ -238,6 +284,8 @@ struct ProjectRunProcessIdentityToken {
 protocol ProjectRunProcessEngine: AnyObject {
     var terminalView: NSView { get }
     var onExit: ((Int32?) -> Void)? { get set }
+    var ownedProcessIDs: Set<pid_t>? { get }
+    var physicalMemoryBytes: UInt64? { get }
 
     func start(
         executable: String,
@@ -245,6 +293,7 @@ protocol ProjectRunProcessEngine: AnyObject {
         loginName: String,
         workingDirectory: String
     ) throws
+    func clearTerminal()
     func signalProcessGroups(_ signal: Int32) -> Bool
 }
 
@@ -312,10 +361,26 @@ private func projectRunOwnershipMonitorHandler(
 
 @MainActor
 final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preconcurrency LocalProcessTerminalViewDelegate {
-    private static let scrollbackLines = 5_000
+    private static let scrollbackLines = 50_000
     let terminal = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
     var terminalView: NSView { terminal }
     var onExit: ((Int32?) -> Void)?
+    private(set) var ownedProcessIDs: Set<pid_t>?
+    var physicalMemoryBytes: UInt64? {
+        guard ownedProcessIDs != nil else { return nil }
+        var processIDs: Set<pid_t> = []
+        for witness in ownedGroupWitnesses.values.flatMap(\.values) {
+            switch witness.state {
+            case .current:
+                processIDs.insert(witness.processID)
+            case .gone:
+                continue
+            case .uncertain:
+                return nil
+            }
+        }
+        return ProjectRunPhysicalMemory.total(processIDs: processIDs)
+    }
     private var processMonitor: DispatchSourceProcess?
     private var ownershipMonitor: DispatchSourceTimer?
     private var ownershipMonitorGeneration = UUID()
@@ -338,6 +403,7 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
         loginName: String,
         workingDirectory: String
     ) throws {
+        ownedProcessIDs = nil
         if let unresolvedProcessID {
             guard Darwin.kill(unresolvedProcessID, 0) != 0, errno == ESRCH else {
                 throw ProjectRunLaunchError.previousProcessesStillRunning
@@ -392,6 +458,13 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
         _ = refreshOwnedProcessGroups(onTerminal: ownershipToken.terminalDevice)
         monitor(pid)
         monitorOwnership(ownershipToken)
+    }
+
+    func clearTerminal() {
+        if terminal.terminal.isCurrentBufferAlternate {
+            terminal.terminal.resetNormalBuffer()
+        }
+        terminal.feed(text: "\u{1B}[3J\u{1B}[2J\u{1B}[H")
     }
 
     func signalProcessGroups(_ signal: Int32) -> Bool {
@@ -549,6 +622,7 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
             }
         }
         ownedGroupWitnesses = validatedWitnesses
+        ownedProcessIDs = isUncertain ? nil : Set(validatedWitnesses.values.flatMap { $0.keys })
         return (groups, isUncertain)
     }
 
@@ -575,9 +649,16 @@ final class ProjectRunSession: ObservableObject, Identifiable {
     let terminalView: NSView
     @Published fileprivate(set) var state: ProjectRunSessionState = .inactive
     @Published fileprivate(set) var lastSuccessfulCommand: String?
+    @Published fileprivate(set) var startedAt: Date?
+    @Published fileprivate(set) var failureMessage: String?
+    @Published fileprivate(set) var failureAt: Date?
+
+    var ownedProcessIDs: Set<pid_t>? { engine.ownedProcessIDs }
+    var physicalMemoryBytes: UInt64? { engine.physicalMemoryBytes }
 
     fileprivate let engine: any ProjectRunProcessEngine
     fileprivate var pendingStopExitCode: Int32?
+    fileprivate var pendingRestart: ProjectRunTrustRequest?
 
     fileprivate init(configurationID: String, engine: any ProjectRunProcessEngine) {
         id = configurationID
@@ -800,25 +881,117 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func stop(configurationID: String) {
-        guard let session = sessions[configurationID], session.state.isLive else { return }
-        let isRetry = session.state == .stopping
-        session.state = .stopping
+        guard let session = sessions[configurationID],
+              session.state.isLive,
+              session.state != .restarting else { return }
+        session.pendingRestart = nil
+        beginStopping(session, restarting: false)
+    }
+
+    func restart(_ configuration: ProjectRunConfiguration, project: ProjectRecord) {
+        switch project.availability {
+        case .available:
+            restart(configuration, projectRoot: project.path)
+        case .unknown:
+            failRestart(configurationID: configuration.id, message: "正在确认项目是否可用")
+        case let .unavailable(reason):
+            failRestart(configurationID: configuration.id, message: "项目不可用，不能执行：\(reason)")
+        }
+    }
+
+    func restart(_ configuration: ProjectRunConfiguration, projectRoot: String) {
+        guard let session = sessions[configuration.id], session.state.canRestart else { return }
+        do {
+            let directory = try ProjectRunWorkingDirectory.resolve(
+                projectRoot: projectRoot,
+                relativePath: configuration.workingDirectory
+            )
+            guard projectsModel.isProjectRunTrusted(projectRoot) else {
+                failRestart(session, message: "Project Root 尚未信任")
+                return
+            }
+            session.pendingRestart = ProjectRunTrustRequest(
+                configuration: configuration,
+                projectRoot: projectRoot,
+                command: configuration.command,
+                workingDirectory: directory.path
+            )
+            session.failureMessage = nil
+            session.failureAt = nil
+            beginStopping(session, restarting: true)
+        } catch {
+            failRestart(session, message: error.localizedDescription)
+        }
+    }
+
+    private func beginStopping(_ session: ProjectRunSession, restarting: Bool) {
+        let isRetry = session.state.isStopping
+        session.state = restarting ? .restarting : .stopping
         if !isRetry {
             session.pendingStopExitCode = nil
         }
         _ = session.engine.signalProcessGroups(SIGINT)
         objectWillChange.send()
         scheduler.schedule(after: .seconds(2)) { [weak self, weak session] in
-            guard let self, let session, session.state == .stopping else { return }
+            guard let self, let session, session.state.isStopping else { return }
             _ = session.engine.signalProcessGroups(SIGTERM)
             self.scheduler.schedule(after: .seconds(2)) { [weak self, weak session] in
-                guard let self, let session, session.state == .stopping else { return }
+                guard let self, let session, session.state.isStopping else { return }
                 if session.engine.signalProcessGroups(SIGKILL) {
-                    session.state = .exited(session.pendingStopExitCode ?? 137)
+                    self.finishStopping(session)
+                } else if session.state == .restarting {
+                    self.failRestart(session, message: "上一次运行仍有进程未退出")
                 }
                 self.objectWillChange.send()
             }
         }
+    }
+
+    private func finishStopping(_ session: ProjectRunSession) {
+        let exitCode = session.pendingStopExitCode ?? 137
+        session.pendingStopExitCode = nil
+        guard session.pendingRestart != nil else {
+            session.state = .exited(exitCode)
+            return
+        }
+        finishRestartWhenProcessesExit(session, exitCode: exitCode, checksRemaining: 10)
+    }
+
+    private func finishRestartWhenProcessesExit(
+        _ session: ProjectRunSession,
+        exitCode: Int32,
+        checksRemaining: Int
+    ) {
+        guard session.state == .restarting, let request = session.pendingRestart else { return }
+        if session.engine.signalProcessGroups(0), session.ownedProcessIDs?.isEmpty == true {
+            session.pendingRestart = nil
+            session.state = .exited(exitCode)
+            _ = launch(request)
+        } else if checksRemaining > 0 {
+            scheduler.schedule(after: .milliseconds(100)) { [weak self, weak session] in
+                guard let self, let session else { return }
+                self.finishRestartWhenProcessesExit(
+                    session,
+                    exitCode: exitCode,
+                    checksRemaining: checksRemaining - 1
+                )
+            }
+        } else {
+            failRestart(session, message: "上一次运行仍有进程未退出")
+        }
+    }
+
+    private func failRestart(configurationID: String, message: String) {
+        guard let session = sessions[configurationID], session.state.canRestart else { return }
+        failRestart(session, message: message)
+    }
+
+    private func failRestart(_ session: ProjectRunSession, message: String) {
+        session.pendingRestart = nil
+        session.failureMessage = "重启失败：\(message)"
+        session.failureAt = Date()
+        session.state = .restartFailed(message)
+        objectWillChange.send()
     }
 
     func removeProjects(
@@ -871,6 +1044,10 @@ final class ProjectRunCoordinator: ObservableObject {
         sessions.removeValue(forKey: configurationID)
     }
 
+    func clearTerminal(configurationID: String) {
+        sessions[configurationID]?.engine.clearTerminal()
+    }
+
     private func launch(_ request: ProjectRunTrustRequest) -> ProjectRunActionResult {
         guard sessions[request.configuration.id]?.state.isLive != true else {
             return .rejected("该运行配置已有活动会话")
@@ -891,6 +1068,9 @@ final class ProjectRunCoordinator: ObservableObject {
                 workingDirectory: directory.path
             )
             session.lastSuccessfulCommand = request.configuration.command
+            session.startedAt = Date()
+            session.failureMessage = nil
+            session.failureAt = nil
             session.state = .running
             if commandDrafts[request.configuration.id] != nil,
                projectsModel.updateRunConfiguration(
@@ -912,9 +1092,13 @@ final class ProjectRunCoordinator: ObservableObject {
         let session = ProjectRunSession(configurationID: configurationID, engine: makeEngine())
         session.engine.onExit = { [weak self, weak session] exitCode in
             guard let self, let session else { return }
-            if session.state == .stopping {
+            if session.state.isStopping {
                 session.pendingStopExitCode = exitCode
                 return
+            }
+            if exitCode != 0 {
+                session.failureMessage = "命令以状态码 \(exitCode ?? -1) 退出"
+                session.failureAt = Date()
             }
             if session.engine.signalProcessGroups(SIGKILL) {
                 session.state = .exited(exitCode ?? -1)
@@ -931,6 +1115,8 @@ final class ProjectRunCoordinator: ObservableObject {
     private func reject(configurationID: String, error: Error) -> ProjectRunActionResult {
         let message = error.localizedDescription
         let session = sessions[configurationID] ?? makeSession(for: configurationID)
+        session.failureMessage = message
+        session.failureAt = Date()
         if let launchError = error as? ProjectRunLaunchError,
            launchError == .previousProcessesStillRunning || launchError == .processCouldNotBeContained {
             session.state = .stopping

@@ -7,6 +7,52 @@ import XCTest
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+    func testPhysicalMemoryReadsCurrentProcess() throws {
+        XCTAssertGreaterThan(
+            try XCTUnwrap(ProjectRunPhysicalMemory.total(processIDs: [getpid()])),
+            0
+        )
+    }
+
+    func testPhysicalMemoryTotalsOwnedProcessesAndRejectsIncompleteSamples() {
+        let footprints: [pid_t: UInt64] = [11: 40, 12: 60]
+
+        XCTAssertEqual(
+            ProjectRunPhysicalMemory.total(processIDs: [11, 12]) { footprints[$0] },
+            100
+        )
+        XCTAssertNil(ProjectRunPhysicalMemory.total(processIDs: [11, 13]) { footprints[$0] })
+        XCTAssertNil(ProjectRunPhysicalMemory.total(processIDs: [11, 12]) {
+            $0 == 11 ? UInt64.max : 1
+        })
+    }
+
+    func testOverviewAdaptsRunRowsBetweenTwoAndFour() {
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 322, itemCount: 4), 2)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 351, itemCount: 4), 2)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 352, itemCount: 4), 3)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 404, itemCount: 4), 4)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 440, itemCount: 5), 4)
+    }
+
+    func testOverviewShowsFourthAttentionWhenItFits() {
+        XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 283, itemCount: 4), 3)
+        XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 284, itemCount: 4), 4)
+        XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 319, itemCount: 5), 3)
+        XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 320, itemCount: 5), 4)
+    }
+
+    func testListenerBindingTextPreservesAddressFamily() {
+        XCTAssertEqual(
+            listenerBindingText(ListenerBinding(address: "*", port: 3070, family: .ipv4)),
+            "0.0.0.0:3070"
+        )
+        XCTAssertEqual(
+            listenerBindingText(ListenerBinding(address: "*", port: 3071, family: .ipv6)),
+            "[::]:3071"
+        )
+    }
+
     func testSignalTargetsRejectUnsafeAndUnownedProcessGroups() {
         let ownedGroups = ProjectRunProcessOwnership.processGroups(
             in: [
@@ -148,6 +194,48 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         XCTAssertTrue(factory.engines.isEmpty)
         XCTAssertNil(coordinator.session(for: configuration.id))
+    }
+
+    func testSessionKeepsLaunchFactsAndOnlyRecordsUnexpectedFailure() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let projectsModel = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        let configuration = ProjectRunConfiguration(
+            id: "run",
+            projectID: directory.path,
+            name: "开发服务器",
+            command: "npm run dev",
+            workingDirectory: "."
+        )
+
+        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        let firstSession = try XCTUnwrap(coordinator.session(for: configuration.id))
+        XCTAssertEqual(firstSession.lastSuccessfulCommand, configuration.command)
+        XCTAssertNotNil(firstSession.startedAt)
+        XCTAssertEqual(firstSession.ownedProcessIDs, [42])
+
+        factory.engines[0].finish(exitCode: 2)
+        XCTAssertEqual(firstSession.failureMessage, "命令以状态码 2 退出")
+        XCTAssertNotNil(firstSession.failureAt)
+
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: directory.path), .started)
+        XCTAssertNil(firstSession.failureMessage)
+        coordinator.stop(configurationID: configuration.id)
+        factory.engines[0].finish(exitCode: 130)
+        XCTAssertNil(firstSession.failureMessage)
     }
 
     func testRemovingProjectRecordCommitsStoreBeforeCleaningSessionsAndTrust() throws {
@@ -447,6 +535,55 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(coordinator.sessions.isEmpty)
     }
 
+    func testRestartWaitsForCleanupAndDoesNotLaunchWhenProcessesRemain() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let factory = FakeProjectRunEngineFactory()
+        let scheduler = FakeProjectRunScheduler()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: scheduler
+        )
+        let configuration = ProjectRunConfiguration(
+            id: "run",
+            projectID: directory.path,
+            name: "服务",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        let engine = try XCTUnwrap(factory.engines.first)
+        let terminal = engine.terminalView
+
+        engine.signalSucceeds = false
+        coordinator.restart(configuration, projectRoot: directory.path)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .restarting)
+        XCTAssertEqual(engine.launches.count, 1)
+        scheduler.runNext()
+        scheduler.runNext()
+        XCTAssertEqual(
+            coordinator.session(for: configuration.id)?.state,
+            .restartFailed("上一次运行仍有进程未退出")
+        )
+        XCTAssertEqual(engine.launches.count, 1)
+
+        engine.signalSucceeds = true
+        coordinator.restart(configuration, projectRoot: directory.path)
+        scheduler.runNext()
+        scheduler.runNext()
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .running)
+        XCTAssertEqual(engine.launches.count, 2)
+        XCTAssertTrue(coordinator.session(for: configuration.id)?.terminalView === terminal)
+    }
+
     func testRerunRevalidatesPathAndShellWithoutDiscardingTheTerminal() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -556,6 +693,54 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(exitCode, 7, renderedOutput)
         XCTAssertTrue(renderedOutput.contains("ANSI"))
         XCTAssertTrue(renderedOutput.contains("INPUT:hello"))
+    }
+
+    func testClearingTerminalRemovesVisibleContentAndScrollback() {
+        let engine = SwiftTermProjectRunEngine()
+        engine.terminal.feed(text: (1...100).map { "HISTORY:\($0)\n" }.joined())
+        engine.terminal.feed(text: "\u{1B}[?1049hALTERNATE")
+
+        engine.clearTerminal()
+
+        for kind in [Terminal.BufferKind.normal, .alt] {
+            let output = String(
+                data: engine.terminal.terminal.getBufferAsData(kind: kind),
+                encoding: .utf8
+            ) ?? ""
+            XCTAssertFalse(output.contains("HISTORY:"))
+            XCTAssertFalse(output.contains("ALTERNATE"))
+        }
+    }
+
+    func testRealSwiftTermRetainsFiveThousandLongLogLines() async throws {
+        let engine = SwiftTermProjectRunEngine()
+        engine.terminal.frame = NSRect(x: 0, y: 0, width: 800, height: 480)
+        let exited = expectation(description: "长日志输出完成")
+        engine.onExit = { _ in exited.fulfill() }
+
+        try engine.start(
+            executable: "/bin/zsh",
+            arguments: ["-f", "-c", "for i in {1..5000}; do printf 'LINE:%04d:%0120d\\n' $i 0; done; sleep 30"],
+            loginName: "-zsh",
+            workingDirectory: FileManager.default.temporaryDirectory.path
+        )
+
+        func terminalOutput() -> String {
+            String(
+                data: engine.terminal.terminal.getBufferAsData(kind: .normal),
+                encoding: .utf8
+            ) ?? ""
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while !terminalOutput().contains("LINE:5000:"), clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let output = terminalOutput()
+        XCTAssertTrue(output.contains("LINE:0001:"))
+        XCTAssertTrue(output.contains("LINE:5000:"))
+        XCTAssertTrue(engine.signalProcessGroups(SIGKILL))
+        await fulfillment(of: [exited], timeout: 5)
     }
 
     func testRealConcurrentSessionsRetainLongOutputAcrossWindowRecreationAndExitCleanly() async throws {
@@ -769,10 +954,14 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
 
     let terminalView = NSView()
     var onExit: ((Int32?) -> Void)?
+    var ownedProcessIDs: Set<pid_t>? = [42]
+    var physicalMemoryBytes: UInt64? = 128 * 1_024 * 1_024
     private(set) var launches: [Launch] = []
     private(set) var signals: [Int32] = []
     var signalSucceeds = true
     var startError: Error?
+
+    func clearTerminal() {}
 
     func start(
         executable: String,
@@ -791,6 +980,9 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
 
     func signalProcessGroups(_ signal: Int32) -> Bool {
         signals.append(signal)
+        if signal == SIGKILL, signalSucceeds {
+            ownedProcessIDs = []
+        }
         return signalSucceeds
     }
 

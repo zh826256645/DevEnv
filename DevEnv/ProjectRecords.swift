@@ -17,6 +17,44 @@ enum ProjectRootBoundary: String, Codable, Equatable, Sendable {
     case explicit
 }
 
+enum ProjectRepositoryState: Equatable, Sendable {
+    case branch(String)
+    case detached(String)
+    case nonGit
+    case unknown
+
+    static func read(projectRoot: String, fileManager: FileManager = .default) -> Self {
+        var directory = URL(fileURLWithPath: projectRoot, isDirectory: true).standardizedFileURL
+        while true {
+            let marker = directory.appendingPathComponent(".git")
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: marker.path, isDirectory: &isDirectory) {
+                let gitDirectory: URL
+                if isDirectory.boolValue {
+                    gitDirectory = marker
+                } else {
+                    guard let text = try? String(contentsOf: marker, encoding: .utf8),
+                          text.hasPrefix("gitdir:") else { return .unknown }
+                    let path = text.dropFirst("gitdir:".count)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    gitDirectory = URL(fileURLWithPath: path, relativeTo: directory).standardizedFileURL
+                }
+                guard let head = try? String(
+                    contentsOf: gitDirectory.appendingPathComponent("HEAD"),
+                    encoding: .utf8
+                ).trimmingCharacters(in: .whitespacesAndNewlines), !head.isEmpty else { return .unknown }
+                if head.hasPrefix("ref: refs/heads/") {
+                    return .branch(String(head.dropFirst("ref: refs/heads/".count)))
+                }
+                return .detached(String(head.prefix(8)))
+            }
+            let parent = directory.deletingLastPathComponent()
+            guard parent.path != directory.path else { return .nonGit }
+            directory = parent
+        }
+    }
+}
+
 struct ProjectRecord: Codable, Identifiable, Equatable, Sendable {
     var id: String { path }
     var title: String { URL(fileURLWithPath: path, isDirectory: true).lastPathComponent }
