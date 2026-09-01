@@ -27,19 +27,25 @@ final class ProjectRunSessionsTests: XCTestCase {
         })
     }
 
-    func testOverviewAdaptsRunRowsBetweenTwoAndFour() {
+    func testOverviewAdaptsRunRowsWithoutMaximum() {
         XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 322, itemCount: 4), 2)
         XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 351, itemCount: 4), 2)
         XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 352, itemCount: 4), 3)
         XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 404, itemCount: 4), 4)
         XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 440, itemCount: 5), 4)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 580, itemCount: 6), 6)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 616, itemCount: 7), 6)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 668, itemCount: 7), 7)
     }
 
-    func testOverviewShowsFourthAttentionWhenItFits() {
+    func testOverviewAdaptsAttentionRowsWithoutMaximum() {
         XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 283, itemCount: 4), 3)
         XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 284, itemCount: 4), 4)
         XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 319, itemCount: 5), 3)
         XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 320, itemCount: 5), 4)
+        XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 342, itemCount: 5), 5)
+        XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 500, itemCount: 8), 7)
+        XCTAssertEqual(overviewVisibleAttentionLimit(cardHeight: 516, itemCount: 8), 8)
     }
 
     func testListenerBindingTextPreservesAddressFamily() {

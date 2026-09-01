@@ -318,14 +318,18 @@ func localServiceNotices(_ services: [LocalServiceSnapshot]) -> [EnvironmentNoti
 
 func overviewVisibleRunLimit(cardHeight: CGFloat, itemCount: Int) -> Int {
     guard itemCount > 0 else { return 0 }
-    return (1...min(4, itemCount)).reversed().first { count in
+    return (1...itemCount).reversed().first { count in
         let footerHeight: CGFloat = itemCount > count ? 36 : 0
         return 58 + CGFloat(count * 82 + max(0, count - 1) * 6) + footerHeight <= cardHeight
     } ?? 1
 }
 
 func overviewVisibleAttentionLimit(cardHeight: CGFloat, itemCount: Int) -> Int {
-    min(itemCount, cardHeight >= (itemCount > 4 ? 320 : 284) ? 4 : 3)
+    guard itemCount > 0 else { return 0 }
+    return (1...itemCount).reversed().first { count in
+        let footerHeight: CGFloat = itemCount > count ? 36 : 0
+        return 58 + CGFloat(count * 52 + max(0, count - 1) * 6) + footerHeight <= cardHeight
+    } ?? 1
 }
 
 func listenerBindingText(_ binding: ListenerBinding) -> String {
