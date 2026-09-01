@@ -20,7 +20,7 @@ DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在
 - 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
 - 已完成当前 `PATH` 首个生效 Git CLI、Git LFS、用户级配置与脱敏后的 GitHub Authentication Configuration 只读扫描。
 - 已完成受支持 Terminal Application 与注册 Shell Installation、Default Login Shell 的只读扫描。
-- 已完成总览、开发语言、数据库和本地服务侧边栏页面，以及按需展开详情、通知与状态说明等原生 SwiftUI 界面。
+- 已完成总览、项目、运行、本地服务和系统信息侧边栏页面；开发语言与数据库归入系统信息，并保留按需展开详情、通知与状态说明等原生 SwiftUI 界面。
 - 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
 - v0.1 与 v0.2 的只读扫描范围已交付；v0.2 功能已完成，当前暂不创建版本 Tag 或 GitHub Release。
 - v0.3 Homebrew Service 管理功能已完成，当前暂未发布。

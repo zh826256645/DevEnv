@@ -38,11 +38,49 @@ private enum AppTheme {
     }
 }
 
+final class ProjectTerminalContainerView: NSView {
+    private weak var terminalView: NSView?
+
+    func mount(_ terminalView: NSView) {
+        self.terminalView = terminalView
+        guard terminalView.superview !== self else { return }
+        addSubview(terminalView)
+        resizeTerminalIfPossible()
+    }
+
+    func unmount() {
+        guard let terminalView, terminalView.superview === self else { return }
+        terminalView.removeFromSuperview()
+    }
+
+    override func layout() {
+        super.layout()
+        resizeTerminalIfPossible()
+    }
+
+    private func resizeTerminalIfPossible() {
+        guard bounds.width > 1, bounds.height > 1,
+              let terminalView, terminalView.superview === self else { return }
+        terminalView.frame = bounds
+    }
+}
+
 struct ProjectTerminalView: NSViewRepresentable {
     let terminalView: NSView
 
-    func makeNSView(context _: Context) -> NSView { terminalView }
-    func updateNSView(_: NSView, context _: Context) {}
+    func makeNSView(context _: Context) -> ProjectTerminalContainerView {
+        let container = ProjectTerminalContainerView()
+        container.mount(terminalView)
+        return container
+    }
+
+    func updateNSView(_ container: ProjectTerminalContainerView, context _: Context) {
+        container.mount(terminalView)
+    }
+
+    static func dismantleNSView(_ container: ProjectTerminalContainerView, coordinator _: ()) {
+        container.unmount()
+    }
 }
 
 struct AutoRefreshSettings: Equatable, Sendable {
@@ -280,14 +318,18 @@ func localServiceNotices(_ services: [LocalServiceSnapshot]) -> [EnvironmentNoti
 
 func overviewVisibleRunLimit(cardHeight: CGFloat, itemCount: Int) -> Int {
     guard itemCount > 0 else { return 0 }
-    return (1...min(4, itemCount)).reversed().first { count in
+    return (1...itemCount).reversed().first { count in
         let footerHeight: CGFloat = itemCount > count ? 36 : 0
         return 58 + CGFloat(count * 82 + max(0, count - 1) * 6) + footerHeight <= cardHeight
     } ?? 1
 }
 
 func overviewVisibleAttentionLimit(cardHeight: CGFloat, itemCount: Int) -> Int {
-    min(itemCount, cardHeight >= (itemCount > 4 ? 320 : 284) ? 4 : 3)
+    guard itemCount > 0 else { return 0 }
+    return (1...itemCount).reversed().first { count in
+        let footerHeight: CGFloat = itemCount > count ? 36 : 0
+        return 58 + CGFloat(count * 52 + max(0, count - 1) * 6) + footerHeight <= cardHeight
+    } ?? 1
 }
 
 func listenerBindingText(_ binding: ListenerBinding) -> String {
@@ -525,10 +567,8 @@ struct ContentView: View {
         case overview
         case projects
         case runs
-        case runtimes
-        case databases
         case localServices
-        case environment
+        case systemInformation
         case settings
 
         static var primaryPages: [Page] { allCases.filter { $0 != .settings } }
@@ -539,10 +579,8 @@ struct ContentView: View {
             case .overview: "总览"
             case .projects: "项目"
             case .runs: "运行"
-            case .runtimes: "开发语言"
-            case .databases: "数据库"
             case .localServices: "本地服务"
-            case .environment: "系统信息"
+            case .systemInformation: "系统信息"
             case .settings: "设置"
             }
         }
@@ -552,13 +590,16 @@ struct ContentView: View {
             case .overview: "square.grid.2x2"
             case .projects: "folder"
             case .runs: "play.rectangle"
-            case .runtimes: "terminal"
-            case .databases: "cylinder"
             case .localServices: "network"
-            case .environment: "info.circle"
+            case .systemInformation: "info.circle"
             case .settings: "gearshape"
             }
         }
+    }
+
+    private enum SystemInformationSection: Hashable {
+        case runtimes
+        case databases
     }
 
     private enum ServiceTab: Hashable {
@@ -591,6 +632,7 @@ struct ContentView: View {
     @State private var fullyShownRuntimeID: String?
     @State private var expandedDatabaseID: String?
     @State private var fullyShownDatabaseID: String?
+    @State private var pendingSystemInformationSection: SystemInformationSection?
     @State private var expandedEnvironmentCard: EnvironmentCard?
     @State private var showsAllPathEntries = false
     @State private var isShowingNotifications = false
@@ -621,6 +663,8 @@ struct ContentView: View {
     @State private var runConfigurationSourceIdentity: String?
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
     @State private var pendingProjectRunTrust: ProjectRunTrustRequest?
+    @State private var pendingRunAllConfigurations: [ProjectRunConfiguration] = []
+    @State private var pendingStopAllConfigurationIDs: [String] = []
     @State private var selectedRunConfigurationID: String?
     @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
     @State private var runSearchText = ""
@@ -638,6 +682,8 @@ struct ContentView: View {
         navigation(model.snapshot)
         .frame(minWidth: 1100, minHeight: 720)
         .tint(AppTheme.accent)
+        .containerBackground(AppTheme.canvas, for: .window)
+        .toolbarBackground(AppTheme.canvas, for: .windowToolbar)
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -718,6 +764,7 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            NSApplication.shared.windows.forEach { $0.titlebarSeparatorStyle = .none }
             updateRefreshActivity()
             if selectedPage == .overview { runCoordinator.refreshProjects() }
         }
@@ -892,6 +939,20 @@ struct ContentView: View {
         )
     }
 
+    private var isConfirmingRunAllTrust: Binding<Bool> {
+        Binding(
+            get: { !pendingRunAllConfigurations.isEmpty },
+            set: { if !$0 { pendingRunAllConfigurations.removeAll() } }
+        )
+    }
+
+    private var isConfirmingStopAll: Binding<Bool> {
+        Binding(
+            get: { !pendingStopAllConfigurationIDs.isEmpty },
+            set: { if !$0 { pendingStopAllConfigurationIDs.removeAll() } }
+        )
+    }
+
     private func updateRefreshActivity() {
         let wasUsingForegroundInterval = usesForegroundRefreshInterval
         usesForegroundRefreshInterval = scenePhase == .active
@@ -920,8 +981,6 @@ struct ContentView: View {
                 .padding(.horizontal, 18)
                 .padding(.vertical, 18)
 
-                Divider()
-
                 List(selection: pageSelection) {
                     ForEach(Page.primaryPages, id: \.self) { page in
                         Label(page.title, systemImage: page.systemImage)
@@ -935,10 +994,7 @@ struct ContentView: View {
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
-                .background(AppTheme.sidebar)
                 .padding(.top, 14)
-
-                Divider()
 
                 Button {
                     requestPage(.settings)
@@ -958,7 +1014,7 @@ struct ContentView: View {
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
             .background(AppTheme.sidebar)
-            .shadow(color: AppTheme.accent.opacity(0.10), radius: 18, x: 5, y: 0)
+            .shadow(color: AppTheme.accent.opacity(0.05), radius: 18, x: 5, y: 0)
         } detail: {
             page(snapshot)
         }
@@ -989,46 +1045,54 @@ struct ContentView: View {
         } else if page == .overview, let snapshot {
             overviewPage(snapshot)
         } else {
-            ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                header(page, snapshot: snapshot)
-                if let scanError = model.scanError, let snapshot, page != .projects {
-                    scanErrorBanner(scanError, snapshot: snapshot)
-                }
-                if let dynamicRefreshError = model.dynamicRefreshError,
-                   page == .databases || page == .localServices {
-                    dynamicRefreshErrorBanner(dynamicRefreshError)
-                }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        header(page, snapshot: snapshot)
+                        if let scanError = model.scanError, let snapshot, page != .projects {
+                            scanErrorBanner(scanError, snapshot: snapshot)
+                        }
+                        if let dynamicRefreshError = model.dynamicRefreshError,
+                           page == .systemInformation || page == .localServices {
+                            dynamicRefreshErrorBanner(dynamicRefreshError)
+                        }
 
-                switch page {
-                case .overview:
-                    EmptyView()
-                case .projects:
-                    EmptyView()
-                case .runs:
-                    EmptyView()
-                case .runtimes:
-                    if let snapshot { runtimePage(snapshot.runtimes) }
-                case .databases:
-                    if let snapshot { databasePage(snapshot.databaseInstallationOverviews) }
-                case .localServices:
-                    if let snapshot { localServicesSection(snapshot) }
-                case .environment:
-                    if let snapshot {
-                        environmentSection(snapshot)
-                        systemSection(snapshot.system)
+                        switch page {
+                        case .overview:
+                            EmptyView()
+                        case .projects:
+                            EmptyView()
+                        case .runs:
+                            EmptyView()
+                        case .localServices:
+                            if let snapshot { localServicesSection(snapshot) }
+                        case .systemInformation:
+                            if let snapshot {
+                                systemSection(snapshot.system)
+                                environmentSection(snapshot)
+                                runtimesSection(snapshot.runtimes)
+                                    .id(SystemInformationSection.runtimes)
+                                databaseInstallationsSection(snapshot.databaseInstallationOverviews)
+                                    .id(SystemInformationSection.databases)
+                            }
+                        case .settings:
+                            settingsPage
+                        }
                     }
-                case .settings:
-                    settingsPage
+                    .frame(
+                        maxWidth: page == .overview || page == .projects || page == .runs || page == .localServices
+                            ? 1100
+                            : 900
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(28)
                 }
-            }
-            .frame(
-                maxWidth: page == .overview || page == .projects || page == .runs || page == .runtimes || page == .databases || page == .localServices
-                    ? 1100
-                    : 900
-            )
-            .frame(maxWidth: .infinity)
-            .padding(28)
+                .task(id: pendingSystemInformationSection) {
+                    guard page == .systemInformation, let section = pendingSystemInformationSection else { return }
+                    await Task.yield()
+                    proxy.scrollTo(section, anchor: .top)
+                    pendingSystemInformationSection = nil
+                }
             }
             .id(page)
             .background(AppTheme.canvas)
@@ -1108,7 +1172,7 @@ struct ContentView: View {
                 .font(.largeTitle.bold())
             if page != .settings && page != .projects {
                 HStack(spacing: 10) {
-                    if page == .databases || page == .localServices {
+                    if page == .localServices {
                         Text(model.dynamicStatusRefreshedAt.map { "最近刷新：\(formatted($0))" } ?? "最近刷新：尚未刷新")
                             .foregroundStyle(.secondary)
                     } else if let snapshot {
@@ -1285,6 +1349,17 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: 260)
                 .accessibilityLabel("按项目筛选运行配置")
+                Button(action: requestRunAll) {
+                    Label("全部启动", systemImage: "play.fill")
+                }
+                .buttonStyle(.bordered)
+                .disabled(runAllConfigurations.isEmpty)
+                Button(role: .destructive, action: requestStopAll) {
+                    Label("全部停止", systemImage: "stop.fill")
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .disabled(stopAllConfigurationIDs.isEmpty)
                 Button(action: beginCreatingRunConfiguration) {
                     Label("新建配置", systemImage: "plus")
                 }
@@ -1313,6 +1388,23 @@ struct ContentView: View {
             if !visibleRunConfigurations.contains(where: { $0.id == selectedRunConfigurationID }) {
                 selectedRunConfigurationID = visibleRunConfigurations.first?.id
             }
+        }
+        .alert("信任并全部启动？", isPresented: isConfirmingRunAllTrust) {
+            Button("取消", role: .cancel) {}
+            Button("信任并全部启动", action: confirmRunAllTrust)
+        } message: {
+            let roots = untrustedProjectRoots(for: pendingRunAllConfigurations)
+            Text("将信任 \(roots.count) 个 Project Root，并启动 \(pendingRunAllConfigurations.count) 个运行配置：\n\n\(roots.joined(separator: "\n"))\n\n确认后，这些 Project Root 的后续运行不再重复询问。")
+        }
+        .alert("停止全部活动会话？", isPresented: isConfirmingStopAll) {
+            Button("取消", role: .cancel) {}
+            Button("全部停止", role: .destructive) {
+                let configurationIDs = pendingStopAllConfigurationIDs
+                pendingStopAllConfigurationIDs.removeAll()
+                configurationIDs.forEach { runCoordinator.stop(configurationID: $0) }
+            }
+        } message: {
+            Text("将停止当前筛选和搜索结果中的 \(pendingStopAllConfigurationIDs.count) 个活动会话，包括取消正在进行的重启。")
         }
     }
 
@@ -1401,6 +1493,63 @@ struct ContentView: View {
         guard let selectedRunConfigurationID else { return visibleRunConfigurations.first }
         return visibleRunConfigurations.first { $0.id == selectedRunConfigurationID }
             ?? visibleRunConfigurations.first
+    }
+
+    private var runAllConfigurations: [ProjectRunConfiguration] {
+        visibleRunConfigurations.filter { configuration in
+            guard runCoordinator.session(for: configuration.id)?.state.isLive != true,
+                  let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
+                return false
+            }
+            return !project.availability.isUnavailable
+        }
+    }
+
+    private var stopAllConfigurationIDs: [String] {
+        visibleRunConfigurations.compactMap { configuration in
+            guard let state = runCoordinator.session(for: configuration.id)?.state,
+                  state.isLive,
+                  state != .stopping else { return nil }
+            return configuration.id
+        }
+    }
+
+    private func requestRunAll() {
+        let configurations = runAllConfigurations
+        guard !configurations.isEmpty else { return }
+        guard !untrustedProjectRoots(for: configurations).isEmpty else {
+            runAll(configurations)
+            return
+        }
+        pendingRunAllConfigurations = configurations
+    }
+
+    private func confirmRunAllTrust() {
+        let configurations = pendingRunAllConfigurations
+        let roots = untrustedProjectRoots(for: configurations)
+        pendingRunAllConfigurations.removeAll()
+        guard roots.allSatisfy(projectsModel.trustProjectRunRoot) else { return }
+        runAll(configurations)
+    }
+
+    private func runAll(_ configurations: [ProjectRunConfiguration]) {
+        for configuration in configurations
+        where runCoordinator.session(for: configuration.id)?.state.isLive != true {
+            guard let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
+                continue
+            }
+            _ = runCoordinator.run(configuration, project: project)
+        }
+    }
+
+    private func untrustedProjectRoots(for configurations: [ProjectRunConfiguration]) -> [String] {
+        Set(configurations.compactMap { configuration in
+            projectsModel.records.first { $0.id == configuration.projectID }?.path
+        }.filter { !projectsModel.isProjectRunTrusted($0) }).sorted()
+    }
+
+    private func requestStopAll() {
+        pendingStopAllConfigurationIDs = stopAllConfigurationIDs
     }
 
     private func selectFirstRunConfigurationIfNeeded() {
@@ -1908,8 +2057,10 @@ struct ContentView: View {
         case .starting: ("正在启动", "hourglass", .blue)
         case .running: ("运行中", "checkmark.circle.fill", .green)
         case .stopping: ("正在停止", "stop.circle.fill", .orange)
+        case .stopFailed: ("停止失败", "exclamationmark.triangle.fill", .orange)
         case .restarting: ("正在重启", "arrow.clockwise.circle.fill", .blue)
         case .restartFailed: ("重启失败", "exclamationmark.triangle.fill", .orange)
+        case .stopped: ("已结束", "checkmark.circle.fill", .secondary)
         case let .exited(code): (code == 0 ? "已结束" : "异常退出", code == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill", code == 0 ? .secondary : .orange)
         case .launchFailed: ("启动失败", "exclamationmark.triangle.fill", .orange)
         }
@@ -1937,12 +2088,18 @@ struct ContentView: View {
         case .stopping:
             Label("正在停止", systemImage: "stop.circle")
                 .foregroundStyle(.orange)
+        case let .stopFailed(message):
+            Label("停止失败：\(message)", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
         case .restarting:
             Label("正在重启", systemImage: "arrow.clockwise.circle.fill")
                 .foregroundStyle(.blue)
         case let .restartFailed(message):
             Label("重启失败：\(message)", systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
+        case let .stopped(code):
+            Label("用户主动停止 · 退出码 \(code)", systemImage: "checkmark.circle")
+                .foregroundStyle(.secondary)
         case let .exited(code):
             Label("已退出（退出码 \(code)）", systemImage: code == 0 ? "checkmark.circle" : "xmark.circle")
                 .foregroundStyle(code == 0 ? Color.secondary : Color.orange)
@@ -3461,7 +3618,7 @@ struct ContentView: View {
                         : "共 \(runtimeVersions.count) 个安装版本",
                     systemImage: "terminal",
                     tint: .purple
-                ) { selectPage(.runtimes) }
+                ) { selectSystemInformation(.runtimes) }
                 overviewSummaryCard(
                     title: "数据库",
                     value: "已安装 \(installations.count) 个",
@@ -3470,7 +3627,7 @@ struct ContentView: View {
                         : "\(listeningInstallations) 个正在监听",
                     systemImage: "cylinder",
                     tint: .orange
-                ) { selectPage(.databases) }
+                ) { selectSystemInformation(.databases) }
                 overviewSummaryCard(
                     title: "本地服务",
                     value: "\(processCount) 个监听进程",
@@ -3597,7 +3754,7 @@ struct ContentView: View {
         let iconTint = isProblem ? Color.orange : tint
         return Button {
             expandedEnvironmentCard = card
-            selectPage(.environment)
+            selectPage(.systemInformation)
         } label: {
             HStack(spacing: 10) {
                 Group {
@@ -3899,10 +4056,10 @@ struct ContentView: View {
             selectPage(.projects)
         case let .runtime(runtimeID):
             expandedRuntimeID = runtimeID
-            selectPage(.runtimes)
+            selectSystemInformation(.runtimes)
         case let .database(databaseID):
             expandedDatabaseID = databaseID
-            selectPage(.databases)
+            selectSystemInformation(.databases)
         case .localServices:
             selectedServiceTab = .local
             selectPage(.localServices)
@@ -3918,13 +4075,20 @@ struct ContentView: View {
         }
     }
 
+    private func selectSystemInformation(_ section: SystemInformationSection) {
+        pendingSystemInformationSection = section
+        selectPage(.systemInformation)
+    }
+
     private func overviewRunColor(_ state: ProjectRunSessionState) -> Color {
         switch state {
         case .starting: .blue
         case .running: .green
         case .stopping: .orange
+        case .stopFailed: .red
         case .restarting: .blue
         case .restartFailed: .red
+        case .stopped: .secondary
         case .launchFailed: .red
         case let .exited(code): code == 0 ? .secondary : .red
         case .inactive: .secondary
@@ -3949,8 +4113,10 @@ struct ContentView: View {
         case .starting: "启动中"
         case .running: "运行中"
         case .stopping: "停止中"
+        case .stopFailed: "停止失败"
         case .restarting: "重启中"
         case .restartFailed: "重启失败"
+        case .stopped: "已结束"
         case let .exited(code): code == 0 ? "已退出" : "异常退出"
         case .launchFailed: "启动失败"
         }
@@ -4202,7 +4368,7 @@ struct ContentView: View {
 
     private func runtimesSection(_ runtimes: [RuntimeSnapshot]) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("开发语言列表")
+            Text("开发语言")
                 .font(.title3.bold())
 
             if let expandedRuntimeID,
@@ -4227,93 +4393,22 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
-    private func runtimePage(_ runtimes: [RuntimeSnapshot]) -> some View {
-        runtimeMetricsSection(runtimes)
-        runtimesSection(runtimes)
-    }
-
-    private func runtimeMetricsSection(_ runtimes: [RuntimeSnapshot]) -> some View {
-        let discoveredCount = runtimes.count { $0.state == .discovered }
-        let installationCount = runtimes.reduce(0) { $0 + $1.installations.count }
-        let conflictCount = runtimes.count { $0.hasPathVersionConflict }
-        let unavailableCount = runtimes.count { $0.state == .unavailable }
-
-        return LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
-            spacing: 12
-        ) {
-            runtimeMetricCard(
-                discoveredCount,
-                title: "开发语言类别",
-                systemImage: "terminal",
-                tint: .blue
-            )
-            runtimeMetricCard(
-                installationCount,
-                title: "已发现版本",
-                systemImage: "checkmark.circle.fill",
-                tint: .green
-            )
-            runtimeMetricCard(
-                conflictCount,
-                title: "PATH 冲突",
-                systemImage: "exclamationmark.triangle.fill",
-                tint: .orange
-            )
-            runtimeMetricCard(
-                unavailableCount,
-                title: "未发现",
-                systemImage: "questionmark",
-                tint: .secondary
-            )
-        }
-    }
-
-    private func runtimeMetricCard(
-        _ value: Int,
-        title: String,
-        systemImage: String,
-        tint: Color
-    ) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: systemImage)
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 46, height: 46)
-                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Text(value.formatted())
-                    .font(.title2.bold())
-                    .monospacedDigit()
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(AppTheme.cardSurface)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.primary.opacity(0.10))
-                }
-        }
-        .accessibilityElement(children: .combine)
-    }
-
     private func databaseInstallationsSection(_ overviews: [DatabaseInstallationOverview]) -> some View {
         let shouldCollapseExpanded = expandedDatabaseID.map { id in
             overviews.first(where: { $0.id == id })?.installations.isEmpty ?? true
         } ?? false
 
         return VStack(alignment: .leading, spacing: 16) {
-            Text("Database 列表")
-                .font(.title3.bold())
+            HStack(alignment: .firstTextBaseline) {
+                Text("数据库")
+                    .font(.title3.bold())
+                Spacer()
+                Text(model.dynamicStatusRefreshedAt.map { "最近刷新：\(formatted($0))" } ?? "最近刷新：尚未刷新")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            homebrewServiceFeedback
 
             if let expandedDatabaseID,
                let expanded = overviews.first(where: { $0.id == expandedDatabaseID }) {
@@ -4329,6 +4424,7 @@ struct ContentView: View {
                 fullyShownDatabaseID = nil
             }
         }
+        .onAppear(perform: model.refreshHomebrewServices)
     }
 
     private func databaseGrid(_ overviews: [DatabaseInstallationOverview]) -> some View {
@@ -4340,50 +4436,6 @@ struct ContentView: View {
             ForEach(overviews) { database in
                 databaseCard(database)
             }
-        }
-    }
-
-    @ViewBuilder
-    private func databasePage(_ overviews: [DatabaseInstallationOverview]) -> some View {
-        homebrewServiceFeedback
-        databaseMetricsSection(overviews)
-            .onAppear(perform: model.refreshHomebrewServices)
-        databaseInstallationsSection(overviews)
-    }
-
-    private func databaseMetricsSection(_ overviews: [DatabaseInstallationOverview]) -> some View {
-        let discoveredCount = overviews.count { $0.discoveryState == .discovered }
-        let listeningCount = overviews.count { $0.listeningState == .listening }
-        let unavailableCount = overviews.count { $0.discoveryState == .notFound }
-
-        return LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
-            spacing: 12
-        ) {
-            runtimeMetricCard(
-                overviews.count,
-                title: "数据库类别",
-                systemImage: "cylinder.split.1x2.fill",
-                tint: .blue
-            )
-            runtimeMetricCard(
-                discoveredCount,
-                title: "已发现安装",
-                systemImage: "checkmark.circle.fill",
-                tint: .green
-            )
-            runtimeMetricCard(
-                listeningCount,
-                title: "正在监听",
-                systemImage: "waveform.path.ecg",
-                tint: .green
-            )
-            runtimeMetricCard(
-                unavailableCount,
-                title: "未发现",
-                systemImage: "questionmark",
-                tint: .secondary
-            )
         }
     }
 
@@ -4448,18 +4500,14 @@ struct ContentView: View {
                 .accessibilityValue("已折叠")
             }
         }
-        .padding(isExpanded ? 16 : 10)
-        .frame(
-            maxWidth: .infinity,
-            minHeight: isExpanded ? nil : 100,
-            alignment: isExpanded ? .topLeading : .leading
-        )
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
-            RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
-                .fill(AppTheme.cardSubtle)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(AppTheme.cardRaised)
                 .overlay {
-                    RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
-                        .stroke(highlightsStatus ? Color.orange.opacity(0.55) : Color.primary.opacity(0.10))
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(highlightsStatus ? Color.orange.opacity(0.55) : Color.primary.opacity(0.09))
                 }
         }
     }
@@ -4525,42 +4573,19 @@ struct ContentView: View {
         let statusColor = database.installations.isEmpty ? discovery.color : tint
         let statusSymbol = database.installations.isEmpty ? "questionmark" : listening.symbol
 
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 12) {
-                databaseLogo(database, size: 48, padding: 8)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(database.name)
-                        .font(.headline)
-                    Text(databaseVersion(database))
-                        .font(.title3.bold())
-                        .monospacedDigit()
-                        .foregroundStyle(database.installations.contains { $0.error != nil } ? .orange : .primary)
-                }
-
-                Spacer(minLength: 8)
-
-                ZStack {
-                    Circle().fill(statusColor.opacity(0.13))
-                    Image(systemName: statusSymbol)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(statusColor)
-                }
-                .frame(width: 32, height: 32)
-                .accessibilityHidden(true)
-            }
-
-            Text(
-                database.installations.isEmpty
-                    ? "未检测到 Database Installation"
-                    : "\(database.installations.count) 个安装 · \(database.listeningCount) 个正在监听"
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.leading, 60)
+        return environmentCardSummary(
+            title: database.name,
+            primaryValue: databaseVersion(database),
+            subtitle: database.installations.isEmpty
+                ? "未检测到 Database Installation"
+                : "\(database.installations.count) 个安装 · \(database.listeningCount) 个正在监听",
+            status: database.installations.isEmpty ? discovery.title : listening.title,
+            statusImage: statusSymbol,
+            statusColor: statusColor,
+            showsDisclosure: !database.installations.isEmpty
+        ) {
+            databaseLogo(database, size: 50, padding: 8)
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .contentShape(Rectangle())
     }
 
     private func databaseLogo(
@@ -4769,6 +4794,42 @@ struct ContentView: View {
         }
     }
 
+    private func localServiceMetricCard(
+        _ value: Int,
+        title: String,
+        systemImage: String,
+        tint: Color
+    ) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 46, height: 46)
+                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(value.formatted())
+                    .font(.title2.bold())
+                    .monospacedDigit()
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(AppTheme.cardSurface)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
+                }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     private func localServicesSection(_ snapshot: MachineSnapshot) -> some View {
         let groups = groupLocalServicesForDisplay(snapshot.localServices)
         let portCount = groups.reduce(0) { $0 + Set($1.bindings.map(\.port)).count }
@@ -4779,25 +4840,25 @@ struct ContentView: View {
                 columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
                 spacing: 12
             ) {
-                runtimeMetricCard(
+                localServiceMetricCard(
                     groups.count,
                     title: "服务类别",
                     systemImage: "globe",
                     tint: .blue
                 )
-                runtimeMetricCard(
+                localServiceMetricCard(
                     groups.count,
                     title: "正在运行",
                     systemImage: "waveform.path.ecg",
                     tint: .green
                 )
-                runtimeMetricCard(
+                localServiceMetricCard(
                     portCount,
                     title: "监听端口",
                     systemImage: "cable.connector",
                     tint: .blue
                 )
-                runtimeMetricCard(
+                localServiceMetricCard(
                     exposedPortCount,
                     title: "异常端口",
                     systemImage: "exclamationmark.triangle.fill",
@@ -5259,21 +5320,17 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(isExpanded ? 16 : 10)
-        .frame(
-            maxWidth: .infinity,
-            minHeight: isExpanded ? nil : 100,
-            alignment: isExpanded ? .topLeading : .leading
-        )
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
-            RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(AppTheme.cardRaised)
                 .overlay {
-                    RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(
                             highlightsStatus
                                 ? status.color.opacity(0.55)
-                                : Color.primary.opacity(0.10)
+                                : Color.primary.opacity(0.09)
                         )
                 }
         }
@@ -5378,59 +5435,23 @@ struct ContentView: View {
         let brand = runtimeBrand(runtime)
         let status = runtimeCardStatus(runtime)
 
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 12) {
-                runtimeLogo(brand)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(runtime.name)
-                        .font(.headline)
-
-                    Text(effectiveVersion(for: runtime))
-                        .font(.title3.bold())
-                        .monospacedDigit()
-                        .foregroundStyle(runtime.state == .failed ? .orange : .primary)
-                }
-
-                Spacer(minLength: 8)
-
-                ZStack {
-                    Circle()
-                        .fill(status.color.opacity(0.08))
-                    Image(systemName: status.badgeSymbol)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(status.color)
-                }
-                .frame(width: 32, height: 32)
-                .accessibilityHidden(true)
-            }
-
-            HStack(spacing: 8) {
-                Text(
-                    runtime.installations.isEmpty
-                        ? "未检测到安装版本"
-                        : "\(runtime.installations.count) 个安装版本"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                if runtime.hasPathVersionConflict || runtime.state == .failed {
-                    Text("·")
-                        .foregroundStyle(.tertiary)
-                    Text(status.title)
-                        .foregroundStyle(status.color)
-                }
-            }
-            .font(.caption)
-            .padding(.leading, 60)
+        return environmentCardSummary(
+            title: runtime.name,
+            primaryValue: effectiveVersion(for: runtime),
+            subtitle: runtime.installations.isEmpty
+                ? "未检测到安装版本"
+                : "\(runtime.installations.count) 个安装版本",
+            status: status.title,
+            statusImage: status.pillSymbol,
+            statusColor: status.color,
+            showsDisclosure: !runtime.installations.isEmpty
+        ) {
+            runtimeLogo(brand, size: 50)
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .contentShape(Rectangle())
     }
 
     private func runtimeCardStatus(_ runtime: RuntimeSnapshot) -> (
         title: String,
-        badgeSymbol: String,
         pillSymbol: String,
         color: Color,
         explanation: String?
@@ -5439,7 +5460,6 @@ struct ContentView: View {
             return (
                 "PATH 版本冲突",
                 "exclamationmark.triangle.fill",
-                "exclamationmark.triangle.fill",
                 .orange,
                 "当前 PATH 中存在该开发语言的多个不同版本。终端默认使用 PATH 顺序最靠前的版本，其他工具或项目可能解析到不同版本。"
             )
@@ -5447,16 +5467,15 @@ struct ContentView: View {
         if runtime.state == .failed {
             return (
                 "读取失败",
-                "exclamationmark.triangle.fill",
                 "exclamationmark.circle.fill",
                 .orange,
                 "已找到开发语言，但无法读取可用版本。常见原因包括命令超时、文件不可执行或版本输出无法识别。"
             )
         }
         if runtime.state == .discovered {
-            return ("已安装", "checkmark", "checkmark.circle.fill", .green, nil)
+            return ("已安装", "checkmark.circle.fill", .green, nil)
         }
-        return ("未发现", "questionmark", "circle.fill", .secondary, nil)
+        return ("未发现", "circle.fill", .secondary, nil)
     }
 
     private func runtimeBrand(_ runtime: RuntimeSnapshot) -> (assetName: String, color: Color) {
@@ -6253,7 +6272,15 @@ struct ContentView: View {
         statusColor: Color,
         showsDisclosure: Bool
     ) -> some View {
-        HStack(alignment: .center, spacing: 14) {
+        environmentCardSummary(
+            title: title,
+            primaryValue: primaryValue,
+            subtitle: subtitle,
+            status: status,
+            statusImage: statusImage,
+            statusColor: statusColor,
+            showsDisclosure: showsDisclosure
+        ) {
             ZStack {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(tint.opacity(0.09))
@@ -6267,6 +6294,21 @@ struct ContentView: View {
                     .stroke(Color.primary.opacity(0.07))
             }
             .accessibilityHidden(true)
+        }
+    }
+
+    private func environmentCardSummary<Icon: View>(
+        title: String,
+        primaryValue: String,
+        subtitle: String,
+        status: String,
+        statusImage: String,
+        statusColor: Color,
+        showsDisclosure: Bool,
+        @ViewBuilder icon: () -> Icon
+    ) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            icon()
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -6289,12 +6331,11 @@ struct ContentView: View {
                 .padding(.vertical, 4)
                 .background(statusColor.opacity(0.10), in: Capsule())
 
-            if showsDisclosure {
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-            }
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .opacity(showsDisclosure ? 1 : 0)
+                .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())

@@ -9,21 +9,23 @@ enum ProjectRunSessionState: Equatable, Sendable {
     case starting
     case running
     case stopping
+    case stopFailed(String)
     case restarting
     case restartFailed(String)
+    case stopped(Int32)
     case exited(Int32)
     case launchFailed(String)
 
     var isLive: Bool {
         switch self {
-        case .starting, .running, .stopping, .restarting, .restartFailed: true
-        case .inactive, .exited, .launchFailed: false
+        case .starting, .running, .stopping, .stopFailed, .restarting, .restartFailed: true
+        case .inactive, .stopped, .exited, .launchFailed: false
         }
     }
 
     var isStopping: Bool {
         switch self {
-        case .stopping, .restarting: true
+        case .stopping, .stopFailed, .restarting: true
         default: false
         }
     }
@@ -360,9 +362,66 @@ private func projectRunOwnershipMonitorHandler(
 }
 
 @MainActor
+final class AdaptiveProjectRunTerminalView: LocalProcessTerminalView {
+    private static let historyGrowthLines = TerminalOptions.default.scrollback
+    private static let maximumHistoryLines = 10_000
+    private var historyLines = TerminalOptions.default.scrollback
+    private var estimatedOutputRows = 0
+    private var currentOutputColumn = 0
+
+    override func dataReceived(slice: ArraySlice<UInt8>) {
+        growHistory(for: slice)
+        super.dataReceived(slice: slice)
+    }
+
+    func resetHistory() {
+        historyLines = Self.historyGrowthLines
+        estimatedOutputRows = 0
+        currentOutputColumn = 0
+        terminal.changeHistorySize(historyLines)
+    }
+
+    private func growHistory(for bytes: ArraySlice<UInt8>) {
+        let columns = max(terminal.cols, 1)
+        // ponytail: raw bytes can overestimate ANSI/UTF-8 width; use SwiftTerm row callbacks if exposed.
+        for byte in bytes {
+            switch byte {
+            case 0x0A:
+                recordOutputRow()
+                currentOutputColumn = 0
+            case 0x0D:
+                currentOutputColumn = 0
+            case 0x08:
+                currentOutputColumn = max(currentOutputColumn - 1, 0)
+            default:
+                currentOutputColumn += 1
+                if currentOutputColumn >= columns {
+                    recordOutputRow()
+                    currentOutputColumn = 0
+                }
+            }
+        }
+        let targetLines = min(
+            Self.maximumHistoryLines,
+            max(
+                Self.historyGrowthLines,
+                ((estimatedOutputRows + Self.historyGrowthLines - 1) / Self.historyGrowthLines)
+                    * Self.historyGrowthLines
+            )
+        )
+        guard targetLines > historyLines else { return }
+        historyLines = targetLines
+        terminal.changeHistorySize(historyLines)
+    }
+
+    private func recordOutputRow() {
+        estimatedOutputRows = min(estimatedOutputRows + 1, Self.maximumHistoryLines)
+    }
+}
+
+@MainActor
 final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preconcurrency LocalProcessTerminalViewDelegate {
-    private static let scrollbackLines = 50_000
-    let terminal = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+    let terminal = AdaptiveProjectRunTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
     var terminalView: NSView { terminal }
     var onExit: ((Int32?) -> Void)?
     private(set) var ownedProcessIDs: Set<pid_t>?
@@ -393,7 +452,6 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
 
     override init() {
         super.init()
-        terminal.terminal.changeHistorySize(Self.scrollbackLines)
         terminal.processDelegate = self
     }
 
@@ -465,6 +523,7 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
             terminal.terminal.resetNormalBuffer()
         }
         terminal.feed(text: "\u{1B}[3J\u{1B}[2J\u{1B}[H")
+        terminal.resetHistory()
     }
 
     func signalProcessGroups(_ signal: Int32) -> Bool {
@@ -659,6 +718,7 @@ final class ProjectRunSession: ObservableObject, Identifiable {
     fileprivate let engine: any ProjectRunProcessEngine
     fileprivate var pendingStopExitCode: Int32?
     fileprivate var pendingRestart: ProjectRunTrustRequest?
+    fileprivate var stopRequestedByUser = false
 
     fileprivate init(configurationID: String, engine: any ProjectRunProcessEngine) {
         id = configurationID
@@ -883,8 +943,14 @@ final class ProjectRunCoordinator: ObservableObject {
     func stop(configurationID: String) {
         guard let session = sessions[configurationID],
               session.state.isLive,
-              session.state != .restarting else { return }
+              session.state != .stopping else { return }
         session.pendingRestart = nil
+        if session.state == .restarting {
+            session.stopRequestedByUser = true
+            session.state = .stopping
+            objectWillChange.send()
+            return
+        }
         beginStopping(session, restarting: false)
     }
 
@@ -929,6 +995,11 @@ final class ProjectRunCoordinator: ObservableObject {
         session.state = restarting ? .restarting : .stopping
         if !isRetry {
             session.pendingStopExitCode = nil
+            session.stopRequestedByUser = !restarting
+        }
+        if !restarting {
+            session.failureMessage = nil
+            session.failureAt = nil
         }
         _ = session.engine.signalProcessGroups(SIGINT)
         objectWillChange.send()
@@ -941,6 +1012,8 @@ final class ProjectRunCoordinator: ObservableObject {
                     self.finishStopping(session)
                 } else if session.state == .restarting {
                     self.failRestart(session, message: "上一次运行仍有进程未退出")
+                } else {
+                    self.failStop(session, message: "仍有进程未退出")
                 }
                 self.objectWillChange.send()
             }
@@ -949,35 +1022,43 @@ final class ProjectRunCoordinator: ObservableObject {
 
     private func finishStopping(_ session: ProjectRunSession) {
         let exitCode = session.pendingStopExitCode ?? 137
-        session.pendingStopExitCode = nil
-        guard session.pendingRestart != nil else {
-            session.state = .exited(exitCode)
-            return
-        }
-        finishRestartWhenProcessesExit(session, exitCode: exitCode, checksRemaining: 10)
+        finishStoppingWhenProcessesExit(session, exitCode: exitCode, checksRemaining: 10)
     }
 
-    private func finishRestartWhenProcessesExit(
+    private func finishStoppingWhenProcessesExit(
         _ session: ProjectRunSession,
         exitCode: Int32,
         checksRemaining: Int
     ) {
-        guard session.state == .restarting, let request = session.pendingRestart else { return }
+        guard session.state.isStopping else { return }
         if session.engine.signalProcessGroups(0), session.ownedProcessIDs?.isEmpty == true {
+            let request = session.pendingRestart
+            let stoppedByUser = session.stopRequestedByUser
             session.pendingRestart = nil
-            session.state = .exited(exitCode)
-            _ = launch(request)
+            session.pendingStopExitCode = nil
+            session.stopRequestedByUser = false
+            if request == nil && !stoppedByUser && exitCode != 0 {
+                session.failureMessage = "命令以状态码 \(exitCode) 退出"
+                session.failureAt = Date()
+            } else {
+                session.failureMessage = nil
+                session.failureAt = nil
+            }
+            session.state = request == nil && stoppedByUser ? .stopped(exitCode) : .exited(exitCode)
+            if let request { _ = launch(request) }
         } else if checksRemaining > 0 {
             scheduler.schedule(after: .milliseconds(100)) { [weak self, weak session] in
                 guard let self, let session else { return }
-                self.finishRestartWhenProcessesExit(
+                self.finishStoppingWhenProcessesExit(
                     session,
                     exitCode: exitCode,
                     checksRemaining: checksRemaining - 1
                 )
             }
-        } else {
+        } else if session.state == .restarting {
             failRestart(session, message: "上一次运行仍有进程未退出")
+        } else {
+            failStop(session, message: "仍有进程未退出")
         }
     }
 
@@ -991,6 +1072,13 @@ final class ProjectRunCoordinator: ObservableObject {
         session.failureMessage = "重启失败：\(message)"
         session.failureAt = Date()
         session.state = .restartFailed(message)
+        objectWillChange.send()
+    }
+
+    private func failStop(_ session: ProjectRunSession, message: String) {
+        session.failureMessage = "停止失败：\(message)"
+        session.failureAt = Date()
+        session.state = .stopFailed(message)
         objectWillChange.send()
     }
 
@@ -1094,6 +1182,11 @@ final class ProjectRunCoordinator: ObservableObject {
             guard let self, let session else { return }
             if session.state.isStopping {
                 session.pendingStopExitCode = exitCode
+                if case .stopFailed = session.state {
+                    session.state = .stopping
+                    self.finishStopping(session)
+                    self.objectWillChange.send()
+                }
                 return
             }
             if exitCode != 0 {
@@ -1103,8 +1196,10 @@ final class ProjectRunCoordinator: ObservableObject {
             if session.engine.signalProcessGroups(SIGKILL) {
                 session.state = .exited(exitCode ?? -1)
             } else {
+                session.stopRequestedByUser = false
                 session.state = .stopping
                 session.pendingStopExitCode = exitCode
+                self.finishStopping(session)
             }
             self.objectWillChange.send()
         }
