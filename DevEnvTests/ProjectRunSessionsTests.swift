@@ -633,6 +633,63 @@ final class ProjectRunSessionsTests: XCTestCase {
             "停止失败：仍有进程未退出"
         )
         XCTAssertTrue(coordinator.session(for: configuration.id)?.state.isLive == true)
+
+        engine.signalSucceeds = true
+        engine.ownedProcessIDs = []
+        engine.finish(exitCode: 130)
+
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(130))
+        XCTAssertNil(coordinator.session(for: configuration.id)?.failureMessage)
+    }
+
+    func testUnexpectedExitCleanupFailureConvergesAndKeepsExitSemantics() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let factory = FakeProjectRunEngineFactory()
+        let scheduler = FakeProjectRunScheduler()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: scheduler
+        )
+        let configuration = ProjectRunConfiguration(
+            id: "run",
+            projectID: directory.path,
+            name: "服务",
+            command: "exit 2",
+            workingDirectory: "."
+        )
+        guard case let .needsTrust(request) = coordinator.run(
+            configuration,
+            projectRoot: directory.path
+        ) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        let engine = try XCTUnwrap(factory.engines.first)
+        engine.signalSucceeds = false
+
+        engine.finish(exitCode: 2)
+        for _ in 0..<10 { scheduler.runNext() }
+
+        XCTAssertEqual(
+            coordinator.session(for: configuration.id)?.state,
+            .stopFailed("仍有进程未退出")
+        )
+
+        engine.signalSucceeds = true
+        engine.ownedProcessIDs = []
+        engine.finish(exitCode: 2)
+
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .exited(2))
+        XCTAssertEqual(
+            coordinator.session(for: configuration.id)?.failureMessage,
+            "命令以状态码 2 退出"
+        )
     }
 
     func testRerunRevalidatesPathAndShellWithoutDiscardingTheTerminal() throws {

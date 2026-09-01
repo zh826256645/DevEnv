@@ -25,7 +25,7 @@ enum ProjectRunSessionState: Equatable, Sendable {
 
     var isStopping: Bool {
         switch self {
-        case .stopping, .restarting: true
+        case .stopping, .stopFailed, .restarting: true
         default: false
         }
     }
@@ -718,6 +718,7 @@ final class ProjectRunSession: ObservableObject, Identifiable {
     fileprivate let engine: any ProjectRunProcessEngine
     fileprivate var pendingStopExitCode: Int32?
     fileprivate var pendingRestart: ProjectRunTrustRequest?
+    fileprivate var stopRequestedByUser = false
 
     fileprivate init(configurationID: String, engine: any ProjectRunProcessEngine) {
         id = configurationID
@@ -988,6 +989,7 @@ final class ProjectRunCoordinator: ObservableObject {
         session.state = restarting ? .restarting : .stopping
         if !isRetry {
             session.pendingStopExitCode = nil
+            session.stopRequestedByUser = !restarting
         }
         if !restarting {
             session.failureMessage = nil
@@ -1025,9 +1027,18 @@ final class ProjectRunCoordinator: ObservableObject {
         guard session.state.isStopping else { return }
         if session.engine.signalProcessGroups(0), session.ownedProcessIDs?.isEmpty == true {
             let request = session.pendingRestart
+            let stoppedByUser = session.stopRequestedByUser
             session.pendingRestart = nil
             session.pendingStopExitCode = nil
-            session.state = request == nil ? .stopped(exitCode) : .exited(exitCode)
+            session.stopRequestedByUser = false
+            if request == nil && !stoppedByUser && exitCode != 0 {
+                session.failureMessage = "命令以状态码 \(exitCode) 退出"
+                session.failureAt = Date()
+            } else {
+                session.failureMessage = nil
+                session.failureAt = nil
+            }
+            session.state = request == nil && stoppedByUser ? .stopped(exitCode) : .exited(exitCode)
             if let request { _ = launch(request) }
         } else if checksRemaining > 0 {
             scheduler.schedule(after: .milliseconds(100)) { [weak self, weak session] in
@@ -1165,6 +1176,11 @@ final class ProjectRunCoordinator: ObservableObject {
             guard let self, let session else { return }
             if session.state.isStopping {
                 session.pendingStopExitCode = exitCode
+                if case .stopFailed = session.state {
+                    session.state = .stopping
+                    self.finishStopping(session)
+                    self.objectWillChange.send()
+                }
                 return
             }
             if exitCode != 0 {
@@ -1174,8 +1190,10 @@ final class ProjectRunCoordinator: ObservableObject {
             if session.engine.signalProcessGroups(SIGKILL) {
                 session.state = .exited(exitCode ?? -1)
             } else {
+                session.stopRequestedByUser = false
                 session.state = .stopping
                 session.pendingStopExitCode = exitCode
+                self.finishStopping(session)
             }
             self.objectWillChange.send()
         }
