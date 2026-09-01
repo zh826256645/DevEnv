@@ -676,6 +676,8 @@ struct ContentView: View {
         navigation(model.snapshot)
         .frame(minWidth: 1100, minHeight: 720)
         .tint(AppTheme.accent)
+        .containerBackground(AppTheme.canvas, for: .window)
+        .toolbarBackground(AppTheme.canvas, for: .windowToolbar)
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -756,6 +758,7 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            NSApplication.shared.windows.forEach { $0.titlebarSeparatorStyle = .none }
             updateRefreshActivity()
             if selectedPage == .overview { runCoordinator.refreshProjects() }
         }
@@ -958,8 +961,6 @@ struct ContentView: View {
                 .padding(.horizontal, 18)
                 .padding(.vertical, 18)
 
-                Divider()
-
                 List(selection: pageSelection) {
                     ForEach(Page.primaryPages, id: \.self) { page in
                         Label(page.title, systemImage: page.systemImage)
@@ -973,10 +974,7 @@ struct ContentView: View {
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
-                .background(AppTheme.sidebar)
                 .padding(.top, 14)
-
-                Divider()
 
                 Button {
                     requestPage(.settings)
@@ -996,7 +994,7 @@ struct ContentView: View {
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
             .background(AppTheme.sidebar)
-            .shadow(color: AppTheme.accent.opacity(0.10), radius: 18, x: 5, y: 0)
+            .shadow(color: AppTheme.accent.opacity(0.05), radius: 18, x: 5, y: 0)
         } detail: {
             page(snapshot)
         }
@@ -1053,8 +1051,8 @@ struct ContentView: View {
                     if let snapshot { localServicesSection(snapshot) }
                 case .environment:
                     if let snapshot {
-                        environmentSection(snapshot)
                         systemSection(snapshot.system)
+                        environmentSection(snapshot)
                     }
                 case .settings:
                     settingsPage
