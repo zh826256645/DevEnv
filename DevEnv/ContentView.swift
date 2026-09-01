@@ -4500,18 +4500,14 @@ struct ContentView: View {
                 .accessibilityValue("已折叠")
             }
         }
-        .padding(isExpanded ? 16 : 10)
-        .frame(
-            maxWidth: .infinity,
-            minHeight: isExpanded ? nil : 100,
-            alignment: isExpanded ? .topLeading : .leading
-        )
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
-            RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
-                .fill(AppTheme.cardSubtle)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(AppTheme.cardRaised)
                 .overlay {
-                    RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
-                        .stroke(highlightsStatus ? Color.orange.opacity(0.55) : Color.primary.opacity(0.10))
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(highlightsStatus ? Color.orange.opacity(0.55) : Color.primary.opacity(0.09))
                 }
         }
     }
@@ -4577,42 +4573,19 @@ struct ContentView: View {
         let statusColor = database.installations.isEmpty ? discovery.color : tint
         let statusSymbol = database.installations.isEmpty ? "questionmark" : listening.symbol
 
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 12) {
-                databaseLogo(database, size: 48, padding: 8)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(database.name)
-                        .font(.headline)
-                    Text(databaseVersion(database))
-                        .font(.title3.bold())
-                        .monospacedDigit()
-                        .foregroundStyle(database.installations.contains { $0.error != nil } ? .orange : .primary)
-                }
-
-                Spacer(minLength: 8)
-
-                ZStack {
-                    Circle().fill(statusColor.opacity(0.13))
-                    Image(systemName: statusSymbol)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(statusColor)
-                }
-                .frame(width: 32, height: 32)
-                .accessibilityHidden(true)
-            }
-
-            Text(
-                database.installations.isEmpty
-                    ? "未检测到 Database Installation"
-                    : "\(database.installations.count) 个安装 · \(database.listeningCount) 个正在监听"
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.leading, 60)
+        return environmentCardSummary(
+            title: database.name,
+            primaryValue: databaseVersion(database),
+            subtitle: database.installations.isEmpty
+                ? "未检测到 Database Installation"
+                : "\(database.installations.count) 个安装 · \(database.listeningCount) 个正在监听",
+            status: database.installations.isEmpty ? discovery.title : listening.title,
+            statusImage: statusSymbol,
+            statusColor: statusColor,
+            showsDisclosure: !database.installations.isEmpty
+        ) {
+            databaseLogo(database, size: 50, padding: 8)
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .contentShape(Rectangle())
     }
 
     private func databaseLogo(
@@ -5347,21 +5320,17 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(isExpanded ? 16 : 10)
-        .frame(
-            maxWidth: .infinity,
-            minHeight: isExpanded ? nil : 100,
-            alignment: isExpanded ? .topLeading : .leading
-        )
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
-            RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(AppTheme.cardRaised)
                 .overlay {
-                    RoundedRectangle(cornerRadius: isExpanded ? 16 : 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .stroke(
                             highlightsStatus
                                 ? status.color.opacity(0.55)
-                                : Color.primary.opacity(0.10)
+                                : Color.primary.opacity(0.09)
                         )
                 }
         }
@@ -5466,59 +5435,23 @@ struct ContentView: View {
         let brand = runtimeBrand(runtime)
         let status = runtimeCardStatus(runtime)
 
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 12) {
-                runtimeLogo(brand)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(runtime.name)
-                        .font(.headline)
-
-                    Text(effectiveVersion(for: runtime))
-                        .font(.title3.bold())
-                        .monospacedDigit()
-                        .foregroundStyle(runtime.state == .failed ? .orange : .primary)
-                }
-
-                Spacer(minLength: 8)
-
-                ZStack {
-                    Circle()
-                        .fill(status.color.opacity(0.08))
-                    Image(systemName: status.badgeSymbol)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(status.color)
-                }
-                .frame(width: 32, height: 32)
-                .accessibilityHidden(true)
-            }
-
-            HStack(spacing: 8) {
-                Text(
-                    runtime.installations.isEmpty
-                        ? "未检测到安装版本"
-                        : "\(runtime.installations.count) 个安装版本"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                if runtime.hasPathVersionConflict || runtime.state == .failed {
-                    Text("·")
-                        .foregroundStyle(.tertiary)
-                    Text(status.title)
-                        .foregroundStyle(status.color)
-                }
-            }
-            .font(.caption)
-            .padding(.leading, 60)
+        return environmentCardSummary(
+            title: runtime.name,
+            primaryValue: effectiveVersion(for: runtime),
+            subtitle: runtime.installations.isEmpty
+                ? "未检测到安装版本"
+                : "\(runtime.installations.count) 个安装版本",
+            status: status.title,
+            statusImage: status.pillSymbol,
+            statusColor: status.color,
+            showsDisclosure: !runtime.installations.isEmpty
+        ) {
+            runtimeLogo(brand, size: 50)
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .contentShape(Rectangle())
     }
 
     private func runtimeCardStatus(_ runtime: RuntimeSnapshot) -> (
         title: String,
-        badgeSymbol: String,
         pillSymbol: String,
         color: Color,
         explanation: String?
@@ -5527,7 +5460,6 @@ struct ContentView: View {
             return (
                 "PATH 版本冲突",
                 "exclamationmark.triangle.fill",
-                "exclamationmark.triangle.fill",
                 .orange,
                 "当前 PATH 中存在该开发语言的多个不同版本。终端默认使用 PATH 顺序最靠前的版本，其他工具或项目可能解析到不同版本。"
             )
@@ -5535,16 +5467,15 @@ struct ContentView: View {
         if runtime.state == .failed {
             return (
                 "读取失败",
-                "exclamationmark.triangle.fill",
                 "exclamationmark.circle.fill",
                 .orange,
                 "已找到开发语言，但无法读取可用版本。常见原因包括命令超时、文件不可执行或版本输出无法识别。"
             )
         }
         if runtime.state == .discovered {
-            return ("已安装", "checkmark", "checkmark.circle.fill", .green, nil)
+            return ("已安装", "checkmark.circle.fill", .green, nil)
         }
-        return ("未发现", "questionmark", "circle.fill", .secondary, nil)
+        return ("未发现", "circle.fill", .secondary, nil)
     }
 
     private func runtimeBrand(_ runtime: RuntimeSnapshot) -> (assetName: String, color: Color) {
@@ -6341,7 +6272,15 @@ struct ContentView: View {
         statusColor: Color,
         showsDisclosure: Bool
     ) -> some View {
-        HStack(alignment: .center, spacing: 14) {
+        environmentCardSummary(
+            title: title,
+            primaryValue: primaryValue,
+            subtitle: subtitle,
+            status: status,
+            statusImage: statusImage,
+            statusColor: statusColor,
+            showsDisclosure: showsDisclosure
+        ) {
             ZStack {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(tint.opacity(0.09))
@@ -6355,6 +6294,21 @@ struct ContentView: View {
                     .stroke(Color.primary.opacity(0.07))
             }
             .accessibilityHidden(true)
+        }
+    }
+
+    private func environmentCardSummary<Icon: View>(
+        title: String,
+        primaryValue: String,
+        subtitle: String,
+        status: String,
+        statusImage: String,
+        statusColor: Color,
+        showsDisclosure: Bool,
+        @ViewBuilder icon: () -> Icon
+    ) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            icon()
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -6377,12 +6331,11 @@ struct ContentView: View {
                 .padding(.vertical, 4)
                 .background(statusColor.opacity(0.10), in: Capsule())
 
-            if showsDisclosure {
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-            }
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .opacity(showsDisclosure ? 1 : 0)
+                .accessibilityHidden(true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
