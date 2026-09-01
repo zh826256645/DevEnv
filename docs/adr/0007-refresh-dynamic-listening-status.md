@@ -7,7 +7,7 @@
 ## Consequences
 
 - 高频观察只执行既有的固定 `lsof` 只读命令，完整 Environment Scan 的成本和持久化语义保持不变。
-- 数据库与本地服务页面显示最近一次成功 Dynamic Status Refresh 时间；总览的“最近扫描”仍表示完整 Environment Scan。
+- 系统信息页的数据库区块与本地服务页面显示最近一次成功 Dynamic Status Refresh 时间；总览的“最近扫描”仍表示完整 Environment Scan。
 - Dynamic Status Refresh 失败时保留上一次成功结果并显示横幅，后续成功后自动清除。
 - 新增的局域网暴露 Listener Binding 会进入既有通知入口并标记未读；相同结果不会因周期刷新反复标记。
 - 新安装、卸载或版本变化不会由 Dynamic Status Refresh 发现，用户需要执行完整 Environment Scan。

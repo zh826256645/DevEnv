@@ -567,10 +567,8 @@ struct ContentView: View {
         case overview
         case projects
         case runs
-        case runtimes
-        case databases
         case localServices
-        case environment
+        case systemInformation
         case settings
 
         static var primaryPages: [Page] { allCases.filter { $0 != .settings } }
@@ -581,10 +579,8 @@ struct ContentView: View {
             case .overview: "总览"
             case .projects: "项目"
             case .runs: "运行"
-            case .runtimes: "开发语言"
-            case .databases: "数据库"
             case .localServices: "本地服务"
-            case .environment: "系统信息"
+            case .systemInformation: "系统信息"
             case .settings: "设置"
             }
         }
@@ -594,13 +590,16 @@ struct ContentView: View {
             case .overview: "square.grid.2x2"
             case .projects: "folder"
             case .runs: "play.rectangle"
-            case .runtimes: "terminal"
-            case .databases: "cylinder"
             case .localServices: "network"
-            case .environment: "info.circle"
+            case .systemInformation: "info.circle"
             case .settings: "gearshape"
             }
         }
+    }
+
+    private enum SystemInformationSection: Hashable {
+        case runtimes
+        case databases
     }
 
     private enum ServiceTab: Hashable {
@@ -633,6 +632,7 @@ struct ContentView: View {
     @State private var fullyShownRuntimeID: String?
     @State private var expandedDatabaseID: String?
     @State private var fullyShownDatabaseID: String?
+    @State private var pendingSystemInformationSection: SystemInformationSection?
     @State private var expandedEnvironmentCard: EnvironmentCard?
     @State private var showsAllPathEntries = false
     @State private var isShowingNotifications = false
@@ -1045,46 +1045,54 @@ struct ContentView: View {
         } else if page == .overview, let snapshot {
             overviewPage(snapshot)
         } else {
-            ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                header(page, snapshot: snapshot)
-                if let scanError = model.scanError, let snapshot, page != .projects {
-                    scanErrorBanner(scanError, snapshot: snapshot)
-                }
-                if let dynamicRefreshError = model.dynamicRefreshError,
-                   page == .databases || page == .localServices {
-                    dynamicRefreshErrorBanner(dynamicRefreshError)
-                }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        header(page, snapshot: snapshot)
+                        if let scanError = model.scanError, let snapshot, page != .projects {
+                            scanErrorBanner(scanError, snapshot: snapshot)
+                        }
+                        if let dynamicRefreshError = model.dynamicRefreshError,
+                           page == .systemInformation || page == .localServices {
+                            dynamicRefreshErrorBanner(dynamicRefreshError)
+                        }
 
-                switch page {
-                case .overview:
-                    EmptyView()
-                case .projects:
-                    EmptyView()
-                case .runs:
-                    EmptyView()
-                case .runtimes:
-                    if let snapshot { runtimePage(snapshot.runtimes) }
-                case .databases:
-                    if let snapshot { databasePage(snapshot.databaseInstallationOverviews) }
-                case .localServices:
-                    if let snapshot { localServicesSection(snapshot) }
-                case .environment:
-                    if let snapshot {
-                        systemSection(snapshot.system)
-                        environmentSection(snapshot)
+                        switch page {
+                        case .overview:
+                            EmptyView()
+                        case .projects:
+                            EmptyView()
+                        case .runs:
+                            EmptyView()
+                        case .localServices:
+                            if let snapshot { localServicesSection(snapshot) }
+                        case .systemInformation:
+                            if let snapshot {
+                                systemSection(snapshot.system)
+                                environmentSection(snapshot)
+                                runtimesSection(snapshot.runtimes)
+                                    .id(SystemInformationSection.runtimes)
+                                databaseInstallationsSection(snapshot.databaseInstallationOverviews)
+                                    .id(SystemInformationSection.databases)
+                            }
+                        case .settings:
+                            settingsPage
+                        }
                     }
-                case .settings:
-                    settingsPage
+                    .frame(
+                        maxWidth: page == .overview || page == .projects || page == .runs || page == .localServices
+                            ? 1100
+                            : 900
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(28)
                 }
-            }
-            .frame(
-                maxWidth: page == .overview || page == .projects || page == .runs || page == .runtimes || page == .databases || page == .localServices
-                    ? 1100
-                    : 900
-            )
-            .frame(maxWidth: .infinity)
-            .padding(28)
+                .task(id: pendingSystemInformationSection) {
+                    guard page == .systemInformation, let section = pendingSystemInformationSection else { return }
+                    await Task.yield()
+                    proxy.scrollTo(section, anchor: .top)
+                    pendingSystemInformationSection = nil
+                }
             }
             .id(page)
             .background(AppTheme.canvas)
@@ -1164,7 +1172,7 @@ struct ContentView: View {
                 .font(.largeTitle.bold())
             if page != .settings && page != .projects {
                 HStack(spacing: 10) {
-                    if page == .databases || page == .localServices {
+                    if page == .localServices {
                         Text(model.dynamicStatusRefreshedAt.map { "最近刷新：\(formatted($0))" } ?? "最近刷新：尚未刷新")
                             .foregroundStyle(.secondary)
                     } else if let snapshot {
@@ -3610,7 +3618,7 @@ struct ContentView: View {
                         : "共 \(runtimeVersions.count) 个安装版本",
                     systemImage: "terminal",
                     tint: .purple
-                ) { selectPage(.runtimes) }
+                ) { selectSystemInformation(.runtimes) }
                 overviewSummaryCard(
                     title: "数据库",
                     value: "已安装 \(installations.count) 个",
@@ -3619,7 +3627,7 @@ struct ContentView: View {
                         : "\(listeningInstallations) 个正在监听",
                     systemImage: "cylinder",
                     tint: .orange
-                ) { selectPage(.databases) }
+                ) { selectSystemInformation(.databases) }
                 overviewSummaryCard(
                     title: "本地服务",
                     value: "\(processCount) 个监听进程",
@@ -3746,7 +3754,7 @@ struct ContentView: View {
         let iconTint = isProblem ? Color.orange : tint
         return Button {
             expandedEnvironmentCard = card
-            selectPage(.environment)
+            selectPage(.systemInformation)
         } label: {
             HStack(spacing: 10) {
                 Group {
@@ -4048,10 +4056,10 @@ struct ContentView: View {
             selectPage(.projects)
         case let .runtime(runtimeID):
             expandedRuntimeID = runtimeID
-            selectPage(.runtimes)
+            selectSystemInformation(.runtimes)
         case let .database(databaseID):
             expandedDatabaseID = databaseID
-            selectPage(.databases)
+            selectSystemInformation(.databases)
         case .localServices:
             selectedServiceTab = .local
             selectPage(.localServices)
@@ -4065,6 +4073,11 @@ struct ContentView: View {
                 NSWorkspace.shared.open(url)
             }
         }
+    }
+
+    private func selectSystemInformation(_ section: SystemInformationSection) {
+        pendingSystemInformationSection = section
+        selectPage(.systemInformation)
     }
 
     private func overviewRunColor(_ state: ProjectRunSessionState) -> Color {
@@ -4355,7 +4368,7 @@ struct ContentView: View {
 
     private func runtimesSection(_ runtimes: [RuntimeSnapshot]) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("开发语言列表")
+            Text("开发语言")
                 .font(.title3.bold())
 
             if let expandedRuntimeID,
@@ -4380,93 +4393,22 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
-    private func runtimePage(_ runtimes: [RuntimeSnapshot]) -> some View {
-        runtimeMetricsSection(runtimes)
-        runtimesSection(runtimes)
-    }
-
-    private func runtimeMetricsSection(_ runtimes: [RuntimeSnapshot]) -> some View {
-        let discoveredCount = runtimes.count { $0.state == .discovered }
-        let installationCount = runtimes.reduce(0) { $0 + $1.installations.count }
-        let conflictCount = runtimes.count { $0.hasPathVersionConflict }
-        let unavailableCount = runtimes.count { $0.state == .unavailable }
-
-        return LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
-            spacing: 12
-        ) {
-            runtimeMetricCard(
-                discoveredCount,
-                title: "开发语言类别",
-                systemImage: "terminal",
-                tint: .blue
-            )
-            runtimeMetricCard(
-                installationCount,
-                title: "已发现版本",
-                systemImage: "checkmark.circle.fill",
-                tint: .green
-            )
-            runtimeMetricCard(
-                conflictCount,
-                title: "PATH 冲突",
-                systemImage: "exclamationmark.triangle.fill",
-                tint: .orange
-            )
-            runtimeMetricCard(
-                unavailableCount,
-                title: "未发现",
-                systemImage: "questionmark",
-                tint: .secondary
-            )
-        }
-    }
-
-    private func runtimeMetricCard(
-        _ value: Int,
-        title: String,
-        systemImage: String,
-        tint: Color
-    ) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: systemImage)
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 46, height: 46)
-                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Text(value.formatted())
-                    .font(.title2.bold())
-                    .monospacedDigit()
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(AppTheme.cardSurface)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.primary.opacity(0.10))
-                }
-        }
-        .accessibilityElement(children: .combine)
-    }
-
     private func databaseInstallationsSection(_ overviews: [DatabaseInstallationOverview]) -> some View {
         let shouldCollapseExpanded = expandedDatabaseID.map { id in
             overviews.first(where: { $0.id == id })?.installations.isEmpty ?? true
         } ?? false
 
         return VStack(alignment: .leading, spacing: 16) {
-            Text("Database 列表")
-                .font(.title3.bold())
+            HStack(alignment: .firstTextBaseline) {
+                Text("数据库")
+                    .font(.title3.bold())
+                Spacer()
+                Text(model.dynamicStatusRefreshedAt.map { "最近刷新：\(formatted($0))" } ?? "最近刷新：尚未刷新")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            homebrewServiceFeedback
 
             if let expandedDatabaseID,
                let expanded = overviews.first(where: { $0.id == expandedDatabaseID }) {
@@ -4482,6 +4424,7 @@ struct ContentView: View {
                 fullyShownDatabaseID = nil
             }
         }
+        .onAppear(perform: model.refreshHomebrewServices)
     }
 
     private func databaseGrid(_ overviews: [DatabaseInstallationOverview]) -> some View {
@@ -4493,50 +4436,6 @@ struct ContentView: View {
             ForEach(overviews) { database in
                 databaseCard(database)
             }
-        }
-    }
-
-    @ViewBuilder
-    private func databasePage(_ overviews: [DatabaseInstallationOverview]) -> some View {
-        homebrewServiceFeedback
-        databaseMetricsSection(overviews)
-            .onAppear(perform: model.refreshHomebrewServices)
-        databaseInstallationsSection(overviews)
-    }
-
-    private func databaseMetricsSection(_ overviews: [DatabaseInstallationOverview]) -> some View {
-        let discoveredCount = overviews.count { $0.discoveryState == .discovered }
-        let listeningCount = overviews.count { $0.listeningState == .listening }
-        let unavailableCount = overviews.count { $0.discoveryState == .notFound }
-
-        return LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
-            spacing: 12
-        ) {
-            runtimeMetricCard(
-                overviews.count,
-                title: "数据库类别",
-                systemImage: "cylinder.split.1x2.fill",
-                tint: .blue
-            )
-            runtimeMetricCard(
-                discoveredCount,
-                title: "已发现安装",
-                systemImage: "checkmark.circle.fill",
-                tint: .green
-            )
-            runtimeMetricCard(
-                listeningCount,
-                title: "正在监听",
-                systemImage: "waveform.path.ecg",
-                tint: .green
-            )
-            runtimeMetricCard(
-                unavailableCount,
-                title: "未发现",
-                systemImage: "questionmark",
-                tint: .secondary
-            )
         }
     }
 
@@ -4922,6 +4821,42 @@ struct ContentView: View {
         }
     }
 
+    private func localServiceMetricCard(
+        _ value: Int,
+        title: String,
+        systemImage: String,
+        tint: Color
+    ) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 46, height: 46)
+                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text(value.formatted())
+                    .font(.title2.bold())
+                    .monospacedDigit()
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(AppTheme.cardSurface)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10))
+                }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     private func localServicesSection(_ snapshot: MachineSnapshot) -> some View {
         let groups = groupLocalServicesForDisplay(snapshot.localServices)
         let portCount = groups.reduce(0) { $0 + Set($1.bindings.map(\.port)).count }
@@ -4932,25 +4867,25 @@ struct ContentView: View {
                 columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
                 spacing: 12
             ) {
-                runtimeMetricCard(
+                localServiceMetricCard(
                     groups.count,
                     title: "服务类别",
                     systemImage: "globe",
                     tint: .blue
                 )
-                runtimeMetricCard(
+                localServiceMetricCard(
                     groups.count,
                     title: "正在运行",
                     systemImage: "waveform.path.ecg",
                     tint: .green
                 )
-                runtimeMetricCard(
+                localServiceMetricCard(
                     portCount,
                     title: "监听端口",
                     systemImage: "cable.connector",
                     tint: .blue
                 )
-                runtimeMetricCard(
+                localServiceMetricCard(
                     exposedPortCount,
                     title: "异常端口",
                     systemImage: "exclamationmark.triangle.fill",
