@@ -9,15 +9,17 @@ enum ProjectRunSessionState: Equatable, Sendable {
     case starting
     case running
     case stopping
+    case stopFailed(String)
     case restarting
     case restartFailed(String)
+    case stopped(Int32)
     case exited(Int32)
     case launchFailed(String)
 
     var isLive: Bool {
         switch self {
-        case .starting, .running, .stopping, .restarting, .restartFailed: true
-        case .inactive, .exited, .launchFailed: false
+        case .starting, .running, .stopping, .stopFailed, .restarting, .restartFailed: true
+        case .inactive, .stopped, .exited, .launchFailed: false
         }
     }
 
@@ -987,6 +989,10 @@ final class ProjectRunCoordinator: ObservableObject {
         if !isRetry {
             session.pendingStopExitCode = nil
         }
+        if !restarting {
+            session.failureMessage = nil
+            session.failureAt = nil
+        }
         _ = session.engine.signalProcessGroups(SIGINT)
         objectWillChange.send()
         scheduler.schedule(after: .seconds(2)) { [weak self, weak session] in
@@ -998,6 +1004,8 @@ final class ProjectRunCoordinator: ObservableObject {
                     self.finishStopping(session)
                 } else if session.state == .restarting {
                     self.failRestart(session, message: "上一次运行仍有进程未退出")
+                } else {
+                    self.failStop(session, message: "仍有进程未退出")
                 }
                 self.objectWillChange.send()
             }
@@ -1006,35 +1014,34 @@ final class ProjectRunCoordinator: ObservableObject {
 
     private func finishStopping(_ session: ProjectRunSession) {
         let exitCode = session.pendingStopExitCode ?? 137
-        session.pendingStopExitCode = nil
-        guard session.pendingRestart != nil else {
-            session.state = .exited(exitCode)
-            return
-        }
-        finishRestartWhenProcessesExit(session, exitCode: exitCode, checksRemaining: 10)
+        finishStoppingWhenProcessesExit(session, exitCode: exitCode, checksRemaining: 10)
     }
 
-    private func finishRestartWhenProcessesExit(
+    private func finishStoppingWhenProcessesExit(
         _ session: ProjectRunSession,
         exitCode: Int32,
         checksRemaining: Int
     ) {
-        guard session.state == .restarting, let request = session.pendingRestart else { return }
+        guard session.state.isStopping else { return }
         if session.engine.signalProcessGroups(0), session.ownedProcessIDs?.isEmpty == true {
+            let request = session.pendingRestart
             session.pendingRestart = nil
-            session.state = .exited(exitCode)
-            _ = launch(request)
+            session.pendingStopExitCode = nil
+            session.state = request == nil ? .stopped(exitCode) : .exited(exitCode)
+            if let request { _ = launch(request) }
         } else if checksRemaining > 0 {
             scheduler.schedule(after: .milliseconds(100)) { [weak self, weak session] in
                 guard let self, let session else { return }
-                self.finishRestartWhenProcessesExit(
+                self.finishStoppingWhenProcessesExit(
                     session,
                     exitCode: exitCode,
                     checksRemaining: checksRemaining - 1
                 )
             }
-        } else {
+        } else if session.state == .restarting {
             failRestart(session, message: "上一次运行仍有进程未退出")
+        } else {
+            failStop(session, message: "仍有进程未退出")
         }
     }
 
@@ -1048,6 +1055,13 @@ final class ProjectRunCoordinator: ObservableObject {
         session.failureMessage = "重启失败：\(message)"
         session.failureAt = Date()
         session.state = .restartFailed(message)
+        objectWillChange.send()
+    }
+
+    private func failStop(_ session: ProjectRunSession, message: String) {
+        session.failureMessage = "停止失败：\(message)"
+        session.failureAt = Date()
+        session.state = .stopFailed(message)
         objectWillChange.send()
     }
 

@@ -41,11 +41,11 @@ _Avoid_: Auto Run, Project Requirement, Runnable Status
 _Avoid_: Shell Session, Terminal Application, Machine Snapshot
 
 **Active Project Run Session**:
-处于“启动中”“运行中”“停止中”“重启中”或“重启失败”的 Project Run Session；“已退出”和“启动失败”的会话不属于活动会话。
+处于“启动中”“运行中”“停止中”“停止失败”“重启中”或“重启失败”的 Project Run Session；“已结束”“已退出”和“启动失败”的会话不属于活动会话。
 _Avoid_: Running Project, Active Project
 
 **Project Run Failure**:
-Project Run Session 未能启动、无法安全重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
+Project Run Session 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
 _Avoid_: Project Health, Project Error
 
 **Project Run Listener Binding**:

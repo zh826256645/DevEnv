@@ -512,6 +512,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         coordinator.stop(configurationID: first.id)
 
         let firstEngine = try XCTUnwrap(factory.engines.first)
+        firstEngine.clearsOwnedProcessesOnKill = false
         XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopping)
         XCTAssertEqual(firstEngine.signals, [SIGINT])
         firstEngine.finish(exitCode: 130)
@@ -519,15 +520,19 @@ final class ProjectRunSessionsTests: XCTestCase {
         scheduler.runNext()
         XCTAssertEqual(firstEngine.signals, [SIGINT, SIGTERM])
         scheduler.runNext()
-        XCTAssertEqual(firstEngine.signals, [SIGINT, SIGTERM, SIGKILL])
-        XCTAssertEqual(coordinator.session(for: first.id)?.state, .exited(130))
+        XCTAssertEqual(firstEngine.signals, [SIGINT, SIGTERM, SIGKILL, 0])
+        XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopping)
+        firstEngine.ownedProcessIDs = []
+        scheduler.runNext()
+        XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopped(130))
+        XCTAssertNil(coordinator.session(for: first.id)?.failureMessage)
 
         XCTAssertEqual(coordinator.run(second, projectRoot: projectRoot.path), .started)
         let secondEngine = try XCTUnwrap(factory.engines.last)
         secondEngine.signalSucceeds = false
         XCTAssertFalse(coordinator.terminateAllForApplicationExit())
         XCTAssertEqual(coordinator.session(for: second.id)?.state, .stopping)
-        XCTAssertEqual(firstEngine.signals, [SIGINT, SIGTERM, SIGKILL])
+        XCTAssertEqual(firstEngine.signals, [SIGINT, SIGTERM, SIGKILL, 0, 0])
         XCTAssertFalse(coordinator.sessions.isEmpty)
         secondEngine.signalSucceeds = true
         XCTAssertTrue(coordinator.terminateAllForApplicationExit())
@@ -582,6 +587,52 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .running)
         XCTAssertEqual(engine.launches.count, 2)
         XCTAssertTrue(coordinator.session(for: configuration.id)?.terminalView === terminal)
+    }
+
+    func testStopFailureRemainsActiveAndNeedsAttention() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let factory = FakeProjectRunEngineFactory()
+        let scheduler = FakeProjectRunScheduler()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: scheduler
+        )
+        let configuration = ProjectRunConfiguration(
+            id: "run",
+            projectID: directory.path,
+            name: "服务",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        guard case let .needsTrust(request) = coordinator.run(
+            configuration,
+            projectRoot: directory.path
+        ) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        let engine = try XCTUnwrap(factory.engines.first)
+        engine.signalSucceeds = false
+
+        coordinator.stop(configurationID: configuration.id)
+        scheduler.runNext()
+        scheduler.runNext()
+
+        XCTAssertEqual(
+            coordinator.session(for: configuration.id)?.state,
+            .stopFailed("仍有进程未退出")
+        )
+        XCTAssertEqual(
+            coordinator.session(for: configuration.id)?.failureMessage,
+            "停止失败：仍有进程未退出"
+        )
+        XCTAssertTrue(coordinator.session(for: configuration.id)?.state.isLive == true)
     }
 
     func testRerunRevalidatesPathAndShellWithoutDiscardingTheTerminal() throws {
@@ -1060,6 +1111,7 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
     private(set) var launches: [Launch] = []
     private(set) var signals: [Int32] = []
     var signalSucceeds = true
+    var clearsOwnedProcessesOnKill = true
     var startError: Error?
 
     func clearTerminal() {}
@@ -1081,7 +1133,7 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
 
     func signalProcessGroups(_ signal: Int32) -> Bool {
         signals.append(signal)
-        if signal == SIGKILL, signalSucceeds {
+        if signal == SIGKILL, signalSucceeds, clearsOwnedProcessesOnKill {
             ownedProcessIDs = []
         }
         return signalSucceeds

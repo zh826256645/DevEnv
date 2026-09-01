@@ -1946,8 +1946,10 @@ struct ContentView: View {
         case .starting: ("正在启动", "hourglass", .blue)
         case .running: ("运行中", "checkmark.circle.fill", .green)
         case .stopping: ("正在停止", "stop.circle.fill", .orange)
+        case .stopFailed: ("停止失败", "exclamationmark.triangle.fill", .orange)
         case .restarting: ("正在重启", "arrow.clockwise.circle.fill", .blue)
         case .restartFailed: ("重启失败", "exclamationmark.triangle.fill", .orange)
+        case .stopped: ("已结束", "checkmark.circle.fill", .secondary)
         case let .exited(code): (code == 0 ? "已结束" : "异常退出", code == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill", code == 0 ? .secondary : .orange)
         case .launchFailed: ("启动失败", "exclamationmark.triangle.fill", .orange)
         }
@@ -1975,12 +1977,18 @@ struct ContentView: View {
         case .stopping:
             Label("正在停止", systemImage: "stop.circle")
                 .foregroundStyle(.orange)
+        case let .stopFailed(message):
+            Label("停止失败：\(message)", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
         case .restarting:
             Label("正在重启", systemImage: "arrow.clockwise.circle.fill")
                 .foregroundStyle(.blue)
         case let .restartFailed(message):
             Label("重启失败：\(message)", systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
+        case let .stopped(code):
+            Label("用户主动停止 · 退出码 \(code)", systemImage: "checkmark.circle")
+                .foregroundStyle(.secondary)
         case let .exited(code):
             Label("已退出（退出码 \(code)）", systemImage: code == 0 ? "checkmark.circle" : "xmark.circle")
                 .foregroundStyle(code == 0 ? Color.secondary : Color.orange)
@@ -3961,8 +3969,10 @@ struct ContentView: View {
         case .starting: .blue
         case .running: .green
         case .stopping: .orange
+        case .stopFailed: .red
         case .restarting: .blue
         case .restartFailed: .red
+        case .stopped: .secondary
         case .launchFailed: .red
         case let .exited(code): code == 0 ? .secondary : .red
         case .inactive: .secondary
@@ -3987,8 +3997,10 @@ struct ContentView: View {
         case .starting: "启动中"
         case .running: "运行中"
         case .stopping: "停止中"
+        case .stopFailed: "停止失败"
         case .restarting: "重启中"
         case .restartFailed: "重启失败"
+        case .stopped: "已结束"
         case let .exited(code): code == 0 ? "已退出" : "异常退出"
         case .launchFailed: "启动失败"
         }
