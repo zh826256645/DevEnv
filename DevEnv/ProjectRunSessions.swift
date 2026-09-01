@@ -360,9 +360,66 @@ private func projectRunOwnershipMonitorHandler(
 }
 
 @MainActor
+final class AdaptiveProjectRunTerminalView: LocalProcessTerminalView {
+    private static let historyGrowthLines = TerminalOptions.default.scrollback
+    private static let maximumHistoryLines = 10_000
+    private var historyLines = TerminalOptions.default.scrollback
+    private var estimatedOutputRows = 0
+    private var currentOutputColumn = 0
+
+    override func dataReceived(slice: ArraySlice<UInt8>) {
+        growHistory(for: slice)
+        super.dataReceived(slice: slice)
+    }
+
+    func resetHistory() {
+        historyLines = Self.historyGrowthLines
+        estimatedOutputRows = 0
+        currentOutputColumn = 0
+        terminal.changeHistorySize(historyLines)
+    }
+
+    private func growHistory(for bytes: ArraySlice<UInt8>) {
+        let columns = max(terminal.cols, 1)
+        // ponytail: raw bytes can overestimate ANSI/UTF-8 width; use SwiftTerm row callbacks if exposed.
+        for byte in bytes {
+            switch byte {
+            case 0x0A:
+                recordOutputRow()
+                currentOutputColumn = 0
+            case 0x0D:
+                currentOutputColumn = 0
+            case 0x08:
+                currentOutputColumn = max(currentOutputColumn - 1, 0)
+            default:
+                currentOutputColumn += 1
+                if currentOutputColumn >= columns {
+                    recordOutputRow()
+                    currentOutputColumn = 0
+                }
+            }
+        }
+        let targetLines = min(
+            Self.maximumHistoryLines,
+            max(
+                Self.historyGrowthLines,
+                ((estimatedOutputRows + Self.historyGrowthLines - 1) / Self.historyGrowthLines)
+                    * Self.historyGrowthLines
+            )
+        )
+        guard targetLines > historyLines else { return }
+        historyLines = targetLines
+        terminal.changeHistorySize(historyLines)
+    }
+
+    private func recordOutputRow() {
+        estimatedOutputRows = min(estimatedOutputRows + 1, Self.maximumHistoryLines)
+    }
+}
+
+@MainActor
 final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preconcurrency LocalProcessTerminalViewDelegate {
-    private static let scrollbackLines = 50_000
-    let terminal = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+    let terminal = AdaptiveProjectRunTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
     var terminalView: NSView { terminal }
     var onExit: ((Int32?) -> Void)?
     private(set) var ownedProcessIDs: Set<pid_t>?
@@ -393,7 +450,6 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
 
     override init() {
         super.init()
-        terminal.terminal.changeHistorySize(Self.scrollbackLines)
         terminal.processDelegate = self
     }
 
@@ -465,6 +521,7 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
             terminal.terminal.resetNormalBuffer()
         }
         terminal.feed(text: "\u{1B}[3J\u{1B}[2J\u{1B}[H")
+        terminal.resetHistory()
     }
 
     func signalProcessGroups(_ signal: Int32) -> Bool {

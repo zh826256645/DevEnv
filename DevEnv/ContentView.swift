@@ -38,11 +38,49 @@ private enum AppTheme {
     }
 }
 
+final class ProjectTerminalContainerView: NSView {
+    private weak var terminalView: NSView?
+
+    func mount(_ terminalView: NSView) {
+        self.terminalView = terminalView
+        guard terminalView.superview !== self else { return }
+        addSubview(terminalView)
+        resizeTerminalIfPossible()
+    }
+
+    func unmount() {
+        guard let terminalView, terminalView.superview === self else { return }
+        terminalView.removeFromSuperview()
+    }
+
+    override func layout() {
+        super.layout()
+        resizeTerminalIfPossible()
+    }
+
+    private func resizeTerminalIfPossible() {
+        guard bounds.width > 1, bounds.height > 1,
+              let terminalView, terminalView.superview === self else { return }
+        terminalView.frame = bounds
+    }
+}
+
 struct ProjectTerminalView: NSViewRepresentable {
     let terminalView: NSView
 
-    func makeNSView(context _: Context) -> NSView { terminalView }
-    func updateNSView(_: NSView, context _: Context) {}
+    func makeNSView(context _: Context) -> ProjectTerminalContainerView {
+        let container = ProjectTerminalContainerView()
+        container.mount(terminalView)
+        return container
+    }
+
+    func updateNSView(_ container: ProjectTerminalContainerView, context _: Context) {
+        container.mount(terminalView)
+    }
+
+    static func dismantleNSView(_ container: ProjectTerminalContainerView, coordinator _: ()) {
+        container.unmount()
+    }
 }
 
 struct AutoRefreshSettings: Equatable, Sendable {
