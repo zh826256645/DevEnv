@@ -546,7 +546,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(coordinator.sessions.isEmpty)
     }
 
-    func testRestartWaitsForCleanupAndDoesNotLaunchWhenProcessesRemain() throws {
+    func testRestartWaitsForCleanupCanBeCancelledAndDoesNotLaunchWhenProcessesRemain() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -593,6 +593,15 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .running)
         XCTAssertEqual(engine.launches.count, 2)
         XCTAssertTrue(coordinator.session(for: configuration.id)?.terminalView === terminal)
+
+        coordinator.restart(configuration, projectRoot: directory.path)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .restarting)
+        coordinator.stop(configurationID: configuration.id)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopping)
+        scheduler.runNext()
+        scheduler.runNext()
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(137))
+        XCTAssertEqual(engine.launches.count, 2)
     }
 
     func testStopFailureRemainsActiveAndNeedsAttention() throws {

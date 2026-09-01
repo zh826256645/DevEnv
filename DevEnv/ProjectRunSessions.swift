@@ -943,8 +943,14 @@ final class ProjectRunCoordinator: ObservableObject {
     func stop(configurationID: String) {
         guard let session = sessions[configurationID],
               session.state.isLive,
-              session.state != .restarting else { return }
+              session.state != .stopping else { return }
         session.pendingRestart = nil
+        if session.state == .restarting {
+            session.stopRequestedByUser = true
+            session.state = .stopping
+            objectWillChange.send()
+            return
+        }
         beginStopping(session, restarting: false)
     }
 

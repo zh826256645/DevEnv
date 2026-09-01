@@ -663,6 +663,8 @@ struct ContentView: View {
     @State private var runConfigurationSourceIdentity: String?
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
     @State private var pendingProjectRunTrust: ProjectRunTrustRequest?
+    @State private var pendingRunAllConfigurations: [ProjectRunConfiguration] = []
+    @State private var pendingStopAllConfigurationIDs: [String] = []
     @State private var selectedRunConfigurationID: String?
     @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
     @State private var runSearchText = ""
@@ -934,6 +936,20 @@ struct ContentView: View {
         Binding(
             get: { pendingProjectRunTrust != nil },
             set: { if !$0 { pendingProjectRunTrust = nil } }
+        )
+    }
+
+    private var isConfirmingRunAllTrust: Binding<Bool> {
+        Binding(
+            get: { !pendingRunAllConfigurations.isEmpty },
+            set: { if !$0 { pendingRunAllConfigurations.removeAll() } }
+        )
+    }
+
+    private var isConfirmingStopAll: Binding<Bool> {
+        Binding(
+            get: { !pendingStopAllConfigurationIDs.isEmpty },
+            set: { if !$0 { pendingStopAllConfigurationIDs.removeAll() } }
         )
     }
 
@@ -1325,6 +1341,17 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: 260)
                 .accessibilityLabel("按项目筛选运行配置")
+                Button(action: requestRunAll) {
+                    Label("全部启动", systemImage: "play.fill")
+                }
+                .buttonStyle(.bordered)
+                .disabled(runAllConfigurations.isEmpty)
+                Button(role: .destructive, action: requestStopAll) {
+                    Label("全部停止", systemImage: "stop.fill")
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .disabled(stopAllConfigurationIDs.isEmpty)
                 Button(action: beginCreatingRunConfiguration) {
                     Label("新建配置", systemImage: "plus")
                 }
@@ -1353,6 +1380,23 @@ struct ContentView: View {
             if !visibleRunConfigurations.contains(where: { $0.id == selectedRunConfigurationID }) {
                 selectedRunConfigurationID = visibleRunConfigurations.first?.id
             }
+        }
+        .alert("信任并全部启动？", isPresented: isConfirmingRunAllTrust) {
+            Button("取消", role: .cancel) {}
+            Button("信任并全部启动", action: confirmRunAllTrust)
+        } message: {
+            let roots = untrustedProjectRoots(for: pendingRunAllConfigurations)
+            Text("将信任 \(roots.count) 个 Project Root，并启动 \(pendingRunAllConfigurations.count) 个运行配置：\n\n\(roots.joined(separator: "\n"))\n\n确认后，这些 Project Root 的后续运行不再重复询问。")
+        }
+        .alert("停止全部活动会话？", isPresented: isConfirmingStopAll) {
+            Button("取消", role: .cancel) {}
+            Button("全部停止", role: .destructive) {
+                let configurationIDs = pendingStopAllConfigurationIDs
+                pendingStopAllConfigurationIDs.removeAll()
+                configurationIDs.forEach { runCoordinator.stop(configurationID: $0) }
+            }
+        } message: {
+            Text("将停止当前筛选和搜索结果中的 \(pendingStopAllConfigurationIDs.count) 个活动会话，包括取消正在进行的重启。")
         }
     }
 
@@ -1441,6 +1485,63 @@ struct ContentView: View {
         guard let selectedRunConfigurationID else { return visibleRunConfigurations.first }
         return visibleRunConfigurations.first { $0.id == selectedRunConfigurationID }
             ?? visibleRunConfigurations.first
+    }
+
+    private var runAllConfigurations: [ProjectRunConfiguration] {
+        visibleRunConfigurations.filter { configuration in
+            guard runCoordinator.session(for: configuration.id)?.state.isLive != true,
+                  let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
+                return false
+            }
+            return !project.availability.isUnavailable
+        }
+    }
+
+    private var stopAllConfigurationIDs: [String] {
+        visibleRunConfigurations.compactMap { configuration in
+            guard let state = runCoordinator.session(for: configuration.id)?.state,
+                  state.isLive,
+                  state != .stopping else { return nil }
+            return configuration.id
+        }
+    }
+
+    private func requestRunAll() {
+        let configurations = runAllConfigurations
+        guard !configurations.isEmpty else { return }
+        guard !untrustedProjectRoots(for: configurations).isEmpty else {
+            runAll(configurations)
+            return
+        }
+        pendingRunAllConfigurations = configurations
+    }
+
+    private func confirmRunAllTrust() {
+        let configurations = pendingRunAllConfigurations
+        let roots = untrustedProjectRoots(for: configurations)
+        pendingRunAllConfigurations.removeAll()
+        guard roots.allSatisfy(projectsModel.trustProjectRunRoot) else { return }
+        runAll(configurations)
+    }
+
+    private func runAll(_ configurations: [ProjectRunConfiguration]) {
+        for configuration in configurations
+        where runCoordinator.session(for: configuration.id)?.state.isLive != true {
+            guard let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
+                continue
+            }
+            _ = runCoordinator.run(configuration, project: project)
+        }
+    }
+
+    private func untrustedProjectRoots(for configurations: [ProjectRunConfiguration]) -> [String] {
+        Set(configurations.compactMap { configuration in
+            projectsModel.records.first { $0.id == configuration.projectID }?.path
+        }.filter { !projectsModel.isProjectRunTrusted($0) }).sorted()
+    }
+
+    private func requestStopAll() {
+        pendingStopAllConfigurationIDs = stopAllConfigurationIDs
     }
 
     private func selectFirstRunConfigurationIfNeeded() {
