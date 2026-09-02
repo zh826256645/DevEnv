@@ -1,831 +1,162 @@
 # DevEnv
 
-> A developer environment manager for macOS.
+> macOS 本地项目运行工作台。
 
-DevEnv 是一个面向 macOS 开发者的本地开发环境管理工具。
+DevEnv 是一个原生 macOS App，用来保存本地项目的运行方式，在统一界面中启动、停止和观察开发进程。
 
-它希望成为：
+它把散落在终端历史、README 和个人记忆里的启动命令整理成明确的运行配置，并将会话输出、运行状态、监听端口、内存占用和仓库状态放到同一个工作台中。
 
-> **macOS 开发环境的「系统设置」**
+DevEnv 不负责替代终端、包管理器或版本管理器。它调用项目本来就在使用的 Shell 和工具，并用 Machine Environment 扫描结果解释当前 Mac 是否具备项目声明的运行条件。
 
-DevEnv 不尝试重新发明 Homebrew、mise、uv、Docker 等工具，而是在这些成熟工具之上提供统一的扫描、管理、诊断和可视化能力。
+> 当前项目仍处于早期开发阶段，尚未提供可下载的 Tag 或 GitHub Release。
 
-## 当前进度
+## 核心工作流
 
-截至 2026-08-25：
+### 1. 添加项目
 
-- 已完成 macOS 系统、系统卷、Homebrew、PATH 与常见开发语言的只读扫描和最新快照持久化。
-- 已完成 Homebrew、mise、nvm、uv、pyenv、macOS `java_home`、rustup 与 rbenv 的多来源安装版本发现。
-- 已完成 uv、Bun、npm、pnpm 与 Yarn 的当前 `PATH` 工具扫描，并与项目声明及锁文件比较。
-- 已完成普通用户权限可见的 TCP 监听服务、绑定地址与监听范围提示。
-- 已完成当前 `PATH` 首个生效 Git CLI、Git LFS、用户级配置与脱敏后的 GitHub Authentication Configuration 只读扫描。
-- 已完成受支持 Terminal Application 与注册 Shell Installation、Default Login Shell 的只读扫描。
-- 已完成总览、项目、运行、本地服务和系统信息侧边栏页面；开发语言与数据库归入系统信息，并保留按需展开详情、通知与状态说明等原生 SwiftUI 界面。
-- 已完成扫描器测试、集成验收、ADR 与界面设计决策记录。
-- v0.1 与 v0.2 的只读扫描范围已交付；v0.2 功能已完成，当前暂不创建版本 Tag 或 GitHub Release。
-- v0.3 Homebrew Service 管理功能已完成，当前暂未发布。
-- Git Tooling State 已交付 Git CLI、Git LFS、脱敏后的 User Git Configuration 与 GitHub Authentication Configuration。
+直接选择一个 Project Root，或选择临时的 Project Search Root 批量发现其中的项目。
 
-开发语言管理、Homebrew 包管理、Docker、端口管理和诊断仍属于后续规划。
+DevEnv 只保存轻量的 Project Record。移除记录不会删除、移动或修改原项目目录；被移除的项目也不会在后续批量扫描中自动恢复，除非用户主动重新添加或恢复。
 
-你可以通过 DevEnv 快速了解：
+### 2. 配置运行方式
 
-* 当前 Mac 安装了哪些开发环境
-* Node.js / Python / Go / Java 等运行时来自哪里
-* 当前有哪些本地服务正在运行
-* 哪些端口正在被占用
-* 是否存在多个版本或 PATH 冲突
-* 某个项目需要什么开发环境
-* 为什么一个项目无法正常运行
-* 如何将当前开发环境迁移到另一台 Mac
+每个项目可以保存多个 Project Run Configuration，包括：
 
----
+- 名称
+- 启动命令
+- Project Root 相对工作目录
 
-## ✨ Features
+运行配置可以手动创建，也可以从静态读取到的项目声明中采纳建议。目前支持从以下来源生成 Project Run Suggestion：
 
-### Environment Overview
+- `package.json` 中适合运行项目的 Node.js scripts
+- `pyproject.toml` 中配合 uv 使用的项目 scripts
+- `Cargo.toml` 中的 Rust bin target
+- Compose 配置文件
 
-统一查看当前 Mac 的开发环境状态：
+建议只是候选配置。DevEnv 不会在扫描阶段自动执行项目工具或命令。
 
-```text
-System
-macOS
-Apple Silicon
+### 3. 首次确认信任
 
-开发语言
-✓ Node.js       24.6.0
-✓ Python        3.13.5
-✓ Go            1.25
-✓ Java          24
-✓ Rust          1.89
+首次运行某个 Project Root 前，DevEnv 会展示完整命令和解析后的工作目录。用户确认后才会保存该 Project Root 的 Project Trust 并启动会话。
 
-Services
-● PostgreSQL    :5432
-● Redis         :6379
-○ MySQL         stopped
+后续运行可以复用信任记录，但每次启动仍必须由用户明确触发。修改命令后，只有新命令成功启动才会写回已保存配置。
 
-Containers
-● Docker        Running
+### 4. 运行项目
 
-Network
-Proxy           127.0.0.1:7890
-Ports           12 listening
-```
+DevEnv 使用当前用户的 Default Login Shell 和 SwiftTerm PTY 创建 Project Run Session，支持：
 
----
+- 启动、停止和重启单个运行配置
+- 按当前筛选结果批量启动或停止
+- 查看交互式终端输出
+- 清空终端或放大查看会话
+- 区分启动失败、异常退出、主动停止和停止失败
 
-### 开发语言管理
+命令结束后会话保留退出码和只读终端输出，不会留下空闲的通用 Shell。
 
-发现并管理常见开发语言运行时：
+### 5. 观察运行状态
 
-* Node.js
-* Python
-* Go
-* Java
-* Rust
-* Ruby
+总览和运行页面集中展示：
 
-DevEnv 不只显示版本，还会尽可能识别运行时的来源：
+- 活动会话及运行时长
+- 当前 Git 分支或 detached HEAD 状态
+- 会话所属进程的物理内存占用
+- 可归属于会话的 TCP 监听端口
+- 可能暴露到本机以外的监听地址
+- 最近的运行失败、退出码和状态刷新异常
 
-```text
-Node.js
+端口只在能够可靠归属于 Project Run Session 时显示；DevEnv 不根据目录名或命令文本猜测进程归属。
 
-Version
-24.6.0
+## 项目理解
 
-Binary
-~/.local/share/mise/installs/node/24.6.0/bin/node
+DevEnv 会静态读取 Project Root 内的项目清单和版本文件，将各 Project Component 的声明归并成 Project Requirements，再与当前 Machine Environment 比较。
 
-Managed By
-mise
-```
+当前识别范围包括：
 
-帮助你回答：
+- Node.js、Python、Go、Java、Rust、Ruby 和 Lua 运行时要求
+- uv、Bun、npm、pnpm 和 Yarn 包管理器要求
+- 操作系统与处理器架构要求
+- PostgreSQL、MySQL、MariaDB、MongoDB 和 Redis 数据库要求
+- Compose 中能够静态确认的服务声明
+- Python Component 内的项目本地 `.venv`
 
-> 这个 Node 到底是哪里装的？
+比较结果分为“已满足”“未满足”“无法判断”和“声明冲突”。它们只说明本机证据是否匹配项目声明，不保证项目一定能够运行。
 
----
+项目分析不会执行项目代码、动态清单表达式或 Shell 配置，也不会自动安装、修复或启动项目依赖。
 
-### Homebrew
+## Machine Environment 证据
 
-集成 Homebrew 环境信息：
+Environment Scan 以当前 App 用户的可见范围观察本机状态，并保存最近一次成功的 Machine Snapshot。当前界面提供：
 
-* Formula
-* Cask
-* Installed Packages
-* Outdated Packages
-* Homebrew Services
+- macOS、处理器架构、内存和系统卷信息
+- Homebrew Availability、PATH 和包管理器状态
+- 常见语言运行时的版本、路径、来源和当前生效安装
+- 数据库服务端安装及 TCP 监听状态
+- 按 PID 聚合的 Local Service、监听地址和端口
+- 当前生效的 Git CLI、Git LFS 和脱敏后的用户级 Git 配置
+- 已安装的受支持 Terminal Application
+- Shell Installation 与 Default Login Shell
 
-例如：
+Local Service 与 Homebrew Service 是两类不同事实：前者来自 TCP Listener Binding，后者来自 Homebrew 的服务声明。对于当前用户可管理的 Homebrew Service，DevEnv 支持在展示具体命令并确认后执行启动、停止和重启。
 
-```text
-PostgreSQL 17     Installed
-Redis 8           Installed
-Nginx             Outdated
-```
+## 安全边界
 
-DevEnv 本身不会代替 Homebrew，而是将 Homebrew 作为底层 Provider。
+DevEnv 需要观察本机工具并运行用户选择的项目命令，因此当前不启用 App Sandbox。使用源码版本前，应理解以下边界：
 
----
+- Environment Scan 和 Project Requirements 分析是只读流程，不会因为扫描结果自动执行项目命令。
+- Project Run 必须由用户明确触发；首次运行会展示完整命令和工作目录并要求确认。
+- Project Trust 只表示允许 DevEnv 在对应 Project Root 中执行已核对的配置，不表示项目安全或环境满足要求。
+- 项目命令以当前用户权限交给 Default Login Shell 执行，DevEnv 不隐藏或提升命令权限。
+- 停止操作只会向能够由当前 PTY 会话可靠确认归属的进程组发送信号。
+- Project Record、运行配置、信任记录和最近一次 Machine Snapshot 会保存在本机；会话状态、终端输出和退出码只存在于当前 App 进程。
+- 退出 App 时会尝试终止仍由 DevEnv 持有的活动会话；关闭窗口不会结束它们。
+- 移除 Project Record 不会删除或修改原项目文件。
 
-### Services
+Homebrew Service 等会改变本机状态的操作会先展示具体命令和影响，再等待用户确认。
 
-统一管理本地开发服务：
+## 从源码运行
 
-```text
-PostgreSQL       ● Running     :5432
-Redis            ● Running     :6379
-MySQL            ○ Stopped
-Nginx            ● Running     :80
-```
+### 要求
 
-支持：
+- macOS 15 或更高版本
+- 支持 Swift 6 的 Xcode
+- 首次构建时可访问 GitHub，以解析 SwiftTerm 依赖
 
-* 查看状态
-* Start
-* Stop
-* Restart
-* 查看日志
-* 查看监听端口
-
----
-
-### Projects
-
-DevEnv 可以扫描本地开发项目，并识别项目所需要的开发环境。
-
-例如：
-
-```text
-my-api/
-├── pyproject.toml
-├── .python-version
-└── docker-compose.yml
-```
-
-DevEnv 可以识别：
-
-```text
-Python        3.13
-PostgreSQL    Required
-Redis         Required
-Docker        Required
-```
-
-并与当前环境进行比较：
-
-```text
-Project Environment
-
-✓ Python 3.13 installed
-✓ PostgreSQL running
-✗ Redis stopped
-✓ Docker running
-```
-
-未来可以通过：
-
-```text
-Start Environment
-```
-
-一键准备项目所需的开发环境。
-
----
-
-## 🩺 Environment Diagnostics
-
-DevEnv 的一个核心目标是帮助开发者发现环境问题。
-
-例如：
-
-```text
-Environment Health
-
-PATH
-✓ OK
-
-Node.js
-⚠ 3 installations found
-
-Python
-⚠ Multiple Python environments detected
-
-Homebrew
-✓ Apple Silicon installation
-
-Docker
-✓ Running
-
-Ports
-⚠ Port 5432 is occupied by PostgreSQL
-```
-
-未来 DevEnv 将能够检测：
-
-* PATH 配置错误
-* PATH 重复
-* 多个 Node.js 安装
-* 多个 Python 安装
-* Intel / Apple Silicon Homebrew 混用
-* Shell 配置冲突
-* 无效环境变量
-* 端口冲突
-* 已停止但项目依赖的 Service
-* Docker 状态异常
-* 失效的软链接
-* 开发语言版本不匹配
-
----
-
-## 🤖 AI Environment Doctor
-
-未来计划加入 AI 环境诊断能力。
-
-DevEnv 可以将：
-
-* 当前开发环境
-* 开发语言信息
-* PATH
-* Shell 配置
-* 服务状态
-* 端口状态
-* 项目配置
-* Terminal 错误
-
-统一转换成结构化上下文。
-
-AI 可以帮助开发者回答：
-
-```text
-为什么 npm 使用的 Node 版本和 node -v 不一样？
-```
-
-或者：
-
-```text
-为什么这个 FastAPI 项目启动失败？
-```
-
-AI 会分析本机环境，并生成修复建议。
-
-所有修改操作都应该：
-
-> **先展示，再执行。**
-
-避免 AI 未经确认直接修改用户开发环境。
-
----
-
-## 📦 Environment Profiles
-
-未来 DevEnv 可以通过 Profile 描述一套完整开发环境。
-
-例如：
-
-```yaml
-name: backend-development
-
-runtimes:
-  node: "24"
-  python: "3.13"
-  go: "1.25"
-
-services:
-  postgresql: "17"
-  redis: "8"
-
-apps:
-  - visual-studio-code
-  - orbstack
-  - tableplus
-
-configs:
-  - ~/.gitconfig
-  - ~/.zshrc
-  - ~/.ssh/config
-```
-
-用户可以：
-
-```text
-Export Environment
-```
-
-然后在新的 Mac 上：
-
-```text
-Import Environment
-```
-
-快速恢复开发环境。
-
----
-
-## 🖥 UI
-
-DevEnv 使用原生 macOS UI。
-
-计划中的主要页面：
-
-```text
-Overview
-
-Projects
-
-Runtimes
-├── Node.js
-├── Python
-├── Go
-├── Java
-└── Rust
-
-Services
-
-Containers
-
-Network
-
-Config
-
-Diagnostics
-
-Snapshots
-
-Settings
-```
-
-设计目标：
-
-* Native macOS
-* 简洁
-* 快速
-* 不干扰现有开发工具
-* 尽可能少的学习成本
-
----
-
-## 🏗 Architecture
-
-DevEnv 采用 Provider 架构。
-
-```text
-DevEnv.app
-│
-├── UI
-│
-├── EnvironmentCore
-│   ├── Scanner
-│   ├── CommandRunner
-│   ├── Diagnostics
-│   ├── ProfileEngine
-│   └── StateStore
-│
-├── Providers
-│   ├── HomebrewProvider
-│   ├── MiseProvider
-│   ├── UVProvider
-│   ├── DockerProvider
-│   ├── GitProvider
-│   ├── ShellProvider
-│   └── LaunchdProvider
-│
-└── Persistence
-```
-
-DevEnv 负责：
-
-```text
-Discover
-    ↓
-Parse
-    ↓
-Normalize
-    ↓
-Display
-    ↓
-Execute
-    ↓
-Verify
-```
-
-底层真正的软件管理仍然由成熟工具完成。
-
-例如：
-
-```text
-DevEnv
-  │
-  ├── Homebrew
-  ├── mise
-  ├── uv
-  ├── Docker
-  ├── Git
-  └── launchd
-```
-
----
-
-## 🔌 Provider
-
-不同开发工具通过 Provider 接入。
-
-概念接口：
-
-```swift
-protocol EnvironmentProvider {
-
-    func detect() async throws -> ProviderStatus
-
-    func listInstalled() async throws -> [DevPackage]
-
-    func install(_ package: DevPackage) async throws
-
-    func uninstall(_ package: DevPackage) async throws
-
-    func update(_ package: DevPackage) async throws
-}
-```
-
-例如：
-
-```text
-HomebrewProvider
-
-MiseProvider
-
-UVProvider
-
-DockerProvider
-
-GitProvider
-```
-
-这种设计可以让 DevEnv 很容易扩展新的开发工具。
-
----
-
-## ⚙️ Command Runner
-
-所有 Shell 操作统一通过 Command Runner 执行。
-
-```text
-Command
-│
-├── executable
-├── arguments
-├── environment
-├── workingDirectory
-└── requiresPrivilege
-        │
-        ▼
-CommandRunner
-        │
-        ├── stdout
-        ├── stderr
-        └── exitCode
-```
-
-这样可以统一实现：
-
-* 实时日志
-* 命令取消
-* 错误处理
-* 执行记录
-* 权限管理
-* 操作审计
-
----
-
-## 🔐 Security
-
-开发环境管理工具不可避免地需要执行本地命令。
-
-DevEnv 的安全原则：
-
-### Never hide commands
-
-用户应该能够知道 DevEnv 即将执行什么。
-
-例如：
+### 步骤
 
 ```bash
-brew services start redis
+git clone https://github.com/zh826256645/DevEnv.git
+cd DevEnv
+git switch develop
+open DevEnv.xcodeproj
 ```
 
-### Confirm destructive operations
+在 Xcode 中等待 Swift Package Manager 解析固定版本的 SwiftTerm，选择 `DevEnv` scheme 和 `My Mac`，然后运行项目。
 
-以下操作执行前必须明确确认：
+DevEnv 当前使用本地开发签名，不提供正式安装包、自动更新或已发布版本的兼容性保证。
 
-* 删除软件
-* 删除环境
-* 修改系统配置
-* 修改 Shell 配置
-* 修改 `/etc/hosts`
-* 删除 Docker 数据
-* 删除开发环境文件
+## 技术摘要
 
-### Least privilege
+- Swift 6
+- SwiftUI 与 AppKit
+- Swift Concurrency 与 Combine
+- SwiftTerm 1.11.2
+- macOS `Process`、PTY 和 Darwin process API
+- 本机 Application Support 持久化
 
-普通操作不使用管理员权限。
+项目采用单一领域上下文。术语、边界与关键设计决策见：
 
-需要系统权限的能力应该通过独立的 Privileged Helper 实现，而不是在程序内部大量执行：
+- [领域模型](CONTEXT.md)
+- [为何不启用 App Sandbox](docs/adr/0001-run-without-app-sandbox.md)
+- [只读 Environment Scan 与 Machine Snapshot](docs/adr/0002-read-only-environment-scan-snapshot.md)
+- [Project Root 与 Project Component](docs/adr/0008-model-projects-by-root-and-component.md)
+- [可信 Project Run 与 Environment Scan 的边界](docs/adr/0010-separate-trusted-project-runs-from-environment-scans.md)
 
-```bash
-sudo ...
-```
+## 参与项目
 
----
+DevEnv 仍在早期开发阶段。Bug、功能需求和设计讨论请提交到 [GitHub Issues](https://github.com/zh826256645/DevEnv/issues)，代码变更可通过 [Pull Requests](https://github.com/zh826256645/DevEnv/pulls) 提交。
 
-## 🛠 Tech Stack
+版本历史和后续计划以 Git 提交与 GitHub Issues 为准，不在 README 中维护重复路线图。
 
-DevEnv 计划采用：
+## License
 
-* Swift
-* SwiftUI
-* Swift Concurrency
-* SwiftData / SQLite
-* macOS Process
-* Security Framework
-* ServiceManagement Framework
-
-目标平台：
-
-```text
-macOS
-Apple Silicon first
-```
-
-后续根据需要支持 Intel Mac。
-
----
-
-## 🚧 MVP
-
-第一阶段不会尝试管理所有开发工具。
-
-### v0.1（已完成）
-
-只包含以下已交付的只读 Environment Scanner 能力：
-
-* [x] macOS 系统与系统卷只读扫描
-* [x] 最新 Machine Snapshot 持久化
-* [x] PATH 与 Homebrew Availability 扫描
-* [x] Homebrew、uv、Bun、npm、pnpm 与 Yarn 包管理器状态
-* [x] Node.js、Python、Go、Java、Rust、Ruby 与 Lua 扫描
-* [x] 安装版本、路径、来源与多版本展示
-* [x] 当前生效安装版本与 PATH 版本冲突识别
-* [x] 原生 SwiftUI 总览、Scan Notice 与重新扫描
-
-v0.1 范围已冻结；新增能力进入后续里程碑。
-
----
-
-## 🗺 Roadmap
-
-### v0.1
-
-**Environment Scanner（已完成）**
-
-以只读方式扫描系统、Homebrew、PATH 与安装版本，并持久化最新 Machine Snapshot。
-
-解决：
-
-> 我的电脑现在到底有什么？
-
----
-
-### v0.2（功能已完成，暂未发布）
-
-**Services & Ports（已完成）**
-
-以只读方式展示：
-
-* TCP 监听端口
-* 监听进程与 PID
-* 仅本机或可能对局域网开放的监听范围
-* 端口扫描失败产生的 Scan Notice
-
-不包含 Start、Stop、Restart、Kill 或其他 Machine Environment 修改能力。
-
-解决：
-
-> 当前有哪些本地服务正在运行，监听了哪些端口？
-
----
-
-### Git Tooling State
-
-**Git Tooling State（已完成）**
-
-按当前 `PATH` 顺序展示首个生效 Git CLI、Git LFS 与 GitHub CLI 的本地 `git_protocol`；展开 Git 卡片可查看用户级 Default Git Identity、默认分支、User Excludes File、签名配置、脱敏后的 Credential Helper Chain，以及 GitHub 本地/进程级认证来源是否已配置。Environment Scan 不联网验证认证，不读取或持久化账号名、token、配置文件内容、密钥、helper 参数或自定义命令正文。结果随最新 Machine Snapshot 持久化。
-
-解决：
-
-> 当前 App 运行用户实际会调用哪个 Git？
-
-> 没有具体仓库上下文时，Git 默认使用什么身份、分支与跨仓库忽略文件？
-
-> 用户级签名开关与 Credential Helper Chain 当前如何配置？
-
-> GitHub CLI 是否存在本地或进程级认证来源，当前使用哪种 Git 协议？
-
----
-
-### Terminal & Shell
-
-**Terminal Application 与 Shell Installation（已完成）**
-
-通过 Launch Services 展示受支持的 Terminal Application 名称、版本与路径；通过 `/etc/shells` 和当前用户账户记录展示注册 Shell Installation 与 Default Login Shell。扫描不推断默认或当前 Terminal Session，不加载 Shell 配置，也不启动 Shell 读取版本。
-
-解决：
-
-> 当前 Mac 安装了哪些受支持的终端应用，当前账户默认使用哪个登录 Shell？
-
----
-
-### v0.3（功能已完成，暂未发布）
-
-**Homebrew Service Management（已完成）**
-
-支持：
-
-* 展示当前用户可管理的 Homebrew Service
-* 启动、停止与重启 Homebrew Service
-* 在具体 Homebrew-managed Database Installation 上管理精确匹配的 Homebrew Service
-* 分别展示 Homebrew Service 状态与数据库 TCP 监听状态
-* 修改前展示具体命令与持久影响，并由用户确认
-* 修改后重新读取 Homebrew Service 与 Local Service 状态
-
-解决：
-
-> 我如何安全地管理当前用户的 Homebrew Service？
-
----
-
-### v0.4（核心功能已完成，暂未发布）
-
-**Projects（已完成）**
-
-允许用户直接添加 Project Root，或通过一次性的 Project Search Root 批量发现项目。DevEnv 会持久化 Project Record，以增量扫描更新可用状态和 `New` 标记，并允许只从 DevEnv 移除或恢复项目记录，不修改原目录。
-
-按 Project Component 静态读取 Node.js、Python、Go、Java、Rust、Ruby 与 Lua 的项目清单和版本文件，并支持 `.tool-versions`、`mise.toml`、`.mise.toml`、Compose 文件、`packageManager`、`devEngines.packageManager`、`[tool.uv].required-version` 与 uv、Bun、npm、pnpm、Yarn 锁文件，以及 `package.json` 的系统与架构条件。项目代码、Shell 配置和动态清单表达式不会被执行。
-
-Project Database Requirement 来自受支持清单中的直接客户端依赖、数据库工具声明和默认 Compose 文件，并只与 Machine Snapshot 中 PostgreSQL、MySQL、MariaDB、MongoDB 或 Redis 对应的 Database Installation 比较；客户端版本与监听状态不作为满足条件。
-
-Project Requirements 会在整个 Project Root 内按 Machine Environment 能力归并后，与当前 Machine Environment 及 Python Component 的 `.venv` 比较；数据库裸版本取最低声明版本作为最低门槛，其他版本约束必须能够同时满足。每项归并结果展示全部声明来源、匹配安装和“已满足”“未满足”“无法判断”或“声明冲突”，项目汇总另外区分“未声明要求”和“不可用”。该结果不声称项目一定能够运行，也不包含安装、修复或启动环境。
-
-Projects 页面提供可搜索的项目列表与 Component 详情；进入页面时逐项刷新并保留旧内容，失败时显示本次会话的过期结果。Machine Snapshot 更新只重新计算已有声明，不重复读取未变化的项目文件。
-
-解决：
-
-> 这个项目需要什么环境，当前 Mac 是否已经具备？
-
----
-
-### v0.5
-
-**Environment Diagnostics**
-
-提供环境健康检查和冲突分析。
-
-解决：
-
-> 为什么我的环境有问题？
-
----
-
-### v0.6
-
-**Profiles & Snapshots**
-
-支持：
-
-```text
-Export
-Import
-Snapshot
-Restore
-```
-
-解决：
-
-> 换 Mac 后怎么恢复开发环境？
-
----
-
-### v1.0
-
-**AI Environment Doctor**
-
-AI 根据本机真实环境进行问题诊断。
-
----
-
-### Later（未绑定版本）
-
-* 开发语言管理
-* Homebrew 包管理
-* Docker 管理
-
-解决：
-
-> 为什么我的项目跑不起来？
-
----
-
-## 🎯 Philosophy
-
-DevEnv 不想成为：
-
-> Another package manager.
-
-也不想成为：
-
-> Another terminal wrapper.
-
-DevEnv 想解决的是开发环境长期存在但一直非常碎片化的问题。
-
-开发者通常需要同时理解：
-
-```text
-Homebrew
-mise
-nvm
-pyenv
-uv
-Docker
-launchd
-PATH
-Shell
-Ports
-Environment Variables
-Project Config
-```
-
-而 DevEnv 希望在这些工具之上提供一个统一的视角：
-
-> **One place to understand your Mac development environment.**
-
----
-
-## 💡 Why DevEnv?
-
-随着开发工具越来越多，一个 Mac 上可能同时存在：
-
-```text
-Node from Homebrew
-
-Node from mise
-
-Node from nvm
-
-Python from macOS
-
-Python from Homebrew
-
-Python from uv
-
-Python from pyenv
-```
-
-最终问题往往不是：
-
-> 软件有没有安装？
-
-而是：
-
-> **当前真正生效的是哪一个？**
-
-DevEnv 希望帮助开发者理解、管理并最终掌控自己的开发环境。
-
----
-
-## 🤝 Contributing
-
-DevEnv 目前处于早期开发阶段。
-
-欢迎提交：
-
-* Issue
-* Feature Request
-* Bug Report
-* Pull Request
-* Provider Implementation
-* UI / UX Suggestions
-
-如果你使用某种开发环境管理工具，也欢迎提出新的 Provider 支持建议。
-
----
-
-## 📄 License
-
-License TBD.
-
----
-
-<p align="center">
-  <b>DevEnv</b>
-  <br />
-  Understand your development environment.
-</p>
+本项目尚未设置开源许可证。
