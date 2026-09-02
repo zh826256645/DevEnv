@@ -2408,6 +2408,8 @@ struct ContentView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .buttonStyle(.plain)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                             .accessibilityAddTraits(isSelected ? .isSelected : [])
                         }
                         .padding(.horizontal, 10)
