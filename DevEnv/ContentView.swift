@@ -2405,7 +2405,8 @@ struct ContentView: View {
                             }
                             Button { selectedProjectID = project.id } label: {
                                 projectListRow(project)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2422,6 +2423,7 @@ struct ContentView: View {
                         )
                         .padding(.horizontal, 10)
                         .onAppear { projectsModel.markDisplayed(project.id) }
+                        .onTapGesture { selectedProjectID = project.id }
                     }
                     if !projectSearchText.isEmpty && matchingProjects.isEmpty {
                         Text("没有匹配的项目")
