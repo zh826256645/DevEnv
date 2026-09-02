@@ -1,6 +1,39 @@
 import AppKit
 import SwiftUI
 
+enum AppAppearance: String, CaseIterable {
+    case light
+    case dark
+    case system
+
+    static let storageKey = "appAppearance"
+
+    var title: String {
+        switch self {
+        case .light: "浅色"
+        case .dark: "深色"
+        case .system: "跟随系统"
+        }
+    }
+
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        case .system: nil
+        }
+    }
+
+    @MainActor
+    func apply(to target: any NSAppearanceCustomization = NSApplication.shared) {
+        target.appearance = nsAppearance
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> Self {
+        defaults.string(forKey: storageKey).flatMap(Self.init(rawValue:)) ?? .system
+    }
+}
+
 private enum AppTheme {
     static let accent = adaptive(
         light: NSColor(red: 0.08, green: 0.38, blue: 0.95, alpha: 1),
@@ -622,6 +655,7 @@ struct ContentView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(AppAppearance.storageKey) private var appAppearance = AppAppearance.load()
     @StateObject private var model = EnvironmentViewModel()
     @ObservedObject private var projectsModel: ProjectsViewModel
     @ObservedObject private var runCoordinator: ProjectRunCoordinator
@@ -681,6 +715,9 @@ struct ContentView: View {
     var body: some View {
         navigation(model.snapshot)
         .frame(minWidth: 1100, minHeight: 720)
+        .onChange(of: appAppearance, initial: true) { _, appearance in
+            appearance.apply()
+        }
         .tint(AppTheme.accent)
         .containerBackground(AppTheme.canvas, for: .window)
         .toolbarBackground(AppTheme.canvas, for: .windowToolbar)
@@ -1193,11 +1230,11 @@ struct ContentView: View {
     }
 
     private var projectsPage: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 14) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("项目")
-                        .font(.title2.bold())
+                        .font(.system(size: 29, weight: .bold))
                     Text("\(projectsModel.records.count) 个项目  ·  本次新增 \(projectsModel.records.filter(\.isNew).count) 个")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -1206,9 +1243,11 @@ struct ContentView: View {
                 Button { chooseProjectDirectories(forBatchScan: false) } label: {
                     Label("添加项目", systemImage: "plus")
                 }
+                .buttonStyle(.borderedProminent)
                 .focused($projectAddIsFocused)
                 .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
                 Button("扫描目录…") { chooseProjectDirectories(forBatchScan: true) }
+                    .buttonStyle(.bordered)
                     .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
                 if isSelectingProjects {
                     Button("取消") {
@@ -1227,14 +1266,12 @@ struct ContentView: View {
                     )
                 } else {
                     Button("多选") { isSelectingProjects = true }
+                        .buttonStyle(.bordered)
                         .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
                 }
             }
             .controlSize(.regular)
-            .padding(.horizontal, 28)
-            .padding(.vertical, 17)
-
-            Divider()
+            .padding(.bottom, 4)
 
             if let storageError = projectsModel.storageError {
                 GroupBox {
@@ -1253,8 +1290,9 @@ struct ContentView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 28)
-                .padding(.top, 12)
+                .padding(14)
+                .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
             }
 
             if let progress = projectsModel.scanProgress {
@@ -1277,8 +1315,9 @@ struct ContentView: View {
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("正在扫描项目，已发现 \(progress.discoveredCount) 个，当前目录 \(progress.currentPath)")
-                .padding(.horizontal, 28)
-                .padding(.top, 12)
+                .padding(14)
+                .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
             }
 
             if let error = projectsModel.operationError {
@@ -1288,15 +1327,18 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .accessibilityLabel("项目操作失败，\(error)")
-                .padding(.horizontal, 28)
-                .padding(.top, 12)
+                .padding(14)
+                .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
             } else if let message = projectsModel.resultMessage {
                 Label(message, systemImage: "checkmark.circle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel(message)
-                    .padding(.horizontal, 28)
-                    .padding(.top, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
             }
 
             if projectsModel.records.isEmpty && projectsModel.ignoredProjects.isEmpty {
@@ -1309,17 +1351,32 @@ struct ContentView: View {
                         .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
             } else {
-                HSplitView {
-                    projectList
-                        .frame(minWidth: 220, idealWidth: 250, maxWidth: 360)
-                    projectDetail
-                        .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
-                        .layoutPriority(1)
+                VStack(spacing: 14) {
+                    GeometryReader { geometry in
+                        HStack(spacing: 12) {
+                            projectList
+                                .frame(
+                                    width: min(max(geometry.size.width * 0.20, 240), 320),
+                                    height: geometry.size.height
+                                )
+                            projectDetail
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                .frame(height: geometry.size.height, alignment: .topLeading)
+                                .layoutPriority(1)
+                        }
+                    }
+                    if selectedProject != nil {
+                        projectStatusBar
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .accessibilityElement(children: .contain)
             }
         }
+        .padding(24)
         .background(AppTheme.canvas)
         .onAppear(perform: selectFirstProjectIfNeeded)
         .onChange(of: projectsModel.records.map(\.id)) { _, _ in
@@ -2348,14 +2405,34 @@ struct ContentView: View {
 
     private var projectList: some View {
         VStack(spacing: 0) {
-            TextField("搜索项目或路径", text: $projectSearchText)
-                .textFieldStyle(.roundedBorder)
-                .focused($projectSearchIsFocused)
-                .accessibilityLabel("搜索项目标题或路径")
-                .padding(16)
-            List(selection: $selectedProjectID) {
-                Section("项目列表") {
-                    ForEach(projectsModel.records(matching: projectSearchText)) { project in
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("搜索项目或路径", text: $projectSearchText)
+                    .textFieldStyle(.plain)
+                    .focused($projectSearchIsFocused)
+                    .accessibilityLabel("搜索项目标题或路径")
+                Text("⌘F")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.10)))
+            .padding(14)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    Text("项目列表")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 4)
+
+                    let matchingProjects = projectsModel.records(matching: projectSearchText)
+                    ForEach(matchingProjects) { project in
+                        let isSelected = selectedProjectID == project.id
                         HStack(spacing: 8) {
                             if isSelectingProjects {
                                 Toggle("", isOn: projectSelectionBinding(project.id))
@@ -2363,21 +2440,48 @@ struct ContentView: View {
                                     .toggleStyle(.checkbox)
                                     .accessibilityLabel("选择 \(project.title)")
                             }
-                            projectListRow(project)
+                            Button { selectedProjectID = project.id } label: {
+                                projectListRow(project)
+                                    .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .accessibilityAddTraits(isSelected ? .isSelected : [])
                         }
-                        .tag(project.id)
+                        .padding(.horizontal, 10)
                         .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                        .background(isSelected ? Color.blue.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(isSelected ? Color.blue : Color.primary.opacity(0.08), lineWidth: isSelected ? 1.5 : 1)
+                        )
+                        .padding(.horizontal, 10)
                         .onAppear { projectsModel.markDisplayed(project.id) }
+                        .onTapGesture { selectedProjectID = project.id }
                     }
-                    if !projectSearchText.isEmpty && projectsModel.records(matching: projectSearchText).isEmpty {
+                    if !projectSearchText.isEmpty && matchingProjects.isEmpty {
                         Text("没有匹配的项目")
                             .foregroundStyle(.secondary)
+                            .padding(.horizontal, 14)
                     }
-                }
-                if !projectsModel.ignoredProjects.isEmpty {
-                    Section("已忽略的项目  \(projectsModel.ignoredProjects.count)") {
+
+                    if !projectsModel.ignoredProjects.isEmpty {
+                        HStack {
+                            Image(systemName: "eye.slash")
+                            Text("已忽略  \(projectsModel.ignoredProjects.count)")
+                            Spacer()
+                            Image(systemName: "chevron.down")
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 18)
+
                         ForEach(projectsModel.ignoredProjects) { project in
-                            HStack(spacing: 12) {
+                            HStack(spacing: 8) {
                                 if isSelectingProjects {
                                     Toggle("", isOn: projectSelectionBinding(project.id))
                                         .labelsHidden()
@@ -2402,16 +2506,18 @@ struct ContentView: View {
                                     .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
                                 }
                             }
-                            .padding(.vertical, 3)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                 }
+                .padding(.bottom, 16)
             }
-            .tint(AppTheme.accent)
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
         }
-        .background(AppTheme.sidebar.opacity(0.78))
+        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
     }
 
     private func projectListRow(_ project: ProjectRecord) -> some View {
@@ -2526,25 +2632,11 @@ struct ContentView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(28)
+                    .padding(16)
                 }
-                Divider()
-                HStack(spacing: 12) {
-                    Text("最近发现：\(formatted(project.lastDiscoveredAt))")
-                        .foregroundStyle(.secondary)
-                    Button("重新扫描", action: runCoordinator.refreshProjects)
-                        .disabled(projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                    Spacer()
-                    Label(
-                        project.availability == .available ? "项目可访问" : "项目不可访问",
-                        systemImage: project.availability == .available ? "checkmark.circle" : "questionmark.circle"
-                    )
-                    .foregroundStyle(project.availability == .available ? .green : .secondary)
-                }
-                .font(.caption)
-                .padding(.horizontal, 30)
-                .padding(.vertical, 13)
             }
+            .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
             .id(project.id)
         } else {
             ContentUnavailableView {
@@ -2552,6 +2644,39 @@ struct ContentView: View {
             } description: {
                 Text("从列表中选择项目以查看声明来源和 Machine Environment 证据。")
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
+        }
+    }
+
+    @ViewBuilder
+    private var projectStatusBar: some View {
+        if let project = selectedProject {
+            HStack(spacing: 10) {
+                Image(systemName: project.availability == .available ? "checkmark.shield.fill" : "shield")
+                    .foregroundStyle(project.availability == .available ? Color.green : Color.secondary)
+                    .padding(7)
+                    .background(
+                        (project.availability == .available ? Color.green : Color.secondary).opacity(0.12),
+                        in: Circle()
+                    )
+                Text(project.availability == .available ? "项目可访问" : "项目不可访问")
+                    .font(.callout)
+                    .foregroundStyle(project.availability == .available ? Color.green : Color.secondary)
+                Spacer()
+                Text("最近发现：\(formatted(project.lastDiscoveredAt))")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button("重新扫描", action: runCoordinator.refreshProjects)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(projectsModel.isScanning || projectsModel.isRefreshingProjects)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
         }
     }
 
@@ -2621,6 +2746,7 @@ struct ContentView: View {
                 } label: {
                     Label("运行", systemImage: "play.rectangle")
                 }
+                .buttonStyle(.borderedProminent)
                 .accessibilityLabel("管理 \(project.title) 的运行配置")
                 .help("在运行页面管理此项目的运行配置")
                 Menu {
@@ -3039,6 +3165,44 @@ struct ContentView: View {
 
     private var settingsPage: some View {
         VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                Image(systemName: "circle.lefthalf.filled")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 36, height: 36)
+                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("外观")
+                        .font(.headline)
+                    Text("选择应用界面的显示模式")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            GroupBox {
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("主题模式")
+                            .fontWeight(.medium)
+                        Text("选择后立即生效")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Picker("主题模式", selection: $appAppearance) {
+                        ForEach(AppAppearance.allCases, id: \.self) { appearance in
+                            Text(appearance.title).tag(appearance)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 280)
+                }
+                .padding(10)
+            }
+
             HStack(spacing: 12) {
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 16, weight: .semibold))

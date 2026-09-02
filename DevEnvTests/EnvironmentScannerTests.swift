@@ -3,6 +3,36 @@ import XCTest
 @testable import DevEnv
 
 final class EnvironmentScannerTests: XCTestCase {
+    func testAppAppearanceMapsAndDefaultsToSystem() throws {
+        XCTAssertEqual(AppAppearance.light.nsAppearance?.name, .aqua)
+        XCTAssertEqual(AppAppearance.dark.nsAppearance?.name, .darkAqua)
+        XCTAssertNil(AppAppearance.system.nsAppearance)
+
+        let suiteName = "AppAppearanceTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(AppAppearance.load(from: defaults), .system)
+        defaults.set("invalid", forKey: AppAppearance.storageKey)
+        XCTAssertEqual(AppAppearance.load(from: defaults), .system)
+        defaults.set(AppAppearance.dark.rawValue, forKey: AppAppearance.storageKey)
+        XCTAssertEqual(AppAppearance.load(from: defaults), .dark)
+    }
+
+    @MainActor
+    func testAppAppearanceAppliesToNativeAppearanceTarget() {
+        let window = NSWindow()
+
+        AppAppearance.dark.apply(to: window)
+        XCTAssertEqual(window.appearance?.name, .darkAqua)
+
+        AppAppearance.light.apply(to: window)
+        XCTAssertEqual(window.appearance?.name, .aqua)
+
+        AppAppearance.system.apply(to: window)
+        XCTAssertNil(window.appearance)
+    }
+
     func testAutoRefreshSettingsDefaultsAndNormalizesIntervals() {
         let defaults = AutoRefreshSettings()
         XCTAssertTrue(defaults.isEnabled)
