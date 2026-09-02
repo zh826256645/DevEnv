@@ -1,6 +1,39 @@
 import AppKit
 import SwiftUI
 
+enum AppAppearance: String, CaseIterable {
+    case light
+    case dark
+    case system
+
+    static let storageKey = "appAppearance"
+
+    var title: String {
+        switch self {
+        case .light: "浅色"
+        case .dark: "深色"
+        case .system: "跟随系统"
+        }
+    }
+
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        case .system: nil
+        }
+    }
+
+    @MainActor
+    func apply(to target: any NSAppearanceCustomization = NSApplication.shared) {
+        target.appearance = nsAppearance
+    }
+
+    static func load(from defaults: UserDefaults = .standard) -> Self {
+        defaults.string(forKey: storageKey).flatMap(Self.init(rawValue:)) ?? .system
+    }
+}
+
 private enum AppTheme {
     static let accent = adaptive(
         light: NSColor(red: 0.08, green: 0.38, blue: 0.95, alpha: 1),
@@ -622,6 +655,7 @@ struct ContentView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(AppAppearance.storageKey) private var appAppearance = AppAppearance.load()
     @StateObject private var model = EnvironmentViewModel()
     @ObservedObject private var projectsModel: ProjectsViewModel
     @ObservedObject private var runCoordinator: ProjectRunCoordinator
@@ -681,6 +715,9 @@ struct ContentView: View {
     var body: some View {
         navigation(model.snapshot)
         .frame(minWidth: 1100, minHeight: 720)
+        .onChange(of: appAppearance, initial: true) { _, appearance in
+            appearance.apply()
+        }
         .tint(AppTheme.accent)
         .containerBackground(AppTheme.canvas, for: .window)
         .toolbarBackground(AppTheme.canvas, for: .windowToolbar)
@@ -3128,6 +3165,44 @@ struct ContentView: View {
 
     private var settingsPage: some View {
         VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                Image(systemName: "circle.lefthalf.filled")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 36, height: 36)
+                    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("外观")
+                        .font(.headline)
+                    Text("选择应用界面的显示模式")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            GroupBox {
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("主题模式")
+                            .fontWeight(.medium)
+                        Text("选择后立即生效")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Picker("主题模式", selection: $appAppearance) {
+                        ForEach(AppAppearance.allCases, id: \.self) { appearance in
+                            Text(appearance.title).tag(appearance)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 280)
+                }
+                .padding(10)
+            }
+
             HStack(spacing: 12) {
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 16, weight: .semibold))
