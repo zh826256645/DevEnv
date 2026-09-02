@@ -4532,8 +4532,13 @@ struct ContentView: View {
 
     private func runtimesSection(_ runtimes: [RuntimeSnapshot]) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("开发语言")
-                .font(.title3.bold())
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                Text("开发语言")
+                    .font(.title3.bold())
+            }
 
             if let expandedRuntimeID,
                let expandedIndex = runtimes.firstIndex(where: { $0.id == expandedRuntimeID }) {
@@ -4564,8 +4569,13 @@ struct ContentView: View {
 
         return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
-                Text("数据库")
-                    .font(.title3.bold())
+                HStack(spacing: 10) {
+                    Image(systemName: "cylinder.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                    Text("数据库")
+                        .font(.title3.bold())
+                }
                 Spacer()
                 Text(model.dynamicStatusRefreshedAt.map { "最近刷新：\(formatted($0))" } ?? "最近刷新：尚未刷新")
                     .font(.caption)
@@ -5798,15 +5808,6 @@ struct ContentView: View {
             } else {
                 environmentCardGrid(snapshot)
             }
-        }
-        .padding(16)
-        .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.primary.opacity(0.08))
-                }
         }
         .onPreferenceChange(EnvironmentCardUpperContentHeightKey.self) {
             environmentCardUpperContentHeight = $0
