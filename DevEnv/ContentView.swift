@@ -2405,7 +2405,7 @@ struct ContentView: View {
                             }
                             Button { selectedProjectID = project.id } label: {
                                 projectListRow(project)
-                                    .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+                                    .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -2414,7 +2414,7 @@ struct ContentView: View {
                             .accessibilityAddTraits(isSelected ? .isSelected : [])
                         }
                         .padding(.horizontal, 10)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 4)
                         .contentShape(Rectangle())
                         .background(isSelected ? Color.blue.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
                         .overlay(
