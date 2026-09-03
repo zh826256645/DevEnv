@@ -48,6 +48,18 @@ _Avoid_: Running Project, Active Project
 Project Run Session 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
 _Avoid_: Project Health, Project Error
 
+**Status Bar Residency**:
+DevEnv 在主窗口关闭后仍保持可访问，并继续保留当前进程中的 Project Run Session，直到用户明确执行完全退出。
+_Avoid_: Hidden App, Background Project
+
+**Complete Application Exit**:
+用户明确退出 DevEnv 后结束 Status Bar Residency，并清理所有仍活动的 Project Run Session；关闭主窗口本身不构成 Complete Application Exit。
+_Avoid_: Window Close, Session Stop
+
+**Run Session Summary**:
+状态栏对已创建 Project Run Session 的运行中、已停止和异常数量汇总；从未创建会话的 Project Run Configuration 不计入汇总。
+_Avoid_: Project Health, Configuration Count
+
 **Project Run Listener Binding**:
 监听进程能够被确证属于某个 Project Run Session 的 Listener Binding；无法可靠归属的绑定保持未知，不按 Project Root 或命令文本猜测。
 _Avoid_: Project Port, Inferred Session Port
