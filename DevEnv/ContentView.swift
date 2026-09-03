@@ -1002,6 +1002,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
+                        .contentShape(Rectangle())
                         .background(
                             selectedPage == .settings ? AppTheme.accent.opacity(0.16) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 8)
