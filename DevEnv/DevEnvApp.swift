@@ -136,16 +136,30 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     func rebuildStatusMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
+
+        let open = NSMenuItem(title: "打开面板", action: #selector(openDevEnv(_:)), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+        menu.addItem(.separator())
+
+        let start = NSMenuItem(title: "全部启动", action: #selector(requestRunAll(_:)), keyEquivalent: "")
+        start.target = self
+        start.isEnabled = !runCoordinator.runConfigurationsToStart().isEmpty
+        menu.addItem(start)
+        let stop = NSMenuItem(title: "全部停止", action: #selector(requestStopAll(_:)), keyEquivalent: "")
+        stop.target = self
+        stop.isEnabled = !runCoordinator.activeRunConfigurationIDs.isEmpty
+        menu.addItem(stop)
+        menu.addItem(.separator())
+
         let summary = runCoordinator.sessionSummary
-        for (title, count) in [
-            ("运行中", summary.running),
-            ("已停止", summary.stopped),
-            ("异常", summary.exceptional),
-        ] {
-            let item = NSMenuItem(title: String(count) + " 个" + title, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-        }
+        let summaryItem = NSMenuItem(
+            title: "\(summary.running) 运行 · \(summary.stopped) 停止 · \(summary.exceptional) 异常",
+            action: nil,
+            keyEquivalent: ""
+        )
+        summaryItem.isEnabled = false
+        menu.addItem(summaryItem)
         menu.addItem(.separator())
 
         let activeConfigurations = runCoordinator.runConfigurations()
@@ -170,18 +184,6 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
-        let start = NSMenuItem(title: "全部启动", action: #selector(requestRunAll(_:)), keyEquivalent: "")
-        start.target = self
-        start.isEnabled = !runCoordinator.runConfigurationsToStart().isEmpty
-        menu.addItem(start)
-        let stop = NSMenuItem(title: "全部停止", action: #selector(requestStopAll(_:)), keyEquivalent: "")
-        stop.target = self
-        stop.isEnabled = !runCoordinator.activeRunConfigurationIDs.isEmpty
-        menu.addItem(stop)
-        menu.addItem(.separator())
-        let open = NSMenuItem(title: "打开 DevEnv", action: #selector(openDevEnv(_:)), keyEquivalent: "")
-        open.target = self
-        menu.addItem(open)
         let quit = NSMenuItem(title: "退出 DevEnv", action: #selector(quitDevEnv(_:)), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)

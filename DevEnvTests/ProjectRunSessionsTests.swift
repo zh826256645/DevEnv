@@ -38,7 +38,7 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         XCTAssertEqual(
             appDelegate.statusMenu.items.map(\.title),
-            ["0 个运行中", "0 个已停止", "0 个异常", "", "没有活动会话", "", "全部启动", "全部停止", "", "打开 DevEnv", "退出 DevEnv"]
+            ["打开面板", "", "全部启动", "全部停止", "", "0 运行 · 0 停止 · 0 异常", "", "没有活动会话", "", "退出 DevEnv"]
         )
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部启动")?.isEnabled ?? true)
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部停止")?.isEnabled ?? true)
