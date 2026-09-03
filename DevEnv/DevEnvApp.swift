@@ -36,6 +36,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         rebuildStatusMenu()
         DispatchQueue.main.async { [weak self] in
             self?.updateDockVisibility()
+            self?.openMainWindow()
         }
     }
 
