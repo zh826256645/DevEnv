@@ -1574,6 +1574,7 @@ struct ContentView: View {
                             .layoutPriority(1)
                     }
                 }
+                .clipped()
                 runSessionStatusBar
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
