@@ -7,6 +7,43 @@ import XCTest
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+    func testRunSessionSummaryClassifiesLifecycleAndExitStates() {
+        XCTAssertEqual(ProjectRunSessionState.starting.summaryCategory, .running)
+        XCTAssertEqual(ProjectRunSessionState.stopping.summaryCategory, .running)
+        XCTAssertEqual(ProjectRunSessionState.restarting.summaryCategory, .running)
+        XCTAssertEqual(ProjectRunSessionState.stopped(137).summaryCategory, .stopped)
+        XCTAssertEqual(ProjectRunSessionState.exited(0).summaryCategory, .stopped)
+        XCTAssertEqual(ProjectRunSessionState.exited(2).summaryCategory, .exceptional)
+        XCTAssertEqual(ProjectRunSessionState.stopFailed("仍有进程").summaryCategory, .exceptional)
+        XCTAssertEqual(ProjectRunSessionState.restartFailed("仍有进程").summaryCategory, .exceptional)
+        XCTAssertEqual(ProjectRunSessionState.launchFailed("启动失败").summaryCategory, .exceptional)
+        XCTAssertEqual(ProjectRunSessionState.inactive.summaryCategory, .ignored)
+    }
+
+    @MainActor
+    func testStatusBarMenuKeepsControlsVisibleWithoutSessions() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectsModel = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: { FakeProjectRunEngine() },
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        let appDelegate = DevEnvAppDelegate(projectsModel: projectsModel, runCoordinator: coordinator)
+        appDelegate.rebuildStatusMenu()
+
+        XCTAssertEqual(
+            appDelegate.statusMenu.items.map(\.title),
+            ["打开面板", "", "全部启动", "全部停止", "", "0 运行 · 0 停止 · 0 异常", "没有活动会话", "", "退出"]
+        )
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部启动")?.isEnabled ?? true)
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部停止")?.isEnabled ?? true)
+    }
+
     func testPhysicalMemoryReadsCurrentProcess() throws {
         XCTAssertGreaterThan(
             try XCTUnwrap(ProjectRunPhysicalMemory.total(processIDs: [getpid()])),

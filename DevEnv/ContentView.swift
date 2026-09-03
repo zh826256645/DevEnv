@@ -817,6 +817,20 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             updateRefreshActivity()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .devEnvStatusBarAction)) { notification in
+            switch notification.userInfo?["action"] as? String {
+            case "open":
+                if let configurationID = notification.userInfo?["configurationID"] as? String {
+                    runProjectFilterID = nil
+                    runSearchText = ""
+                    selectedRunConfigurationID = configurationID
+                    selectPage(.runs)
+                }
+            case "runAll": requestRunAllGlobal()
+            case "stopAll": requestStopAllGlobal()
+            default: break
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { _ in
             updateRefreshActivity()
         }
@@ -1461,7 +1475,7 @@ struct ContentView: View {
                 configurationIDs.forEach { runCoordinator.stop(configurationID: $0) }
             }
         } message: {
-            Text("将停止当前筛选和搜索结果中的 \(pendingStopAllConfigurationIDs.count) 个活动会话，包括取消正在进行的重启。")
+            Text("将停止 \(pendingStopAllConfigurationIDs.count) 个活动会话，包括取消正在进行的重启。")
         }
     }
 
@@ -1581,6 +1595,17 @@ struct ContentView: View {
         pendingRunAllConfigurations = configurations
     }
 
+    private func requestRunAllGlobal() {
+        let configurations = runCoordinator.runConfigurationsToStart()
+        guard !configurations.isEmpty else { return }
+        selectPage(.runs)
+        guard !untrustedProjectRoots(for: configurations).isEmpty else {
+            runAll(configurations)
+            return
+        }
+        pendingRunAllConfigurations = configurations
+    }
+
     private func confirmRunAllTrust() {
         let configurations = pendingRunAllConfigurations
         let roots = untrustedProjectRoots(for: configurations)
@@ -1607,6 +1632,11 @@ struct ContentView: View {
 
     private func requestStopAll() {
         pendingStopAllConfigurationIDs = stopAllConfigurationIDs
+    }
+
+    private func requestStopAllGlobal() {
+        selectPage(.runs)
+        pendingStopAllConfigurationIDs = runCoordinator.activeRunConfigurationIDs
     }
 
     private func selectFirstRunConfigurationIfNeeded() {
@@ -4532,8 +4562,13 @@ struct ContentView: View {
 
     private func runtimesSection(_ runtimes: [RuntimeSnapshot]) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("开发语言")
-                .font(.title3.bold())
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                Text("开发语言")
+                    .font(.title3.bold())
+            }
 
             if let expandedRuntimeID,
                let expandedIndex = runtimes.firstIndex(where: { $0.id == expandedRuntimeID }) {
@@ -4564,8 +4599,13 @@ struct ContentView: View {
 
         return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
-                Text("数据库")
-                    .font(.title3.bold())
+                HStack(spacing: 10) {
+                    Image(systemName: "cylinder.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                    Text("数据库")
+                        .font(.title3.bold())
+                }
                 Spacer()
                 Text(model.dynamicStatusRefreshedAt.map { "最近刷新：\(formatted($0))" } ?? "最近刷新：尚未刷新")
                     .font(.caption)
@@ -5798,15 +5838,6 @@ struct ContentView: View {
             } else {
                 environmentCardGrid(snapshot)
             }
-        }
-        .padding(16)
-        .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.primary.opacity(0.018))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(Color.primary.opacity(0.08))
-                }
         }
         .onPreferenceChange(EnvironmentCardUpperContentHeightKey.self) {
             environmentCardUpperContentHeight = $0
