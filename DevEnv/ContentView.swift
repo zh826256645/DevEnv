@@ -1599,11 +1599,19 @@ struct ContentView: View {
     }
 
     private var runningConfigurations: [ProjectRunConfiguration] {
-        visibleRunConfigurations.filter { runCoordinator.session(for: $0.id)?.state.isLive == true }
+        visibleRunConfigurations.filter {
+            $0.isEnabled && runCoordinator.session(for: $0.id)?.state.isLive == true
+        }
     }
 
     private var stoppedConfigurations: [ProjectRunConfiguration] {
-        visibleRunConfigurations.filter { runCoordinator.session(for: $0.id)?.state.isLive != true }
+        visibleRunConfigurations.filter {
+            $0.isEnabled && runCoordinator.session(for: $0.id)?.state.isLive != true
+        }
+    }
+
+    private var disabledConfigurations: [ProjectRunConfiguration] {
+        visibleRunConfigurations.filter { !$0.isEnabled }
     }
 
     private var selectedRunConfiguration: ProjectRunConfiguration? {
@@ -1614,7 +1622,8 @@ struct ContentView: View {
 
     private var runAllConfigurations: [ProjectRunConfiguration] {
         visibleRunConfigurations.filter { configuration in
-            guard runCoordinator.session(for: configuration.id)?.state.isLive != true,
+            guard configuration.isEnabled,
+                  runCoordinator.session(for: configuration.id)?.state.isLive != true,
                   let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
                 return false
             }
@@ -1712,16 +1721,7 @@ struct ContentView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     runConfigurationSection(title: "运行中", count: runningConfigurations.count, configurations: runningConfigurations)
                     runConfigurationSection(title: "未启动", count: stoppedConfigurations.count, configurations: stoppedConfigurations)
-                    HStack {
-                        Image(systemName: "eye.slash")
-                        Text("已忽略 0")
-                        Spacer()
-                        Image(systemName: "chevron.down")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 18)
+                    runConfigurationSection(title: "已禁用", count: disabledConfigurations.count, configurations: disabledConfigurations)
                 }
                 .padding(.bottom, 16)
             }
@@ -1759,8 +1759,14 @@ struct ContentView: View {
                 .foregroundStyle(state.isLive ? Color.green : Color.secondary)
                 .padding(7)
                 .background((state.isLive ? Color.green : Color.secondary).opacity(0.12), in: Circle())
-            projectRunState(state)
-                .font(.callout)
+            if configuration?.isEnabled == false {
+                Label("已禁用", systemImage: "pause.circle.fill")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+            } else {
+                projectRunState(state)
+                    .font(.callout)
+            }
             Spacer()
             if let project {
                 Text("最后更新：\(formatted(project.lastDiscoveredAt))")
@@ -1813,10 +1819,14 @@ struct ContentView: View {
         let isSelected = selectedRunConfiguration?.id == configuration.id
         let state = session?.state ?? .inactive
         let isLive = state.isLive
-        let status: (title: String, color: Color) = switch state {
-        case .restarting: ("重启中", .blue)
-        case .restartFailed: ("重启失败", .orange)
-        default: (isLive ? "运行中" : "未启动", isLive ? .green : .secondary)
+        let status: (title: String, color: Color) = if !configuration.isEnabled {
+            ("已禁用", .secondary)
+        } else {
+            switch state {
+            case .restarting: ("重启中", .blue)
+            case .restartFailed: ("重启失败", .orange)
+            default: (isLive ? "运行中" : "未启动", isLive ? .green : .secondary)
+            }
         }
         return Button {
             selectedRunConfigurationID = configuration.id
@@ -1828,7 +1838,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(configuration.name)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(configuration.isEnabled ? Color.primary : Color.secondary)
                         .lineLimit(1)
                     Text("\(projectsModel.records.first { $0.id == configuration.projectID }?.title ?? "未知项目") · \(configuration.command)")
                         .font(.caption)
@@ -1891,7 +1901,7 @@ struct ContentView: View {
                                     .minimumScaleFactor(0.8)
                                     .layoutPriority(1)
                                     .frame(minHeight: 24, alignment: .center)
-                                projectRunStatusBadge(state)
+                                projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
                             }
                             Text(project.map { "\($0.title)" } ?? "所属项目记录不存在")
                                 .font(.callout).foregroundStyle(.secondary)
@@ -1899,7 +1909,13 @@ struct ContentView: View {
                         }
                         Spacer()
                         HStack(spacing: 6) {
-                            if state == .restarting {
+                            if !configuration.isEnabled {
+                                Button(session == nil ? "运行" : "重新运行") {}
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.regular)
+                                    .frame(minWidth: session == nil ? 60 : 76, minHeight: 36)
+                                    .disabled(true)
+                            } else if state == .restarting {
                                 Button {} label: {
                                     HStack(spacing: 6) {
                                         ProgressView()
@@ -1958,6 +1974,19 @@ struct ContentView: View {
                                 .controlSize(.regular)
                                 .frame(minWidth: 60, minHeight: 36)
                                 .disabled(projectsModel.mutationsArePaused || state.isLive)
+                            Button(configuration.isEnabled ? "禁用" : "启用") {
+                                runCoordinator.setRunConfigurationEnabled(
+                                    configuration,
+                                    isEnabled: !configuration.isEnabled
+                                )
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.regular)
+                            .frame(minWidth: 60, minHeight: 36)
+                            .disabled(
+                                projectsModel.mutationsArePaused
+                                    || (configuration.isEnabled && state.isLive)
+                            )
                             Menu { Button("删除", role: .destructive) { pendingRunConfigurationDeletion = configuration } } label: {
                                 Image(systemName: "ellipsis")
                                     .frame(width: 34, height: 22)
@@ -2022,13 +2051,17 @@ struct ContentView: View {
                         Text("终端会话")
                             .font(.headline)
                             .frame(minHeight: 24, alignment: .center)
-                        projectRunStatusBadge(state)
+                        projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
                         Spacer()
                         if session != nil, !state.isLive {
                             Button("重新运行") { run(configuration, project: project) }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
-                                .disabled(project == nil || project?.availability.isUnavailable == true)
+                                .disabled(
+                                    !configuration.isEnabled
+                                        || project == nil
+                                        || project?.availability.isUnavailable == true
+                                )
                         }
                         if session?.lastSuccessfulCommand != nil {
                             Button("清空") { runCoordinator.clearTerminal(configurationID: configuration.id) }
@@ -2184,18 +2217,25 @@ struct ContentView: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: showsCopyButton)
     }
 
-    private func projectRunStatusBadge(_ state: ProjectRunSessionState) -> some View {
-        let badge: (title: String, symbol: String, color: Color) = switch state {
-        case .inactive: ("未启动", "circle.fill", .secondary)
-        case .starting: ("正在启动", "hourglass", .blue)
-        case .running: ("运行中", "checkmark.circle.fill", .green)
-        case .stopping: ("正在停止", "stop.circle.fill", .orange)
-        case .stopFailed: ("停止失败", "exclamationmark.triangle.fill", .orange)
-        case .restarting: ("正在重启", "arrow.clockwise.circle.fill", .blue)
-        case .restartFailed: ("重启失败", "exclamationmark.triangle.fill", .orange)
-        case .stopped: ("已结束", "checkmark.circle.fill", .secondary)
-        case let .exited(code): (code == 0 ? "已结束" : "异常退出", code == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill", code == 0 ? .secondary : .orange)
-        case .launchFailed: ("启动失败", "exclamationmark.triangle.fill", .orange)
+    private func projectRunStatusBadge(
+        _ state: ProjectRunSessionState,
+        isEnabled: Bool = true
+    ) -> some View {
+        let badge: (title: String, symbol: String, color: Color) = if !isEnabled {
+            ("已禁用", "pause.circle.fill", .secondary)
+        } else {
+            switch state {
+            case .inactive: ("未启动", "circle.fill", .secondary)
+            case .starting: ("正在启动", "hourglass", .blue)
+            case .running: ("运行中", "checkmark.circle.fill", .green)
+            case .stopping: ("正在停止", "stop.circle.fill", .orange)
+            case .stopFailed: ("停止失败", "exclamationmark.triangle.fill", .orange)
+            case .restarting: ("正在重启", "arrow.clockwise.circle.fill", .blue)
+            case .restartFailed: ("重启失败", "exclamationmark.triangle.fill", .orange)
+            case .stopped: ("已结束", "checkmark.circle.fill", .secondary)
+            case let .exited(code): (code == 0 ? "已结束" : "异常退出", code == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill", code == 0 ? .secondary : .orange)
+            case .launchFailed: ("启动失败", "exclamationmark.triangle.fill", .orange)
+            }
         }
         return Label(badge.title, systemImage: badge.symbol)
             .font(.caption2.weight(.semibold))

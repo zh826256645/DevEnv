@@ -482,6 +482,39 @@ final class ProjectRecordsTests: XCTestCase {
     }
 
     @MainActor
+    func testRunConfigurationEnabledStateDefaultsToEnabledAndPersists() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("records.json")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(#"""
+        {
+          "schemaVersion": 3,
+          "records": [],
+          "ignoredProjects": [],
+          "runConfigurations": [{
+            "id": "run",
+            "projectID": "project",
+            "name": "开发服务器",
+            "command": "npm run dev",
+            "workingDirectory": ".",
+            "sourceIdentity": null
+          }],
+          "trustedProjectRoots": []
+        }
+        """#.utf8).write(to: fileURL)
+        let store = ProjectRecordStore(fileURL: fileURL)
+        let model = ProjectsViewModel(store: store)
+        let configuration = try XCTUnwrap(model.runConfigurations().first)
+
+        XCTAssertTrue(configuration.isEnabled)
+        XCTAssertTrue(model.setRunConfigurationEnabled(configuration, isEnabled: false))
+        XCTAssertFalse(try XCTUnwrap(store.load().runConfigurations.first).isEnabled)
+        XCTAssertTrue(model.setRunConfigurationEnabled(configuration, isEnabled: true))
+        XCTAssertTrue(try XCTUnwrap(store.load().runConfigurations.first).isEnabled)
+    }
+
+    @MainActor
     func testRunConfigurationWorkingDirectoryCannotEscapeProjectRoot() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

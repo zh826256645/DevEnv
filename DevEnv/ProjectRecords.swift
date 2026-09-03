@@ -126,6 +126,11 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
     var command: String
     var workingDirectory: String
     let sourceIdentity: String?
+    var isEnabled: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, projectID, name, command, workingDirectory, sourceIdentity, isEnabled
+    }
 
     init(
         id: String = UUID().uuidString,
@@ -133,7 +138,8 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
         name: String,
         command: String,
         workingDirectory: String,
-        sourceIdentity: String? = nil
+        sourceIdentity: String? = nil,
+        isEnabled: Bool = true
     ) {
         self.id = id
         self.projectID = projectID
@@ -141,6 +147,18 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
         self.command = command
         self.workingDirectory = workingDirectory
         self.sourceIdentity = sourceIdentity
+        self.isEnabled = isEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        projectID = try values.decode(String.self, forKey: .projectID)
+        name = try values.decode(String.self, forKey: .name)
+        command = try values.decode(String.self, forKey: .command)
+        workingDirectory = try values.decode(String.self, forKey: .workingDirectory)
+        sourceIdentity = try values.decodeIfPresent(String.self, forKey: .sourceIdentity)
+        isEnabled = try values.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
     }
 }
 
@@ -510,7 +528,7 @@ struct ProjectRunSuggestionScanner: Sendable {
 }
 
 struct ProjectRecordDocument: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
 
     let schemaVersion: Int
     var records: [ProjectRecord]
@@ -1130,7 +1148,8 @@ final class ProjectsViewModel: ObservableObject {
                 name: input.name,
                 command: rememberCommand ? input.command : existing.command,
                 workingDirectory: input.workingDirectory,
-                sourceIdentity: existing.sourceIdentity
+                sourceIdentity: existing.sourceIdentity,
+                isEnabled: existing.isEnabled
             )
             guard applyDocumentChange({ $0.runConfigurations[index] = updated }) else { return false }
             resultMessage = "已更新运行配置“\(updated.name)”"
@@ -1139,6 +1158,18 @@ final class ProjectsViewModel: ObservableObject {
             operationError = "运行配置保存失败：\(error.localizedDescription)"
             return false
         }
+    }
+
+    @discardableResult
+    func setRunConfigurationEnabled(_ configuration: ProjectRunConfiguration, isEnabled: Bool) -> Bool {
+        guard !mutationsArePaused,
+              let index = document.runConfigurations.firstIndex(where: { $0.id == configuration.id }) else {
+            return false
+        }
+        guard document.runConfigurations[index].isEnabled != isEnabled else { return true }
+        guard applyDocumentChange({ $0.runConfigurations[index].isEnabled = isEnabled }) else { return false }
+        resultMessage = "已\(isEnabled ? "启用" : "禁用")运行配置“\(configuration.name)”"
+        return true
     }
 
     @discardableResult
