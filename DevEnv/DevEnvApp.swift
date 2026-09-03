@@ -58,8 +58,11 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     private func installStatusItem() {
         guard statusItem == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSApplication.shared.applicationIconImage.copy() as? NSImage
-        item.button?.image?.isTemplate = true
+        if let image = NSImage(named: "StatusBarIcon") {
+            image.isTemplate = true
+            image.size = NSSize(width: 18, height: 18)
+            item.button?.image = image
+        }
         item.button?.toolTip = "DevEnv"
         item.menu = statusMenu
         statusItem = item
