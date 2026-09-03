@@ -44,6 +44,21 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部停止")?.isEnabled ?? true)
     }
 
+    func testReopenedMainWindowUsesFullSizeHiddenTitleBar() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+
+        DevEnvAppDelegate.configureMainWindow(window)
+
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertTrue(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.titleVisibility, .hidden)
+    }
+
     func testPhysicalMemoryReadsCurrentProcess() throws {
         XCTAssertGreaterThan(
             try XCTUnwrap(ProjectRunPhysicalMemory.total(processIDs: [getpid()])),

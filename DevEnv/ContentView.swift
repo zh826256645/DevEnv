@@ -660,6 +660,7 @@ struct ContentView: View {
     @ObservedObject private var projectsModel: ProjectsViewModel
     @ObservedObject private var runCoordinator: ProjectRunCoordinator
     @State private var selectedPage: Page? = .overview
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var copiedPath: String?
     @State private var hoveredPath: String?
     @State private var expandedRuntimeID: String?
@@ -720,72 +721,12 @@ struct ContentView: View {
         }
         .tint(AppTheme.accent)
         .containerBackground(AppTheme.canvas, for: .window)
-        .toolbarBackground(AppTheme.canvas, for: .windowToolbar)
-        .toolbar {
-            ToolbarItemGroup {
-                Button {
-                    isShowingNotifications.toggle()
-                } label: {
-                    ZStack(alignment: .topTrailing) {
-                        Image(systemName: "bell")
-                        if hasUnreadNotices {
-                            Circle()
-                                .fill(.red)
-                                .frame(width: 7, height: 7)
-                                .offset(x: 4, y: -3)
-                        }
-                    }
-                    .frame(width: 20, height: 20)
-                }
-                .accessibilityLabel(hasUnreadNotices
-                    ? "通知，当前有未读通知"
-                    : "通知")
-                .help("通知")
-                .popover(isPresented: $isShowingNotifications) {
-                    notificationsPopover(currentNotices)
-                        .onAppear(perform: markCurrentNoticesRead)
-                }
-
-                Button {
-                    if selectedPage == .overview {
-                        model.scan()
-                        runCoordinator.refreshProjects()
-                    } else if selectedPage?.usesProjectRecords == true {
-                        runCoordinator.refreshProjects()
-                    } else {
-                        model.scan()
-                    }
-                } label: {
-                    if selectedPage == .overview
-                        ? (model.isBusy || projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                        : (selectedPage?.usesProjectRecords == true
-                            ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                            : model.isBusy) {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-                .accessibilityLabel(
-                    selectedPage == .overview
-                        ? (model.isBusy || projectsModel.isRefreshingProjects ? "正在刷新总览" : "刷新总览")
-                        : selectedPage?.usesProjectRecords == true
-                        ? (projectsModel.isScanning || projectsModel.isRefreshingProjects
-                            ? "正在刷新项目"
-                            : "刷新项目")
-                        : (model.busyDescription ?? "重新扫描")
-                )
-                .help(selectedPage == .overview
-                    ? "刷新运行、项目与环境状态"
-                    : (selectedPage?.usesProjectRecords == true ? "刷新项目状态" : (model.busyDescription ?? "重新扫描")))
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(
-                    selectedPage == .overview
-                        ? (model.isBusy || projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                        : selectedPage?.usesProjectRecords == true
-                        ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                        : model.isBusy
-                )
+        .overlay(alignment: .topTrailing) { topActionButtons }
+        .overlay(alignment: .topLeading) {
+            if columnVisibility == .detailOnly {
+                sidebarToggleButton
+                    .padding(.leading, 72)
+                    .padding(.top, 14)
             }
         }
         .task(id: autoRefreshSchedule) {
@@ -1018,8 +959,14 @@ struct ContentView: View {
     }
 
     private func navigation(_ snapshot: MachineSnapshot?) -> some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+
                 HStack(spacing: 10) {
                     Image(nsImage: NSApplication.shared.applicationIconImage)
                         .resizable()
@@ -1071,6 +1018,105 @@ struct ContentView: View {
         }
         .navigationTitle("")
         .background(AppTheme.canvas)
+        .ignoresSafeArea(.container, edges: .top)
+    }
+
+    private var topActionButtons: some View {
+        HStack(spacing: 10) {
+            notificationButton
+            refreshButton
+        }
+        .buttonStyle(.plain)
+        .controlSize(.regular)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.86), in: Capsule())
+        .padding(8)
+        .background(AppTheme.canvas.opacity(0.96), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(.top, 12)
+        .padding(.trailing, 18)
+        .offset(y: -54)
+    }
+
+    private var notificationButton: some View {
+        Button { isShowingNotifications.toggle() } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "bell")
+                if hasUnreadNotices {
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 7, height: 7)
+                        .offset(x: 4, y: -3)
+                }
+            }
+            .frame(width: 20, height: 20)
+        }
+        .accessibilityLabel(hasUnreadNotices ? "通知，当前有未读通知" : "通知")
+        .help("通知")
+        .popover(isPresented: $isShowingNotifications) {
+            notificationsPopover(currentNotices)
+                .onAppear(perform: markCurrentNoticesRead)
+        }
+    }
+
+    private var refreshButton: some View {
+        Button(action: refreshCurrentPage) {
+            if isRefreshingCurrentPage {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: "arrow.clockwise")
+            }
+        }
+        .accessibilityLabel(refreshCurrentPageLabel)
+        .help(refreshCurrentPageHelp)
+        .keyboardShortcut("r", modifiers: .command)
+        .disabled(isRefreshingCurrentPage)
+    }
+
+    private var isRefreshingCurrentPage: Bool {
+        selectedPage == .overview
+            ? (model.isBusy || projectsModel.isScanning || projectsModel.isRefreshingProjects)
+            : (selectedPage?.usesProjectRecords == true
+                ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                : model.isBusy)
+    }
+
+    private var refreshCurrentPageLabel: String {
+        selectedPage == .overview
+            ? (isRefreshingCurrentPage ? "正在刷新总览" : "刷新总览")
+            : selectedPage?.usesProjectRecords == true
+            ? (isRefreshingCurrentPage ? "正在刷新项目" : "刷新项目")
+            : (model.busyDescription ?? "重新扫描")
+    }
+
+    private var refreshCurrentPageHelp: String {
+        selectedPage == .overview
+            ? "刷新运行、项目与环境状态"
+            : (selectedPage?.usesProjectRecords == true ? "刷新项目状态" : (model.busyDescription ?? "重新扫描"))
+    }
+
+    private func refreshCurrentPage() {
+        if selectedPage == .overview {
+            model.scan()
+            runCoordinator.refreshProjects()
+        } else if selectedPage?.usesProjectRecords == true {
+            runCoordinator.refreshProjects()
+        } else {
+            model.scan()
+        }
+    }
+
+    private var sidebarToggleButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+            }
+        } label: {
+            Image(systemName: "sidebar.left")
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
+        .help(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
     }
 
     @ViewBuilder

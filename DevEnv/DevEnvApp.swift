@@ -111,8 +111,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "DevEnv"
-            window.isReleasedWhenClosed = false
+            Self.configureMainWindow(window)
             window.contentViewController = NSHostingController(rootView: ContentView(
                 projectsModel: projectsModel,
                 runCoordinator: runCoordinator
@@ -126,6 +125,15 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         if let configurationID { userInfo["configurationID"] = configurationID }
         let notificationInfo = userInfo.isEmpty ? nil : userInfo
         postStatusBarAction("open", userInfo: notificationInfo)
+    }
+
+    static func configureMainWindow(_ window: NSWindow) {
+        window.styleMask.insert(.fullSizeContentView)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
+        window.title = "DevEnv"
+        window.isReleasedWhenClosed = false
     }
 
     private var mainWindow: NSWindow? {
@@ -259,7 +267,7 @@ struct DevEnvApp: App {
                 runCoordinator: appDelegate.runCoordinator
             )
         }
-        .windowToolbarStyle(.unifiedCompact)
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1280, height: 800)
     }
 }
