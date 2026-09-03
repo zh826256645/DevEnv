@@ -660,6 +660,7 @@ struct ContentView: View {
     @ObservedObject private var projectsModel: ProjectsViewModel
     @ObservedObject private var runCoordinator: ProjectRunCoordinator
     @State private var selectedPage: Page? = .overview
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var copiedPath: String?
     @State private var hoveredPath: String?
     @State private var expandedRuntimeID: String?
@@ -720,72 +721,12 @@ struct ContentView: View {
         }
         .tint(AppTheme.accent)
         .containerBackground(AppTheme.canvas, for: .window)
-        .toolbarBackground(AppTheme.canvas, for: .windowToolbar)
-        .toolbar {
-            ToolbarItemGroup {
-                Button {
-                    isShowingNotifications.toggle()
-                } label: {
-                    ZStack(alignment: .topTrailing) {
-                        Image(systemName: "bell")
-                        if hasUnreadNotices {
-                            Circle()
-                                .fill(.red)
-                                .frame(width: 7, height: 7)
-                                .offset(x: 4, y: -3)
-                        }
-                    }
-                    .frame(width: 20, height: 20)
-                }
-                .accessibilityLabel(hasUnreadNotices
-                    ? "通知，当前有未读通知"
-                    : "通知")
-                .help("通知")
-                .popover(isPresented: $isShowingNotifications) {
-                    notificationsPopover(currentNotices)
-                        .onAppear(perform: markCurrentNoticesRead)
-                }
-
-                Button {
-                    if selectedPage == .overview {
-                        model.scan()
-                        runCoordinator.refreshProjects()
-                    } else if selectedPage?.usesProjectRecords == true {
-                        runCoordinator.refreshProjects()
-                    } else {
-                        model.scan()
-                    }
-                } label: {
-                    if selectedPage == .overview
-                        ? (model.isBusy || projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                        : (selectedPage?.usesProjectRecords == true
-                            ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                            : model.isBusy) {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-                .accessibilityLabel(
-                    selectedPage == .overview
-                        ? (model.isBusy || projectsModel.isRefreshingProjects ? "正在刷新总览" : "刷新总览")
-                        : selectedPage?.usesProjectRecords == true
-                        ? (projectsModel.isScanning || projectsModel.isRefreshingProjects
-                            ? "正在刷新项目"
-                            : "刷新项目")
-                        : (model.busyDescription ?? "重新扫描")
-                )
-                .help(selectedPage == .overview
-                    ? "刷新运行、项目与环境状态"
-                    : (selectedPage?.usesProjectRecords == true ? "刷新项目状态" : (model.busyDescription ?? "重新扫描")))
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(
-                    selectedPage == .overview
-                        ? (model.isBusy || projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                        : selectedPage?.usesProjectRecords == true
-                        ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
-                        : model.isBusy
-                )
+        .overlay(alignment: .topTrailing) { topActionButtons }
+        .overlay(alignment: .topLeading) {
+            if columnVisibility == .detailOnly {
+                sidebarToggleButton
+                    .padding(.leading, 72)
+                    .padding(.top, 14)
             }
         }
         .task(id: autoRefreshSchedule) {
@@ -1018,8 +959,14 @@ struct ContentView: View {
     }
 
     private func navigation(_ snapshot: MachineSnapshot?) -> some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+
                 HStack(spacing: 10) {
                     Image(nsImage: NSApplication.shared.applicationIconImage)
                         .resizable()
@@ -1071,6 +1018,105 @@ struct ContentView: View {
         }
         .navigationTitle("")
         .background(AppTheme.canvas)
+        .ignoresSafeArea(.container, edges: .top)
+    }
+
+    private var topActionButtons: some View {
+        HStack(spacing: 10) {
+            notificationButton
+            refreshButton
+        }
+        .buttonStyle(.plain)
+        .controlSize(.regular)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.86), in: Capsule())
+        .padding(8)
+        .background(AppTheme.canvas.opacity(0.96), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(.top, 12)
+        .padding(.trailing, 18)
+        .offset(y: -54)
+    }
+
+    private var notificationButton: some View {
+        Button { isShowingNotifications.toggle() } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "bell")
+                if hasUnreadNotices {
+                    Circle()
+                        .fill(.red)
+                        .frame(width: 7, height: 7)
+                        .offset(x: 4, y: -3)
+                }
+            }
+            .frame(width: 20, height: 20)
+        }
+        .accessibilityLabel(hasUnreadNotices ? "通知，当前有未读通知" : "通知")
+        .help("通知")
+        .popover(isPresented: $isShowingNotifications) {
+            notificationsPopover(currentNotices)
+                .onAppear(perform: markCurrentNoticesRead)
+        }
+    }
+
+    private var refreshButton: some View {
+        Button(action: refreshCurrentPage) {
+            if isRefreshingCurrentPage {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: "arrow.clockwise")
+            }
+        }
+        .accessibilityLabel(refreshCurrentPageLabel)
+        .help(refreshCurrentPageHelp)
+        .keyboardShortcut("r", modifiers: .command)
+        .disabled(isRefreshingCurrentPage)
+    }
+
+    private var isRefreshingCurrentPage: Bool {
+        selectedPage == .overview
+            ? (model.isBusy || projectsModel.isScanning || projectsModel.isRefreshingProjects)
+            : (selectedPage?.usesProjectRecords == true
+                ? (projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                : model.isBusy)
+    }
+
+    private var refreshCurrentPageLabel: String {
+        selectedPage == .overview
+            ? (isRefreshingCurrentPage ? "正在刷新总览" : "刷新总览")
+            : selectedPage?.usesProjectRecords == true
+            ? (isRefreshingCurrentPage ? "正在刷新项目" : "刷新项目")
+            : (model.busyDescription ?? "重新扫描")
+    }
+
+    private var refreshCurrentPageHelp: String {
+        selectedPage == .overview
+            ? "刷新运行、项目与环境状态"
+            : (selectedPage?.usesProjectRecords == true ? "刷新项目状态" : (model.busyDescription ?? "重新扫描"))
+    }
+
+    private func refreshCurrentPage() {
+        if selectedPage == .overview {
+            model.scan()
+            runCoordinator.refreshProjects()
+        } else if selectedPage?.usesProjectRecords == true {
+            runCoordinator.refreshProjects()
+        } else {
+            model.scan()
+        }
+    }
+
+    private var sidebarToggleButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+            }
+        } label: {
+            Image(systemName: "sidebar.left")
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
+        .help(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
     }
 
     @ViewBuilder
@@ -1553,11 +1599,19 @@ struct ContentView: View {
     }
 
     private var runningConfigurations: [ProjectRunConfiguration] {
-        visibleRunConfigurations.filter { runCoordinator.session(for: $0.id)?.state.isLive == true }
+        visibleRunConfigurations.filter {
+            $0.isEnabled && runCoordinator.session(for: $0.id)?.state.isLive == true
+        }
     }
 
     private var stoppedConfigurations: [ProjectRunConfiguration] {
-        visibleRunConfigurations.filter { runCoordinator.session(for: $0.id)?.state.isLive != true }
+        visibleRunConfigurations.filter {
+            $0.isEnabled && runCoordinator.session(for: $0.id)?.state.isLive != true
+        }
+    }
+
+    private var disabledConfigurations: [ProjectRunConfiguration] {
+        visibleRunConfigurations.filter { !$0.isEnabled }
     }
 
     private var selectedRunConfiguration: ProjectRunConfiguration? {
@@ -1568,7 +1622,8 @@ struct ContentView: View {
 
     private var runAllConfigurations: [ProjectRunConfiguration] {
         visibleRunConfigurations.filter { configuration in
-            guard runCoordinator.session(for: configuration.id)?.state.isLive != true,
+            guard configuration.isEnabled,
+                  runCoordinator.session(for: configuration.id)?.state.isLive != true,
                   let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
                 return false
             }
@@ -1666,16 +1721,7 @@ struct ContentView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     runConfigurationSection(title: "运行中", count: runningConfigurations.count, configurations: runningConfigurations)
                     runConfigurationSection(title: "未启动", count: stoppedConfigurations.count, configurations: stoppedConfigurations)
-                    HStack {
-                        Image(systemName: "eye.slash")
-                        Text("已忽略 0")
-                        Spacer()
-                        Image(systemName: "chevron.down")
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 14)
-                    .padding(.top, 18)
+                    runConfigurationSection(title: "已禁用", count: disabledConfigurations.count, configurations: disabledConfigurations)
                 }
                 .padding(.bottom, 16)
             }
@@ -1713,8 +1759,14 @@ struct ContentView: View {
                 .foregroundStyle(state.isLive ? Color.green : Color.secondary)
                 .padding(7)
                 .background((state.isLive ? Color.green : Color.secondary).opacity(0.12), in: Circle())
-            projectRunState(state)
-                .font(.callout)
+            if configuration?.isEnabled == false {
+                Label("已禁用", systemImage: "pause.circle.fill")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+            } else {
+                projectRunState(state)
+                    .font(.callout)
+            }
             Spacer()
             if let project {
                 Text("最后更新：\(formatted(project.lastDiscoveredAt))")
@@ -1767,10 +1819,14 @@ struct ContentView: View {
         let isSelected = selectedRunConfiguration?.id == configuration.id
         let state = session?.state ?? .inactive
         let isLive = state.isLive
-        let status: (title: String, color: Color) = switch state {
-        case .restarting: ("重启中", .blue)
-        case .restartFailed: ("重启失败", .orange)
-        default: (isLive ? "运行中" : "未启动", isLive ? .green : .secondary)
+        let status: (title: String, color: Color) = if !configuration.isEnabled {
+            ("已禁用", .secondary)
+        } else {
+            switch state {
+            case .restarting: ("重启中", .blue)
+            case .restartFailed: ("重启失败", .orange)
+            default: (isLive ? "运行中" : "未启动", isLive ? .green : .secondary)
+            }
         }
         return Button {
             selectedRunConfigurationID = configuration.id
@@ -1782,7 +1838,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(configuration.name)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(configuration.isEnabled ? Color.primary : Color.secondary)
                         .lineLimit(1)
                     Text("\(projectsModel.records.first { $0.id == configuration.projectID }?.title ?? "未知项目") · \(configuration.command)")
                         .font(.caption)
@@ -1845,7 +1901,7 @@ struct ContentView: View {
                                     .minimumScaleFactor(0.8)
                                     .layoutPriority(1)
                                     .frame(minHeight: 24, alignment: .center)
-                                projectRunStatusBadge(state)
+                                projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
                             }
                             Text(project.map { "\($0.title)" } ?? "所属项目记录不存在")
                                 .font(.callout).foregroundStyle(.secondary)
@@ -1853,7 +1909,13 @@ struct ContentView: View {
                         }
                         Spacer()
                         HStack(spacing: 6) {
-                            if state == .restarting {
+                            if !configuration.isEnabled {
+                                Button(session == nil ? "运行" : "重新运行") {}
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.regular)
+                                    .frame(minWidth: session == nil ? 60 : 76, minHeight: 36)
+                                    .disabled(true)
+                            } else if state == .restarting {
                                 Button {} label: {
                                     HStack(spacing: 6) {
                                         ProgressView()
@@ -1912,6 +1974,19 @@ struct ContentView: View {
                                 .controlSize(.regular)
                                 .frame(minWidth: 60, minHeight: 36)
                                 .disabled(projectsModel.mutationsArePaused || state.isLive)
+                            Button(configuration.isEnabled ? "禁用" : "启用") {
+                                runCoordinator.setRunConfigurationEnabled(
+                                    configuration,
+                                    isEnabled: !configuration.isEnabled
+                                )
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.regular)
+                            .frame(minWidth: 60, minHeight: 36)
+                            .disabled(
+                                projectsModel.mutationsArePaused
+                                    || (configuration.isEnabled && state.isLive)
+                            )
                             Menu { Button("删除", role: .destructive) { pendingRunConfigurationDeletion = configuration } } label: {
                                 Image(systemName: "ellipsis")
                                     .frame(width: 34, height: 22)
@@ -1976,13 +2051,17 @@ struct ContentView: View {
                         Text("终端会话")
                             .font(.headline)
                             .frame(minHeight: 24, alignment: .center)
-                        projectRunStatusBadge(state)
+                        projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
                         Spacer()
                         if session != nil, !state.isLive {
                             Button("重新运行") { run(configuration, project: project) }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
-                                .disabled(project == nil || project?.availability.isUnavailable == true)
+                                .disabled(
+                                    !configuration.isEnabled
+                                        || project == nil
+                                        || project?.availability.isUnavailable == true
+                                )
                         }
                         if session?.lastSuccessfulCommand != nil {
                             Button("清空") { runCoordinator.clearTerminal(configurationID: configuration.id) }
@@ -2138,18 +2217,25 @@ struct ContentView: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: showsCopyButton)
     }
 
-    private func projectRunStatusBadge(_ state: ProjectRunSessionState) -> some View {
-        let badge: (title: String, symbol: String, color: Color) = switch state {
-        case .inactive: ("未启动", "circle.fill", .secondary)
-        case .starting: ("正在启动", "hourglass", .blue)
-        case .running: ("运行中", "checkmark.circle.fill", .green)
-        case .stopping: ("正在停止", "stop.circle.fill", .orange)
-        case .stopFailed: ("停止失败", "exclamationmark.triangle.fill", .orange)
-        case .restarting: ("正在重启", "arrow.clockwise.circle.fill", .blue)
-        case .restartFailed: ("重启失败", "exclamationmark.triangle.fill", .orange)
-        case .stopped: ("已结束", "checkmark.circle.fill", .secondary)
-        case let .exited(code): (code == 0 ? "已结束" : "异常退出", code == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill", code == 0 ? .secondary : .orange)
-        case .launchFailed: ("启动失败", "exclamationmark.triangle.fill", .orange)
+    private func projectRunStatusBadge(
+        _ state: ProjectRunSessionState,
+        isEnabled: Bool = true
+    ) -> some View {
+        let badge: (title: String, symbol: String, color: Color) = if !isEnabled {
+            ("已禁用", "pause.circle.fill", .secondary)
+        } else {
+            switch state {
+            case .inactive: ("未启动", "circle.fill", .secondary)
+            case .starting: ("正在启动", "hourglass", .blue)
+            case .running: ("运行中", "checkmark.circle.fill", .green)
+            case .stopping: ("正在停止", "stop.circle.fill", .orange)
+            case .stopFailed: ("停止失败", "exclamationmark.triangle.fill", .orange)
+            case .restarting: ("正在重启", "arrow.clockwise.circle.fill", .blue)
+            case .restartFailed: ("重启失败", "exclamationmark.triangle.fill", .orange)
+            case .stopped: ("已结束", "checkmark.circle.fill", .secondary)
+            case let .exited(code): (code == 0 ? "已结束" : "异常退出", code == 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill", code == 0 ? .secondary : .orange)
+            case .launchFailed: ("启动失败", "exclamationmark.triangle.fill", .orange)
+            }
         }
         return Label(badge.title, systemImage: badge.symbol)
             .font(.caption2.weight(.semibold))

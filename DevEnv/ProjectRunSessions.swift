@@ -910,6 +910,16 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     @discardableResult
+    func setRunConfigurationEnabled(_ configuration: ProjectRunConfiguration, isEnabled: Bool) -> Bool {
+        guard isEnabled || sessions[configuration.id]?.state.isLive != true,
+              projectsModel.setRunConfigurationEnabled(configuration, isEnabled: isEnabled) else {
+            return false
+        }
+        objectWillChange.send()
+        return true
+    }
+
+    @discardableResult
     func deleteRunConfiguration(_ configuration: ProjectRunConfiguration) -> Bool {
         guard projectsModel.deleteRunConfiguration(configuration) else { return false }
         commandDrafts.removeValue(forKey: configuration.id)
@@ -963,7 +973,8 @@ final class ProjectRunCoordinator: ObservableObject {
 
     func runConfigurationsToStart() -> [ProjectRunConfiguration] {
         runConfigurations().filter { configuration in
-            guard sessions[configuration.id]?.state.isLive != true,
+            guard configuration.isEnabled,
+                  sessions[configuration.id]?.state.isLive != true,
                   let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
                 return false
             }
@@ -990,6 +1001,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func run(_ configuration: ProjectRunConfiguration, projectRoot: String) -> ProjectRunActionResult {
+        guard isRunConfigurationEnabled(configuration) else { return .rejected("运行配置已禁用") }
         guard sessions[configuration.id]?.state.isLive != true else {
             return .rejected("该运行配置已有活动会话")
         }
@@ -1012,6 +1024,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func confirmTrustAndRun(_ request: ProjectRunTrustRequest) -> ProjectRunActionResult {
+        guard isRunConfigurationEnabled(request.configuration) else { return .rejected("运行配置已禁用") }
         guard projectsModel.trustProjectRunRoot(request.projectRoot) else {
             return .rejected(projectsModel.operationError ?? "Project Trust 保存失败")
         }
@@ -1217,6 +1230,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     private func launch(_ request: ProjectRunTrustRequest) -> ProjectRunActionResult {
+        guard isRunConfigurationEnabled(request.configuration) else { return .rejected("运行配置已禁用") }
         guard sessions[request.configuration.id]?.state.isLive != true else {
             return .rejected("该运行配置已有活动会话")
         }
@@ -1254,6 +1268,10 @@ final class ProjectRunCoordinator: ObservableObject {
         } catch {
             return reject(configurationID: request.configuration.id, error: error)
         }
+    }
+
+    private func isRunConfigurationEnabled(_ configuration: ProjectRunConfiguration) -> Bool {
+        projectsModel.runConfigurations().first { $0.id == configuration.id }?.isEnabled ?? configuration.isEnabled
     }
 
     private func makeSession(for configurationID: String) -> ProjectRunSession {

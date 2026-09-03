@@ -44,6 +44,21 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部停止")?.isEnabled ?? true)
     }
 
+    func testReopenedMainWindowUsesFullSizeHiddenTitleBar() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+
+        DevEnvAppDelegate.configureMainWindow(window)
+
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertTrue(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.titleVisibility, .hidden)
+    }
+
     func testPhysicalMemoryReadsCurrentProcess() throws {
         XCTAssertGreaterThan(
             try XCTUnwrap(ProjectRunPhysicalMemory.total(processIDs: [getpid()])),
@@ -237,6 +252,71 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         XCTAssertTrue(factory.engines.isEmpty)
         XCTAssertNil(coordinator.session(for: configuration.id))
+    }
+
+    func testDisabledConfigurationCannotStartDirectlyOrFromPendingTrust() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument()
+        document.addDirect([projectRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        let configuration = try XCTUnwrap(projectsModel.createRunConfiguration(
+            projectID: projectRoot.path,
+            name: "开发服务器",
+            command: "npm run dev",
+            workingDirectory: "."
+        ))
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+
+        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: projectRoot.path) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertTrue(projectsModel.setRunConfigurationEnabled(configuration, isEnabled: false))
+        let disabled = try XCTUnwrap(projectsModel.runConfigurations().first)
+
+        XCTAssertTrue(coordinator.runConfigurationsToStart().isEmpty)
+        XCTAssertEqual(coordinator.run(disabled, projectRoot: projectRoot.path), .rejected("运行配置已禁用"))
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .rejected("运行配置已禁用"))
+        XCTAssertTrue(factory.engines.isEmpty)
+    }
+
+    func testActiveConfigurationMustStopBeforeDisabling() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument()
+        document.addDirect([projectRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        let configuration = try XCTUnwrap(projectsModel.createRunConfiguration(
+            projectID: projectRoot.path,
+            name: "开发服务器",
+            command: "npm run dev",
+            workingDirectory: "."
+        ))
+        XCTAssertTrue(projectsModel.trustProjectRunRoot(projectRoot.path))
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: { FakeProjectRunEngine() },
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: projectRoot.path), .started)
+
+        XCTAssertFalse(coordinator.setRunConfigurationEnabled(configuration, isEnabled: false))
+        XCTAssertTrue(try XCTUnwrap(projectsModel.runConfigurations().first).isEnabled)
     }
 
     func testSessionKeepsLaunchFactsAndOnlyRecordsUnexpectedFailure() throws {
