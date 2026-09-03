@@ -1598,6 +1598,7 @@ struct ContentView: View {
     private func requestRunAllGlobal() {
         let configurations = runCoordinator.runConfigurationsToStart()
         guard !configurations.isEmpty else { return }
+        selectPage(.runs)
         guard !untrustedProjectRoots(for: configurations).isEmpty else {
             runAll(configurations)
             return
@@ -1634,6 +1635,7 @@ struct ContentView: View {
     }
 
     private func requestStopAllGlobal() {
+        selectPage(.runs)
         pendingStopAllConfigurationIDs = runCoordinator.activeRunConfigurationIDs
     }
 
