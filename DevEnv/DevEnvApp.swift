@@ -175,17 +175,13 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         } else {
             for configuration in activeConfigurations {
                 let state = runCoordinator.session(for: configuration.id)?.state ?? .inactive
-                let title = NSMutableAttributedString(string: configuration.name + " · ")
-                title.append(NSAttributedString(
-                    string: state.statusTitle,
-                    attributes: [.foregroundColor: statusColor(for: state)]
-                ))
                 let item = NSMenuItem(
-                    title: title.string,
+                    title: configuration.name,
                     action: #selector(openSession(_:)),
                     keyEquivalent: ""
                 )
-                item.attributedTitle = title
+                item.image = statusIndicatorImage(for: state)
+                item.toolTip = state.statusTitle
                 item.target = self
                 item.representedObject = configuration.id
                 menu.addItem(item)
@@ -198,6 +194,15 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
         statusMenu = menu
         statusItem?.menu = menu
+    }
+
+    private func statusIndicatorImage(for state: ProjectRunSessionState) -> NSImage {
+        let image = NSImage(size: NSSize(width: 8, height: 8))
+        image.lockFocus()
+        statusColor(for: state).setFill()
+        NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: 6, height: 6)).fill()
+        image.unlockFocus()
+        return image
     }
 
     private func statusColor(for state: ProjectRunSessionState) -> NSColor {
