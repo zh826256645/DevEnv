@@ -184,7 +184,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出 DevEnv", action: #selector(quitDevEnv(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "退出", action: #selector(quitDevEnv(_:)), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         statusMenu = menu
