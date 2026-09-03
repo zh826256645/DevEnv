@@ -817,6 +817,20 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             updateRefreshActivity()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .devEnvStatusBarAction)) { notification in
+            switch notification.userInfo?["action"] as? String {
+            case "open":
+                if let configurationID = notification.userInfo?["configurationID"] as? String {
+                    runProjectFilterID = nil
+                    runSearchText = ""
+                    selectedRunConfigurationID = configurationID
+                    selectPage(.runs)
+                }
+            case "runAll": requestRunAllGlobal()
+            case "stopAll": requestStopAllGlobal()
+            default: break
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { _ in
             updateRefreshActivity()
         }
@@ -1461,7 +1475,7 @@ struct ContentView: View {
                 configurationIDs.forEach { runCoordinator.stop(configurationID: $0) }
             }
         } message: {
-            Text("将停止当前筛选和搜索结果中的 \(pendingStopAllConfigurationIDs.count) 个活动会话，包括取消正在进行的重启。")
+            Text("将停止 \(pendingStopAllConfigurationIDs.count) 个活动会话，包括取消正在进行的重启。")
         }
     }
 
@@ -1581,6 +1595,16 @@ struct ContentView: View {
         pendingRunAllConfigurations = configurations
     }
 
+    private func requestRunAllGlobal() {
+        let configurations = runCoordinator.runConfigurationsToStart()
+        guard !configurations.isEmpty else { return }
+        guard !untrustedProjectRoots(for: configurations).isEmpty else {
+            runAll(configurations)
+            return
+        }
+        pendingRunAllConfigurations = configurations
+    }
+
     private func confirmRunAllTrust() {
         let configurations = pendingRunAllConfigurations
         let roots = untrustedProjectRoots(for: configurations)
@@ -1607,6 +1631,10 @@ struct ContentView: View {
 
     private func requestStopAll() {
         pendingStopAllConfigurationIDs = stopAllConfigurationIDs
+    }
+
+    private func requestStopAllGlobal() {
+        pendingStopAllConfigurationIDs = runCoordinator.activeRunConfigurationIDs
     }
 
     private func selectFirstRunConfigurationIfNeeded() {

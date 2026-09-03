@@ -36,6 +36,43 @@ enum ProjectRunSessionState: Equatable, Sendable {
         default: false
         }
     }
+
+    var statusTitle: String {
+        switch self {
+        case .inactive: "未启动"
+        case .starting: "正在启动"
+        case .running: "运行中"
+        case .stopping: "正在停止"
+        case .stopFailed: "停止失败"
+        case .restarting: "正在重启"
+        case .restartFailed: "重启失败"
+        case .stopped: "已停止"
+        case let .exited(code): code == 0 ? "已停止" : "异常退出"
+        case .launchFailed: "启动失败"
+        }
+    }
+
+    var summaryCategory: ProjectRunSessionSummaryCategory {
+        switch self {
+        case .starting, .running, .stopping, .restarting: .running
+        case .stopped, .exited(0): .stopped
+        case .inactive: .ignored
+        case .stopFailed, .restartFailed, .launchFailed, .exited: .exceptional
+        }
+    }
+}
+
+struct ProjectRunSessionSummary: Equatable, Sendable {
+    let running: Int
+    let stopped: Int
+    let exceptional: Int
+}
+
+enum ProjectRunSessionSummaryCategory: Equatable, Sendable {
+    case running
+    case stopped
+    case exceptional
+    case ignored
 }
 
 struct ProjectRunTrustRequest: Equatable, Sendable {
@@ -893,6 +930,47 @@ final class ProjectRunCoordinator: ObservableObject {
         sessions[configurationID]
     }
 
+    var sessionSummary: ProjectRunSessionSummary {
+        sessions.values.reduce(into: ProjectRunSessionSummary(running: 0, stopped: 0, exceptional: 0)) { summary, session in
+            switch session.state.summaryCategory {
+            case .running:
+                summary = ProjectRunSessionSummary(
+                    running: summary.running + 1,
+                    stopped: summary.stopped,
+                    exceptional: summary.exceptional
+                )
+            case .stopped:
+                summary = ProjectRunSessionSummary(
+                    running: summary.running,
+                    stopped: summary.stopped + 1,
+                    exceptional: summary.exceptional
+                )
+            case .ignored:
+                break
+            case .exceptional:
+                summary = ProjectRunSessionSummary(
+                    running: summary.running,
+                    stopped: summary.stopped,
+                    exceptional: summary.exceptional + 1
+                )
+            }
+        }
+    }
+
+    var activeRunConfigurationIDs: [String] {
+        sessions.compactMap { id, session in session.state.isLive ? id : nil }.sorted()
+    }
+
+    func runConfigurationsToStart() -> [ProjectRunConfiguration] {
+        runConfigurations().filter { configuration in
+            guard sessions[configuration.id]?.state.isLive != true,
+                  let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
+                return false
+            }
+            return !project.availability.isUnavailable
+        }
+    }
+
     func activeConfigurationsFirst(
         _ configurations: [ProjectRunConfiguration]
     ) -> [ProjectRunConfiguration] {
@@ -1129,7 +1207,9 @@ final class ProjectRunCoordinator: ObservableObject {
 
     func closeTerminal(configurationID: String) {
         guard sessions[configurationID]?.state.isLive != true else { return }
-        sessions.removeValue(forKey: configurationID)
+        if sessions.removeValue(forKey: configurationID) != nil {
+            objectWillChange.send()
+        }
     }
 
     func clearTerminal(configurationID: String) {
