@@ -1031,7 +1031,7 @@ struct ContentView: View {
         .controlSize(.regular)
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
-        .background(Color.white.opacity(0.86), in: Capsule())
+        .background(AppTheme.cardRaised, in: Capsule())
         .padding(8)
         .background(AppTheme.canvas.opacity(0.96), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .padding(.top, 12)
