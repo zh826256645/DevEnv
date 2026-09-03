@@ -158,9 +158,12 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
             action: nil,
             keyEquivalent: ""
         )
+        summaryItem.attributedTitle = NSAttributedString(
+            string: summaryItem.title,
+            attributes: [.font: NSFont.menuFont(ofSize: 11)]
+        )
         summaryItem.isEnabled = false
         menu.addItem(summaryItem)
-        menu.addItem(.separator())
 
         let activeConfigurations = runCoordinator.runConfigurations()
             .filter { runCoordinator.session(for: $0.id)?.state.isLive == true }
