@@ -128,6 +128,10 @@ struct ProjectRunBatchTrustReview: Equatable, Sendable {
     let projectRootsRequiringTrust: [String]
 }
 
+struct ProjectRunBatchStopIntent: Equatable, Sendable {
+    let executionIDs: [ProjectRunExecution.ID]
+}
+
 enum ProjectRunActionResult: Equatable, Sendable {
     case needsTrust(ProjectRunTrustRequest)
     case started
@@ -863,6 +867,7 @@ struct ProjectRunWorkingDirectory {
 final class ProjectRunCoordinator: ObservableObject {
     @Published private(set) var sessions: [String: ProjectRunSession] = [:]
     @Published private(set) var pendingBatchTrustReview: ProjectRunBatchTrustReview?
+    @Published private(set) var pendingBatchStopIntent: ProjectRunBatchStopIntent?
 
     private let projectsModel: ProjectsViewModel
     private let makeEngine: () -> any ProjectRunProcessEngine
@@ -1027,8 +1032,42 @@ final class ProjectRunCoordinator: ObservableObject {
         }
     }
 
-    var activeRunConfigurationIDs: [String] {
-        sessions.compactMap { id, session in session.state.isLive ? id : nil }.sorted()
+    private func batchStopExecutionIDs(
+        in scope: [ProjectRunConfiguration]
+    ) -> [ProjectRunExecution.ID] {
+        var includedExecutionIDs: Set<ProjectRunExecution.ID> = []
+        return scope.compactMap { configuration in
+            guard let session = sessions[configuration.id],
+                  session.state != .stopping,
+                  let executionID = session.activeExecution?.id,
+                  includedExecutionIDs.insert(executionID).inserted else {
+                return nil
+            }
+            return executionID
+        }
+    }
+
+    func canStopBatch(in scope: [ProjectRunConfiguration]) -> Bool {
+        !batchStopExecutionIDs(in: scope).isEmpty
+    }
+
+    func requestBatchStop(in scope: [ProjectRunConfiguration]) {
+        let executionIDs = batchStopExecutionIDs(in: scope)
+        pendingBatchStopIntent = executionIDs.isEmpty
+            ? nil
+            : ProjectRunBatchStopIntent(executionIDs: executionIDs)
+    }
+
+    func cancelBatchStop() {
+        pendingBatchStopIntent = nil
+    }
+
+    func confirmBatchStop() {
+        guard let intent = pendingBatchStopIntent else { return }
+        pendingBatchStopIntent = nil
+        for executionID in intent.executionIDs {
+            stop(executionID: executionID)
+        }
     }
 
     func batchStartCandidates(

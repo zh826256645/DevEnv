@@ -556,6 +556,257 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertNil(coordinator.session(for: outside.id))
     }
 
+    func testBatchStopRequestFreezesOnlyTargetableExecutionIDsInSuppliedScope() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let includedRoot = directory.appendingPathComponent("included")
+        let outsideRoot = directory.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: includedRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+        let included = ProjectRunConfiguration(
+            id: "included",
+            projectID: includedRoot.path,
+            name: "Included",
+            command: "run included",
+            workingDirectory: "."
+        )
+        let outside = ProjectRunConfiguration(
+            id: "outside",
+            projectID: outsideRoot.path,
+            name: "Outside",
+            command: "run outside",
+            workingDirectory: "."
+        )
+        let inactive = ProjectRunConfiguration(
+            id: "inactive",
+            projectID: includedRoot.path,
+            name: "Inactive",
+            command: "run inactive",
+            workingDirectory: "."
+        )
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: [included, outside, inactive])
+        document.addDirect([includedRoot.path, outsideRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        XCTAssertTrue(projectsModel.trustProjectRunRoot(includedRoot.path))
+        XCTAssertTrue(projectsModel.trustProjectRunRoot(outsideRoot.path))
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        XCTAssertEqual(coordinator.run(included, projectRoot: includedRoot.path), .started)
+        XCTAssertEqual(coordinator.run(outside, projectRoot: outsideRoot.path), .started)
+        let includedExecutionID = try XCTUnwrap(coordinator.session(for: included.id)?.activeExecution?.id)
+        let outsideExecutionID = try XCTUnwrap(coordinator.session(for: outside.id)?.activeExecution?.id)
+
+        XCTAssertTrue(coordinator.canStopBatch(in: [inactive, included, included]))
+        coordinator.requestBatchStop(in: [inactive, included, included])
+
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs, [includedExecutionID])
+        XCTAssertFalse(coordinator.pendingBatchStopIntent?.executionIDs.contains(outsideExecutionID) ?? true)
+        coordinator.confirmBatchStop()
+        XCTAssertEqual(factory.engines[0].signals, [SIGINT])
+        XCTAssertTrue(factory.engines[1].signals.isEmpty)
+        XCTAssertEqual(coordinator.session(for: outside.id)?.state, .running)
+    }
+
+    func testCancellingBatchStopDiscardsIntentWithoutSendingSignals() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(
+            id: "cancelled-stop",
+            projectID: directory.path,
+            name: "Cancelled Stop",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        coordinator.requestBatchStop(in: [configuration])
+        XCTAssertNotNil(coordinator.pendingBatchStopIntent)
+
+        coordinator.cancelBatchStop()
+
+        XCTAssertNil(coordinator.pendingBatchStopIntent)
+        XCTAssertTrue(factory.engines[0].signals.isEmpty)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .running)
+    }
+
+    func testConfirmingBatchStopSkipsEndedAndReplacementExecutions() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let ended = ProjectRunConfiguration(
+            id: "ended",
+            projectID: directory.path,
+            name: "Ended",
+            command: "run ended",
+            workingDirectory: "."
+        )
+        let replaced = ProjectRunConfiguration(
+            id: "replaced",
+            projectID: directory.path,
+            name: "Replaced",
+            command: "run replaced",
+            workingDirectory: "."
+        )
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        guard case let .needsTrust(request) = coordinator.run(ended, projectRoot: directory.path) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        XCTAssertEqual(coordinator.run(replaced, projectRoot: directory.path), .started)
+        let endedExecutionID = try XCTUnwrap(coordinator.session(for: ended.id)?.activeExecution?.id)
+        let replacedExecutionID = try XCTUnwrap(coordinator.session(for: replaced.id)?.activeExecution?.id)
+        coordinator.requestBatchStop(in: [ended, replaced])
+        XCTAssertEqual(
+            coordinator.pendingBatchStopIntent?.executionIDs,
+            [endedExecutionID, replacedExecutionID]
+        )
+
+        factory.engines[0].finish(exitCode: 0)
+        factory.engines[1].finish(exitCode: 0)
+        XCTAssertEqual(coordinator.run(replaced, projectRoot: directory.path), .started)
+        let replacementExecutionID = try XCTUnwrap(coordinator.session(for: replaced.id)?.activeExecution?.id)
+        XCTAssertNotEqual(replacementExecutionID, replacedExecutionID)
+        let signalCountsBeforeConfirmation = factory.engines.map { $0.signals.count }
+
+        coordinator.confirmBatchStop()
+
+        XCTAssertNil(coordinator.pendingBatchStopIntent)
+        XCTAssertEqual(factory.engines.map { $0.signals.count }, signalCountsBeforeConfirmation)
+        XCTAssertEqual(coordinator.session(for: ended.id)?.state, .exited(0))
+        XCTAssertNil(coordinator.session(for: ended.id)?.failureMessage)
+        XCTAssertEqual(coordinator.session(for: replaced.id)?.state, .running)
+        XCTAssertEqual(coordinator.session(for: replaced.id)?.activeExecution?.id, replacementExecutionID)
+    }
+
+    func testConfirmingBatchStopCancelsPendingRestartWithoutLaunchingReplacement() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(
+            id: "restarting",
+            projectID: directory.path,
+            name: "Restarting",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        let factory = FakeProjectRunEngineFactory()
+        let scheduler = FakeProjectRunScheduler()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: scheduler
+        )
+        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        coordinator.restart(configuration, projectRoot: directory.path)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .restarting)
+        XCTAssertTrue(coordinator.canStopBatch(in: [configuration]))
+        XCTAssertEqual(factory.engines[0].signals, [SIGINT])
+
+        coordinator.requestBatchStop(in: [configuration])
+        coordinator.confirmBatchStop()
+
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopping)
+        XCTAssertEqual(factory.engines[0].signals, [SIGINT])
+        XCTAssertFalse(coordinator.canStopBatch(in: [configuration]))
+        scheduler.runNext()
+        scheduler.runNext()
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(137))
+        XCTAssertNil(coordinator.session(for: configuration.id)?.activeExecution)
+        XCTAssertEqual(factory.engines[0].launches.count, 1)
+    }
+
+    func testBatchStopContinuesAfterIndependentStopFailure() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let first = ProjectRunConfiguration(
+            id: "first-stop",
+            projectID: directory.path,
+            name: "First",
+            command: "run first",
+            workingDirectory: "."
+        )
+        let second = ProjectRunConfiguration(
+            id: "second-stop",
+            projectID: directory.path,
+            name: "Second",
+            command: "run second",
+            workingDirectory: "."
+        )
+        let factory = FakeProjectRunEngineFactory()
+        let scheduler = FakeProjectRunScheduler()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: scheduler
+        )
+        guard case let .needsTrust(request) = coordinator.run(first, projectRoot: directory.path) else {
+            return XCTFail("首次运行必须请求信任")
+        }
+        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        XCTAssertEqual(coordinator.run(second, projectRoot: directory.path), .started)
+        factory.engines[0].signalSucceeds = false
+
+        coordinator.requestBatchStop(in: [first, second])
+        coordinator.confirmBatchStop()
+
+        XCTAssertEqual(factory.engines[0].signals, [SIGINT])
+        XCTAssertEqual(factory.engines[1].signals, [SIGINT])
+        scheduler.runNext()
+        scheduler.runNext()
+        scheduler.runNext()
+        scheduler.runNext()
+        XCTAssertEqual(
+            coordinator.session(for: first.id)?.state,
+            .stopFailed("仍有进程未退出")
+        )
+        XCTAssertEqual(
+            coordinator.session(for: first.id)?.failureMessage,
+            "停止失败：仍有进程未退出"
+        )
+        XCTAssertTrue(coordinator.canStopBatch(in: [first]))
+        XCTAssertEqual(coordinator.session(for: second.id)?.state, .stopped(137))
+        XCTAssertNil(coordinator.session(for: second.id)?.failureMessage)
+        XCTAssertEqual(factory.engines[0].signals, [SIGINT, SIGTERM, SIGKILL])
+        XCTAssertEqual(factory.engines[1].signals, [SIGINT, SIGTERM, SIGKILL, 0])
+    }
+
     func testBatchStartCandidateSelectionTracksActiveExecutionLifecycleStates() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

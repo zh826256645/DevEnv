@@ -157,7 +157,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(start)
         let stop = NSMenuItem(title: "全部停止", action: #selector(requestStopAll(_:)), keyEquivalent: "")
         stop.target = self
-        stop.isEnabled = !runCoordinator.activeRunConfigurationIDs.isEmpty
+        stop.isEnabled = runCoordinator.canStopBatch(in: runCoordinator.runConfigurations())
         menu.addItem(stop)
         menu.addItem(.separator())
 

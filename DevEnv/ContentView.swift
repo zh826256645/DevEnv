@@ -677,7 +677,6 @@ struct ContentView: View {
     @State private var runConfigurationSourceIdentity: String?
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
     @State private var pendingProjectRunTrust: ProjectRunTrustRequest?
-    @State private var pendingStopAllConfigurationIDs: [String] = []
     @State private var selectedRunConfigurationID: String?
     @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
     @State private var runSearchText = ""
@@ -918,8 +917,8 @@ struct ContentView: View {
 
     private var isConfirmingStopAll: Binding<Bool> {
         Binding(
-            get: { !pendingStopAllConfigurationIDs.isEmpty },
-            set: { if !$0 { pendingStopAllConfigurationIDs.removeAll() } }
+            get: { runCoordinator.pendingBatchStopIntent != nil },
+            set: { if !$0 { runCoordinator.cancelBatchStop() } }
         )
     }
 
@@ -1455,7 +1454,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(.red)
-                .disabled(stopAllConfigurationIDs.isEmpty)
+                .disabled(!runCoordinator.canStopBatch(in: visibleRunConfigurations))
                 Button(action: beginCreatingRunConfiguration) {
                     Label("新建配置", systemImage: "plus")
                 }
@@ -1495,15 +1494,15 @@ struct ContentView: View {
         } message: { review in
             Text(batchTrustReviewMessage(review))
         }
-        .alert("停止全部活动会话？", isPresented: isConfirmingStopAll) {
-            Button("取消", role: .cancel) {}
-            Button("全部停止", role: .destructive) {
-                let configurationIDs = pendingStopAllConfigurationIDs
-                pendingStopAllConfigurationIDs.removeAll()
-                configurationIDs.forEach { runCoordinator.stop(configurationID: $0) }
-            }
-        } message: {
-            Text("将停止 \(pendingStopAllConfigurationIDs.count) 个活动会话，包括取消正在进行的重启。")
+        .alert(
+            "停止全部活动会话？",
+            isPresented: isConfirmingStopAll,
+            presenting: runCoordinator.pendingBatchStopIntent
+        ) { _ in
+            Button("取消", role: .cancel) { runCoordinator.cancelBatchStop() }
+            Button("全部停止", role: .destructive) { runCoordinator.confirmBatchStop() }
+        } message: { intent in
+            Text("将停止 \(intent.executionIDs.count) 个活动会话，包括取消正在进行的重启。")
         }
     }
 
@@ -1603,15 +1602,6 @@ struct ContentView: View {
             ?? visibleRunConfigurations.first
     }
 
-    private var stopAllConfigurationIDs: [String] {
-        visibleRunConfigurations.compactMap { configuration in
-            guard let state = runCoordinator.session(for: configuration.id)?.state,
-                  state.isLive,
-                  state != .stopping else { return nil }
-            return configuration.id
-        }
-    }
-
     private func requestRunAll() {
         requestBatchStart(in: visibleRunConfigurations, selectsRunPage: false)
     }
@@ -1650,12 +1640,12 @@ struct ContentView: View {
     }
 
     private func requestStopAll() {
-        pendingStopAllConfigurationIDs = stopAllConfigurationIDs
+        runCoordinator.requestBatchStop(in: visibleRunConfigurations)
     }
 
     private func requestStopAllGlobal() {
         selectPage(.runs)
-        pendingStopAllConfigurationIDs = runCoordinator.activeRunConfigurationIDs
+        runCoordinator.requestBatchStop(in: runCoordinator.runConfigurations())
     }
 
     private func selectFirstRunConfigurationIfNeeded() {
