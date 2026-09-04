@@ -2,8 +2,18 @@ import AppKit
 import Darwin
 import Foundation
 
+enum MachineToolSearchPathSource: String, Codable, Sendable {
+    case defaultLoginShell
+    case appProcessFallback
+}
+
+struct MachineToolSearchPathSnapshot: Codable, Sendable {
+    let entries: [String]
+    let source: MachineToolSearchPathSource
+}
+
 struct MachineSnapshot: Codable, Sendable {
-    static let currentSchemaVersion = 14
+    static let currentSchemaVersion = 15
     static let localServiceTimeoutNotice = "本地服务：命令超时"
     static let localServiceFailureNotice = "本地服务：读取失败"
 
@@ -11,7 +21,7 @@ struct MachineSnapshot: Codable, Sendable {
     let scannedAt: Date
     let system: SystemSnapshot
     let localServices: [LocalServiceSnapshot]
-    let path: [String]
+    let machineToolSearchPath: MachineToolSearchPathSnapshot
     let runtimes: [RuntimeSnapshot]
     let databaseInstallationOverviews: [DatabaseInstallationOverview]
     let homebrew: HomebrewSnapshot
@@ -26,6 +36,8 @@ struct MachineSnapshot: Codable, Sendable {
     let githubAuthenticationConfiguration: GitHubAuthenticationConfigurationSnapshot
     let issues: [String]
 
+    var path: [String] { machineToolSearchPath.entries }
+
     var localServiceScanNotice: String? {
         issues.first { $0 == Self.localServiceTimeoutNotice || $0 == Self.localServiceFailureNotice }
     }
@@ -36,7 +48,7 @@ struct MachineSnapshot: Codable, Sendable {
             scannedAt: scannedAt,
             system: system,
             localServices: dynamicStatus.localServices,
-            path: path,
+            machineToolSearchPath: machineToolSearchPath,
             runtimes: runtimes,
             databaseInstallationOverviews: dynamicStatus.databaseInstallationOverviews,
             homebrew: homebrew,
@@ -384,6 +396,7 @@ protocol MachineAccess: Sendable {
     var hostName: String { get }
     var currentUserName: String { get }
     var currentDirectoryPath: String { get }
+    var userHomeDirectoryPath: String? { get }
     var defaultLoginShellPath: String? { get }
     func diskSpace() -> DiskSpace
     func isExecutableFile(atPath path: String) -> Bool
@@ -394,6 +407,11 @@ protocol MachineAccess: Sendable {
     func executablePath(forPID pid: Int32) throws -> String
     func workingDirectoryPath(forPID pid: Int32) throws -> String
     func application(bundleIdentifier: String) -> InstalledApplication?
+    func captureMachineToolSearchPath(
+        usingLoginShell executable: String,
+        token: String,
+        timeout: TimeInterval
+    ) -> MachineCommandResult
     func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult
 }
 
@@ -404,13 +422,26 @@ extension MachineAccess {
 }
 
 struct LiveMachineAccess: MachineAccess {
-    var environment: [String: String] { ProcessInfo.processInfo.environment }
+    private let environmentOverride: [String: String]?
+    private let homeDirectoryOverride: String?
+
+    init(environment: [String: String]? = nil, homeDirectoryPath: String? = nil) {
+        environmentOverride = environment
+        homeDirectoryOverride = homeDirectoryPath
+    }
+
+    var environment: [String: String] { environmentOverride ?? ProcessInfo.processInfo.environment }
     var hostName: String { ProcessInfo.processInfo.hostName }
     var currentUserName: String {
         guard let name = getpwuid(geteuid())?.pointee.pw_name else { return NSUserName() }
         return String(cString: name)
     }
     var currentDirectoryPath: String { FileManager.default.currentDirectoryPath }
+    var userHomeDirectoryPath: String? {
+        if let homeDirectoryOverride { return homeDirectoryOverride }
+        guard let directory = getpwuid(getuid())?.pointee.pw_dir else { return nil }
+        return String(cString: directory)
+    }
     var defaultLoginShellPath: String? {
         guard let shell = getpwuid(getuid())?.pointee.pw_shell else { return nil }
         return String(cString: shell)
@@ -474,6 +505,88 @@ struct LiveMachineAccess: MachineAccess {
             version: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             path: url.standardizedFileURL.path
         )
+    }
+
+    func captureMachineToolSearchPath(
+        usingLoginShell executable: String,
+        token: String,
+        timeout: TimeInterval
+    ) -> MachineCommandResult {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devenv-machine-tool-path-\(UUID().uuidString)")
+        guard FileManager.default.createFile(
+            atPath: outputURL.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            return MachineCommandResult(output: "", status: -1, timedOut: false)
+        }
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+
+        let markerFormat = "\\036\(token)\\037%s\\036\(token)\\037"
+        let shellName = URL(fileURLWithPath: executable).lastPathComponent.lowercased()
+        let pathArgument = shellName == "fish" ? "(/usr/bin/printenv PATH)" : "\"$PATH\""
+        let script = "printf '\(markerFormat)' \(pathArgument) >> \"$DEVENV_MACHINE_TOOL_PATH_FILE\""
+        let process = Process()
+        let inputPipe: Pipe?
+        guard let homeDirectory = userHomeDirectoryPath, homeDirectory.hasPrefix("/") else {
+            return MachineCommandResult(output: "", status: -1, timedOut: false)
+        }
+
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.currentDirectoryURL = URL(fileURLWithPath: homeDirectory, isDirectory: true)
+        var processEnvironment = environment
+        processEnvironment["PWD"] = homeDirectory
+        processEnvironment["OLDPWD"] = homeDirectory
+        processEnvironment["DEVENV_MACHINE_TOOL_PATH_FILE"] = outputURL.path
+        process.environment = processEnvironment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        switch shellName {
+        case "csh", "tcsh":
+            inputPipe = Pipe()
+            process.arguments = ["-l"]
+            process.standardInput = inputPipe
+        case "fish":
+            inputPipe = nil
+            process.arguments = ["--login", "--interactive", "--command", script]
+            process.standardInput = FileHandle.nullDevice
+        default:
+            inputPipe = nil
+            process.arguments = ["-l", "-i", "-c", script]
+            process.standardInput = FileHandle.nullDevice
+        }
+
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
+        do {
+            try process.run()
+            if let inputPipe {
+                try inputPipe.fileHandleForWriting.write(contentsOf: Data("\(script)\nexit\n".utf8))
+                try? inputPipe.fileHandleForWriting.close()
+            }
+        } catch {
+            if process.isRunning { process.terminate() }
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            return MachineCommandResult(output: "", status: -1, timedOut: false)
+        }
+
+        if finished.wait(timeout: .now() + timeout) == .timedOut {
+            if process.isRunning { process.terminate() }
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            return MachineCommandResult(output: "", status: -1, timedOut: true)
+        }
+
+        guard let handle = try? FileHandle(forReadingFrom: outputURL) else {
+            return MachineCommandResult(output: "", status: process.terminationStatus, timedOut: false)
+        }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 131_073),
+              data.count <= 131_072,
+              let output = String(data: data, encoding: .utf8) else {
+            return MachineCommandResult(output: "", status: process.terminationStatus, timedOut: false)
+        }
+        return MachineCommandResult(output: output, status: process.terminationStatus, timedOut: false)
     }
 
     func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult {
@@ -633,14 +746,17 @@ struct EnvironmentScanner: Sendable {
     ]
 
     private let machine: any MachineAccess
+    private let loginShellPathTimeout: TimeInterval
 
-    init(machine: any MachineAccess = LiveMachineAccess()) {
+    init(machine: any MachineAccess = LiveMachineAccess(), loginShellPathTimeout: TimeInterval = 3) {
         self.machine = machine
+        self.loginShellPathTimeout = loginShellPathTimeout
     }
 
     func scan() -> ScanResult {
-        let path = pathEntries()
         var issues: [String] = []
+        let toolSearchPath = resolveMachineToolSearchPath(notices: &issues)
+        let path = toolSearchPath.entries
 
         let version = machine.command(executable: "/usr/bin/sw_vers", arguments: ["-productVersion"])
         let build = machine.command(executable: "/usr/bin/sw_vers", arguments: ["-buildVersion"])
@@ -722,7 +838,7 @@ struct EnvironmentScanner: Sendable {
             scannedAt: Date(),
             system: system,
             localServices: localServiceScan.services,
-            path: path,
+            machineToolSearchPath: toolSearchPath,
             runtimes: runtimes,
             databaseInstallationOverviews: databaseInstallationOverviews,
             homebrew: homebrew,
@@ -2405,9 +2521,64 @@ struct EnvironmentScanner: Sendable {
         return versionOrder == .orderedSame ? lhs.executable < rhs.executable : versionOrder == .orderedDescending
     }
 
-    private func pathEntries() -> [String] {
-        guard let value = machine.environment["PATH"] else { return [] }
-        return value.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+    private func resolveMachineToolSearchPath(notices: inout [String]) -> MachineToolSearchPathSnapshot {
+        let fallback = normalizedPathEntries(from: machine.environment["PATH"] ?? "") ?? []
+        guard let shell = machine.defaultLoginShellPath,
+              shell.hasPrefix("/"),
+              machine.isExecutableFile(atPath: shell) else {
+            appendMachineToolSearchPathFallbackNotice(reason: "Default Login Shell 不可用", notices: &notices)
+            return MachineToolSearchPathSnapshot(entries: fallback, source: .appProcessFallback)
+        }
+
+        let token = "DEVENV_MACHINE_TOOL_PATH_V1_\(UUID().uuidString)"
+        let marker = "\u{1E}\(token)\u{1F}"
+        let result = machine.captureMachineToolSearchPath(
+            usingLoginShell: shell,
+            token: token,
+            timeout: loginShellPathTimeout
+        )
+
+        let reason: String
+        if result.timedOut {
+            reason = "Default Login Shell 初始化超时"
+        } else if result.status != 0 {
+            reason = "Default Login Shell 初始化失败"
+        } else if let value = framedPathValue(from: result.output, marker: marker),
+                  let entries = normalizedPathEntries(from: value) {
+            return MachineToolSearchPathSnapshot(entries: entries, source: .defaultLoginShell)
+        } else {
+            reason = "Default Login Shell 返回的 PATH 无效"
+        }
+
+        appendMachineToolSearchPathFallbackNotice(reason: reason, notices: &notices)
+        return MachineToolSearchPathSnapshot(entries: fallback, source: .appProcessFallback)
+    }
+
+    private func framedPathValue(from output: String, marker: String) -> String? {
+        let components = output.components(separatedBy: marker)
+        guard components.count == 3 else { return nil }
+        return components[1]
+    }
+
+    private func normalizedPathEntries(from value: String) -> [String]? {
+        guard !value.isEmpty, value.utf8.count <= 65_536 else { return nil }
+        guard value.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value != 127 }) else { return nil }
+
+        let base = URL(fileURLWithPath: machine.currentDirectoryPath, isDirectory: true)
+        var entries: [String] = []
+        for component in value.split(separator: ":", omittingEmptySubsequences: false) {
+            let rawPath = component.isEmpty ? machine.currentDirectoryPath : String(component)
+            let normalized = URL(fileURLWithPath: rawPath, relativeTo: base).standardizedFileURL.path
+            guard normalized.hasPrefix("/") else { return nil }
+            entries.append(normalized)
+        }
+        return entries
+    }
+
+    private func appendMachineToolSearchPathFallbackNotice(reason: String, notices: inout [String]) {
+        notices.append(
+            "Machine Tool Search PATH：\(reason)，已回退到 App 进程 PATH；请检查 Shell 启动配置后重新扫描"
+        )
     }
 
     private func absoluteExecutable(_ name: String, directory: String) -> String {

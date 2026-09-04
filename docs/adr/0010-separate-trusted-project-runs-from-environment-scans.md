@@ -1,6 +1,8 @@
 # 将可信 Project Run 与只读 Environment Scan 分离
 
-Environment Scan 继续只执行固定的只读观察，不加载 Shell 配置，也不根据扫描结果自动启动项目命令。Project Run Suggestion 只提供候选运行意图；只有用户保存 Project Run Configuration，并在首次执行对应 Project Root 时核对完整命令与解析后的工作目录、建立 Project Trust，DevEnv 才创建 Project Run Session。
+> “Environment Scan 不加载 Shell 配置”的限制已由 [ADR-0013](0013-initialize-machine-tool-search-path-from-login-shell.md) 在取得 Machine Tool Search PATH 的固定、限时调用范围内取代；Project Run 的信任边界不变。
+
+Environment Scan 继续只执行固定观察；除 ADR-0013 为取得 Machine Tool Search PATH 而进行的受限 Shell 初始化外，不加载 Shell 配置，也不根据扫描结果自动启动项目命令。Project Run Suggestion 只提供候选运行意图；只有用户保存 Project Run Configuration，并在首次执行对应 Project Root 时核对完整命令与解析后的工作目录、建立 Project Trust，DevEnv 才创建 Project Run Session。
 
 Project Run Session 使用当前用户可用的 Default Login Shell 和 SwiftTerm PTY，在每次启动前重新检查工作目录边界。Project Run Configuration 与 Project Trust 一起持久化在现有 Application Support 项目文档中；终端输出、进程状态和退出码仅保留在当前 App 进程内。这样显式项目执行不会扩大只读 Environment Scan 的权限或持久化范围。
 

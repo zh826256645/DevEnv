@@ -96,7 +96,7 @@ final class EnvironmentScannerTests: XCTestCase {
             ]
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 14)
+        XCTAssertEqual(snapshot.schemaVersion, 15)
         XCTAssertEqual(snapshot.terminalApplications.map(\.name), ["Terminal", "Ghostty", "WezTerm"])
         XCTAssertEqual(snapshot.terminalApplications.map(\.version), ["2.15", "1.2.0", nil])
         XCTAssertEqual(snapshot.shellInstallations.map(\.path), ["/opt/homebrew/bin/fish", "/bin/zsh", "/bin/bash"])
@@ -115,9 +115,214 @@ final class EnvironmentScannerTests: XCTestCase {
 
         XCTAssertTrue(snapshot.terminalApplications.isEmpty)
         XCTAssertTrue(snapshot.shellInstallations.isEmpty)
+        XCTAssertEqual(snapshot.machineToolSearchPath.source, .appProcessFallback)
+        XCTAssertEqual(snapshot.issues.filter { $0.hasPrefix("Machine Tool Search PATH：") }.count, 1)
         XCTAssertEqual(snapshot.issues.filter {
             $0.hasPrefix("Default Login Shell：") || $0.hasPrefix("Shell Installation：")
         }, ["Default Login Shell：读取失败", "Shell Installation：读取失败"])
+    }
+
+    func testMachineToolSearchPathUsesInteractiveLoginShellOutputAndIgnoresNoise() throws {
+        let recorder = CommandRecorder()
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/app/bin"],
+            shellPathResponse: .framed(
+                "/Users/test/.nvm/versions/node/v22.14.0/bin:/opt/homebrew/bin",
+                prefix: "Welcome to this machine\n",
+                suffix: "\nShell initialized\n"
+            ),
+            executables: [
+                "/Users/test/.nvm/versions/node/v22.14.0/bin/node",
+                "/Users/test/.nvm/versions/node/v22.14.0/bin/npm",
+            ],
+            commandOutputs: [
+                "/Users/test/.nvm/versions/node/v22.14.0/bin/node --version": "v22.14.0\n",
+                "/Users/test/.nvm/versions/node/v22.14.0/bin/npm --version": "11.2.0\n",
+            ],
+            recorder: recorder
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.machineToolSearchPath.source, .defaultLoginShell)
+        XCTAssertEqual(snapshot.path, [
+            "/Users/test/.nvm/versions/node/v22.14.0/bin",
+            "/opt/homebrew/bin",
+        ])
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.executable,
+                       "/Users/test/.nvm/versions/node/v22.14.0/bin/node")
+        XCTAssertEqual(snapshot.packageManagers.first { $0.id == "npm" }?.executable,
+                       "/Users/test/.nvm/versions/node/v22.14.0/bin/npm")
+        XCTAssertFalse(snapshot.issues.contains { $0.hasPrefix("Machine Tool Search PATH：") })
+
+        let shellCommand = try XCTUnwrap(recorder.commands.first { $0.executable == "/bin/zsh" })
+        XCTAssertEqual(shellCommand.arguments, ["capture-machine-tool-search-path"])
+        XCTAssertEqual(shellCommand.timeout, 3)
+
+        let persisted = try JSONEncoder().encode(snapshot)
+        let persistedText = try XCTUnwrap(String(data: persisted, encoding: .utf8))
+        XCTAssertFalse(persistedText.contains("Welcome to this machine"))
+        XCTAssertFalse(persistedText.contains("Shell initialized"))
+    }
+
+    func testMachineToolSearchPathLoadsRealInteractiveZshInitializationFromAccountHomeWithoutPersistingNoise() throws {
+        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/bin/zsh"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let noise = "recognizable-shell-startup-noise-64"
+        try """
+        setopt noclobber
+        if [[ "$PWD" == "$HOME" ]]; then
+          export PATH="/from-zshrc/bin:$PATH"
+        else
+          export PATH="/directory-local/bin:$PATH"
+        fi
+        print "\(noise)"
+        print -u2 "\(noise)-stderr"
+        """.write(to: directory.appendingPathComponent(".zshrc"), atomically: true, encoding: .utf8)
+
+        var shellEnvironment = ProcessInfo.processInfo.environment
+        shellEnvironment["HOME"] = directory.path
+        shellEnvironment["ZDOTDIR"] = directory.path
+        shellEnvironment["PATH"] = "/app/bin"
+        shellEnvironment["TERM"] = "dumb"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/app/bin"],
+            environment: ["HOME": directory.path, "ZDOTDIR": directory.path],
+            liveLoginShellEnvironment: shellEnvironment,
+            executables: ["/from-zshrc/bin/node"],
+            commandOutputs: ["/from-zshrc/bin/node --version": "v22.14.0\n"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.machineToolSearchPath.source, .defaultLoginShell)
+        XCTAssertEqual(snapshot.path.first, "/from-zshrc/bin")
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.first?.executable,
+                       "/from-zshrc/bin/node")
+        let persistedText = try XCTUnwrap(String(data: JSONEncoder().encode(snapshot), encoding: .utf8))
+        XCTAssertFalse(persistedText.contains(noise))
+    }
+
+    func testMachineToolSearchPathSupportsRealCshLoginInitialization() throws {
+        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/bin/csh"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try "set noclobber\nsetenv PATH /from-cshrc/bin:$PATH\n".write(
+            to: directory.appendingPathComponent(".cshrc"), atomically: true, encoding: .utf8
+        )
+        try "setenv PATH /from-login/bin:$PATH\n".write(
+            to: directory.appendingPathComponent(".login"), atomically: true, encoding: .utf8
+        )
+
+        var shellEnvironment = ProcessInfo.processInfo.environment
+        shellEnvironment["HOME"] = directory.path
+        shellEnvironment["PATH"] = "/app/bin"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/app/bin"],
+            environment: ["HOME": directory.path],
+            defaultLoginShellPath: "/bin/csh",
+            registeredShells: "/bin/csh\n",
+            liveLoginShellEnvironment: shellEnvironment,
+            executables: ["/bin/csh"]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.machineToolSearchPath.source, .defaultLoginShell)
+        XCTAssertEqual(Array(snapshot.path.prefix(2)), ["/from-login/bin", "/from-cshrc/bin"])
+    }
+
+    func testMachineToolSearchPathRealShellTimeoutReturnsWithinBound() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let shell = directory.appendingPathComponent("blocking-shell")
+        try "#!/bin/sh\nwhile :; do :; done\n".write(to: shell, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: shell.path)
+
+        var shellEnvironment = ProcessInfo.processInfo.environment
+        shellEnvironment["HOME"] = directory.path
+        shellEnvironment["PATH"] = "/app/bin"
+        let startedAt = Date()
+        let snapshot = EnvironmentScanner(
+            machine: StubMachine(
+                path: ["/app/bin"],
+                environment: ["HOME": directory.path],
+                defaultLoginShellPath: shell.path,
+                registeredShells: "\(shell.path)\n",
+                liveLoginShellEnvironment: shellEnvironment,
+                executables: [shell.path]
+            ),
+            loginShellPathTimeout: 0.1
+        ).scan().snapshot
+
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.75)
+        XCTAssertEqual(snapshot.machineToolSearchPath.source, .appProcessFallback)
+        XCTAssertEqual(snapshot.issues.filter { $0.hasPrefix("Machine Tool Search PATH：") }.count, 1)
+    }
+
+    func testMachineToolSearchPathFallsBackOnceForShellFailuresAndInvalidOutput() {
+        let cases: [(response: StubShellPathResponse, status: Int32, timedOut: Bool)] = [
+            (.framed("/shell/bin"), -1, false),
+            (.framed("/shell/bin"), 1, false),
+            (.framed("/shell/bin"), 0, true),
+            (.raw("startup output without a PATH frame"), 0, false),
+            (.framed(""), 0, false),
+            (.framed("/shell/bin\u{0007}"), 0, false),
+        ]
+
+        for testCase in cases {
+            let snapshot = EnvironmentScanner(machine: StubMachine(
+                path: ["/app/first", "relative/../second"],
+                shellPathResponse: testCase.response,
+                executables: ["/app/first/git"],
+                commandOutputs: ["/app/first/git --version": "git version 2.50.0\n"],
+                commandStatuses: ["/bin/zsh": testCase.status],
+                commandTimeouts: testCase.timedOut ? ["/bin/zsh"] : []
+            )).scan().snapshot
+
+            XCTAssertEqual(snapshot.machineToolSearchPath.source, .appProcessFallback)
+            XCTAssertEqual(snapshot.path, ["/app/first", "/second"])
+            XCTAssertEqual(snapshot.gitCLI.executable, "/app/first/git")
+            XCTAssertEqual(snapshot.issues.filter { $0.hasPrefix("Machine Tool Search PATH：") }.count, 1)
+        }
+    }
+
+    func testMachineToolSearchPathIsSharedAcrossCommandResolutionAndConflictScanning() {
+        let shellPath = ["/shell/first", "/shell/second"]
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/app/bin"],
+            shellPathResponse: .framed(shellPath.joined(separator: ":")),
+            executables: [
+                "/shell/first/node", "/shell/second/node",
+                "/shell/first/npm", "/shell/first/pnpm", "/shell/first/yarn",
+                "/shell/first/git", "/shell/first/corepack", "/shell/first/postgres", "/shell/first/brew",
+            ],
+            resolvedPaths: [
+                "/shell/first/pnpm": "/shell/first/corepack/dist/pnpm.js",
+                "/shell/first/yarn": "/shell/first/corepack/dist/yarn.js",
+            ],
+            commandOutputs: [
+                "/shell/first/node --version": "v22.14.0\n",
+                "/shell/second/node --version": "v20.18.0\n",
+                "/shell/first/npm --version": "11.2.0\n",
+                "/shell/first/git --version": "git version 2.50.0\n",
+                "/shell/first/postgres --version": "postgres (PostgreSQL) 17.5\n",
+                "/shell/first/brew --version": "Homebrew 4.5.0\n",
+            ]
+        )).scan().snapshot
+
+        XCTAssertEqual(snapshot.path, shellPath)
+        XCTAssertEqual(snapshot.runtimes.first { $0.id == "node" }?.installations.map(\.executable), [
+            "/shell/first/node", "/shell/second/node",
+        ])
+        XCTAssertTrue(snapshot.runtimes.first { $0.id == "node" }?.hasPathVersionConflict == true)
+        XCTAssertEqual(snapshot.packageManagers.first { $0.id == "npm" }?.executable, "/shell/first/npm")
+        XCTAssertEqual(snapshot.packageManagers.first { $0.id == "pnpm" }?.state, .configured)
+        XCTAssertEqual(snapshot.packageManagers.first { $0.id == "yarn" }?.state, .configured)
+        XCTAssertEqual(snapshot.gitCLI.executable, "/shell/first/git")
+        XCTAssertEqual(snapshot.homebrew.executable, "/shell/first/brew")
+        XCTAssertEqual(
+            snapshot.databaseInstallationOverviews.first { $0.id == "postgresql" }?.installations.first?.executable,
+            "/shell/first/postgres"
+        )
     }
 
     func testPackageManagerScanReportsEffectiveToolsWithoutActivatingCorepack() {
@@ -536,7 +741,7 @@ final class EnvironmentScannerTests: XCTestCase {
             commandOutputs: versions
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.schemaVersion, 14)
+        XCTAssertEqual(snapshot.schemaVersion, 15)
         XCTAssertEqual(snapshot.runtimes.count, 7)
         for runtime in snapshot.runtimes {
             XCTAssertEqual(runtime.installations.map(\.version), ["1.0", "2.0"])
@@ -2088,7 +2293,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(restored.runtimes.first { $0.id == "python" }?.hasPathVersionConflict == true)
     }
 
-    func testV14SnapshotRoundTripsPackageManagersAndV13IsRejected() throws {
+    func testV15SnapshotRoundTripsMachineToolSearchPathSourceAndV14IsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let fileURL = directory.appendingPathComponent("machine-snapshot.json")
@@ -2125,7 +2330,8 @@ final class EnvironmentScannerTests: XCTestCase {
         )).scan().snapshot
 
         try store.save(snapshot)
-        XCTAssertEqual(store.load()?.schemaVersion, 14)
+        XCTAssertEqual(store.load()?.schemaVersion, 15)
+        XCTAssertEqual(store.load()?.machineToolSearchPath.source, .defaultLoginShell)
         XCTAssertEqual(store.load()?.packageManagers.first { $0.id == "npm" }?.version, "11.5.2")
         XCTAssertEqual(store.load()?.terminalApplications.first?.name, "Terminal")
         XCTAssertEqual(store.load()?.shellInstallations.first?.path, "/bin/zsh")
@@ -2166,7 +2372,7 @@ final class EnvironmentScannerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertTrue(store.load()?.runtimes.flatMap(\.installations).allSatisfy(\.isInPath) == true)
 
-        json["schemaVersion"] = 13
+        json["schemaVersion"] = 14
         try JSONSerialization.data(withJSONObject: json).write(to: fileURL, options: .atomic)
         XCTAssertNil(store.load())
     }
@@ -2447,12 +2653,20 @@ private final class CommandRecorder: @unchecked Sendable {
     }
 }
 
+private enum StubShellPathResponse: Sendable {
+    case framed(String, prefix: String = "", suffix: String = "")
+    case raw(String)
+}
+
 private struct StubMachine: MachineAccess {
     let environment: [String: String]
     let hostName = "test-host"
     let currentUserName: String
     let currentDirectoryPath = "/"
+    let userHomeDirectoryPath: String?
     let defaultLoginShellPath: String?
+    let shellPathResponse: StubShellPathResponse
+    let liveLoginShellAccess: LiveMachineAccess?
     let executables: Set<String>
     let resolvedPaths: [String: String]
     let commandOutputs: [String: String]
@@ -2475,6 +2689,8 @@ private struct StubMachine: MachineAccess {
         currentUserName: String = "test",
         defaultLoginShellPath: String? = "/bin/zsh",
         registeredShells: String? = "/bin/zsh\n",
+        shellPathResponse: StubShellPathResponse? = nil,
+        liveLoginShellEnvironment: [String: String]? = nil,
         executables: Set<String> = [],
         resolvedPaths: [String: String] = [:],
         commandOutputs: [String: String] = [:],
@@ -2493,7 +2709,12 @@ private struct StubMachine: MachineAccess {
     ) {
         self.environment = environment.merging(["PATH": path.joined(separator: ":")]) { _, path in path }
         self.currentUserName = currentUserName
+        self.userHomeDirectoryPath = environment["HOME"] ?? "/Users/test"
         self.defaultLoginShellPath = defaultLoginShellPath
+        self.shellPathResponse = shellPathResponse ?? .framed(path.joined(separator: ":"))
+        self.liveLoginShellAccess = liveLoginShellEnvironment.map {
+            LiveMachineAccess(environment: $0, homeDirectoryPath: $0["HOME"])
+        }
         self.executables = executables.union(["/bin/zsh"])
         self.resolvedPaths = resolvedPaths
         self.commandOutputs = commandOutputs
@@ -2547,6 +2768,36 @@ private struct StubMachine: MachineAccess {
     }
 
     func application(bundleIdentifier: String) -> InstalledApplication? { applications[bundleIdentifier] }
+
+    func captureMachineToolSearchPath(
+        usingLoginShell executable: String,
+        token: String,
+        timeout: TimeInterval
+    ) -> MachineCommandResult {
+        recorder?.append(
+            executable: executable,
+            arguments: ["capture-machine-tool-search-path"],
+            timeout: timeout
+        )
+        if let liveLoginShellAccess {
+            return liveLoginShellAccess.captureMachineToolSearchPath(
+                usingLoginShell: executable,
+                token: token,
+                timeout: timeout
+            )
+        }
+
+        let marker = "\u{1E}\(token)\u{1F}"
+        let output = switch shellPathResponse {
+        case let .framed(path, prefix, suffix): prefix + marker + path + marker + suffix
+        case let .raw(output): output
+        }
+        return MachineCommandResult(
+            output: output,
+            status: commandStatuses[executable, default: 0],
+            timedOut: commandTimeouts.contains(executable)
+        )
+    }
 
     func command(executable: String, arguments: [String], timeout: TimeInterval) -> MachineCommandResult {
         recorder?.append(executable: executable, arguments: arguments, timeout: timeout)

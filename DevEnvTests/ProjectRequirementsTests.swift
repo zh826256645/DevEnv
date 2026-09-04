@@ -863,7 +863,7 @@ final class ProjectRequirementsTests: XCTestCase {
                 memoryBytes: nil, diskTotalBytes: nil, diskFreeBytes: nil
             ),
             localServices: [],
-            path: [],
+            machineToolSearchPath: MachineToolSearchPathSnapshot(entries: [], source: .appProcessFallback),
             runtimes: [
                 RuntimeSnapshot(id: "node", name: "Node.js", installations: [
                     runtimeInstallation(path: "/opt/node", version: "22.1.0"),

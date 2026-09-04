@@ -4,7 +4,7 @@
 
 ## 目标
 
-Environment Scan 以只读方式观察当前 Mac 的基础系统信息和开发工具状态，生成一份可在应用重启后继续查看的 Machine Snapshot。首版回答“当前 App 环境实际能使用什么”，不负责诊断所有可能安装或修改用户环境。
+Environment Scan 以不主动修改系统为目的观察当前 Mac 的基础系统信息和开发工具状态，生成一份可在应用重启后继续查看的 Machine Snapshot。命令解析统一采用 Machine Tool Search PATH，不负责复现既有终端窗口、项目目录或其他局部环境。
 
 ## V1 范围
 
@@ -15,7 +15,7 @@ Environment Scan 以只读方式观察当前 Mac 的基础系统信息和开发�
 - 主机名
 - 总内存
 - 系统卷容量与可用空间
-- 当前 App 继承的 `PATH`
+- Default Login Shell 初始化得到的 Machine Tool Search PATH，或失败时的 App 进程 `PATH` 回退
 - Node.js、Python、Go、Java、Rust、Ruby、Lua 的 Effective Runtime Installation
 - Homebrew 可用性、版本与可执行文件路径
 
@@ -32,7 +32,7 @@ Environment Scan 以只读方式观察当前 Mac 的基础系统信息和开发�
 
 ### Runtime
 
-每类 Runtime 在 V1 中只解析当前 `PATH` 的第一个可执行文件，并记录版本和路径。固定清单如下：
+每类 Runtime 在 V1 中只解析 Machine Tool Search PATH 的第一个可执行文件，并记录版本和路径。固定清单如下：
 
 | Runtime | 可执行文件 | 版本参数 |
 |---|---|---|
@@ -49,7 +49,7 @@ Environment Scan 以只读方式观察当前 Mac 的基础系统信息和开发�
 每项状态为：
 
 - `已发现`：存在可执行文件并取得可识别版本文本。
-- `未发现`：当前 `PATH` 没有对应可执行文件。
+- `未发现`：Machine Tool Search PATH 没有对应可执行文件。
 - `读取失败`：可执行文件存在，但命令超时或无法取得可识别结果。
 
 ### Homebrew
@@ -59,11 +59,11 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - `/opt/homebrew/bin/brew`
 - `/usr/local/bin/brew`
 
-未找到标准路径时显示“未发现”，不加载 Shell 配置寻找自定义安装位置。
+未找到标准路径时显示“未发现”；Machine Tool Search PATH 仍可提供自定义位置，固定标准位置继续作为 Homebrew 的补充候选。
 
 ### Package Manager Tool
 
-- 固定按 uv、Bun、npm、pnpm、Yarn 顺序扫描，每项只取当前 App `PATH` 中第一个可执行文件，不枚举 Provider 或未激活副本。
+- 固定按 uv、Bun、npm、pnpm、Yarn 顺序扫描，每项只取 Machine Tool Search PATH 中第一个可执行文件，不枚举 Provider 或未激活副本。
 - 非 Corepack 工具以固定 `--version` 参数直接执行，记录调用路径、软链接实际路径与版本；超时、退出失败或版本不可解析时保留路径并产生 Scan Notice。
 - pnpm 或 Yarn 实际路径指向 Corepack 时只记录“已配置”，不执行代理读取版本，避免扫描隐式下载或激活工具。
 - 状态为“已安装”、“未发现”、“已配置”或“读取失败”；未发现是中性状态，不产生 Scan Notice。
@@ -73,12 +73,14 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 
 ## 执行与安全边界
 
-- 不加载或执行 `.zshrc`、`.zprofile` 等 Shell 配置。
-- 不接受用户输入并拼接命令。
-- 只执行产品内固定的只读命令和参数。
-- 不请求管理员权限，不访问钥匙串或受保护目录。
-- 每个外部命令最多等待 2 秒；超时只影响对应扫描项。
-- 不启用 App Sandbox 的理由见 [ADR-0001](../adr/0001-run-without-app-sandbox.md)，但扫描能力仍保持只读。
+- 唯一允许加载 Shell 配置的观察是 Machine Tool Search PATH：从账户记录取得 Default Login Shell 和用户 Home Directory，并从该中立目录以按 Shell 类型固定的交互式登录调用执行固定 `printf` 命令；POSIX 风格 Shell 使用 `-l -i -c`，fish 使用对应长参数，csh/tcsh 使用 `-l` 并只接收固定命令流。
+- Shell 的普通 stdout/stderr 被丢弃；固定命令将每次扫描随机生成的控制字符帧与 `PATH` 写入独立临时文件，扫描只读取该协议文件并立即删除，因此启动输出或后台输出不能混入 PATH。
+- Shell PATH 调用使用 3 秒绝对截止时间，协议文件最多读取 128 KiB；启动失败、超时、非零退出、帧缺失或 PATH 校验失败均回退到 App 进程 PATH，并只产生一条对应 Scan Notice。
+- PATH 必须非空、不超过 64 KiB 且不含控制字符；条目仅按文件路径语义规范化，不执行变量展开、命令替换或其他 Shell 解释。
+- 除上述边界外，不加载 Shell 配置；其他扫描仍只执行产品内固定的只读命令和参数，默认最多等待 2 秒。
+- 不接受用户输入并拼接命令，不请求管理员权限，不访问钥匙串或受保护目录。
+- Machine Snapshot 只保存规范化后的 PATH 与来源，不保存 Shell 的其他输出、环境变量、凭据或秘密。
+- 不启用 App Sandbox 的理由见 [ADR-0001](../adr/0001-run-without-app-sandbox.md)，该权衡的补充边界见 [ADR-0013](../adr/0013-initialize-machine-tool-search-path-from-login-shell.md)。
 
 ## 快照与持久化
 
@@ -100,10 +102,11 @@ V1 只检查 Apple Silicon 和 Intel Mac 的标准安装位置：
 - Python 与 Node Local Service Attribution 扩展：`schemaVersion = 12`
 - Terminal Application 与 Shell Installation 扩展：`schemaVersion = 13`
 - Package Manager Tool 扩展：`schemaVersion = 14`
+- Machine Tool Search PATH 来源扩展：`schemaVersion = 15`
 - 写入方式：原子替换
 - 启动读取到损坏或不支持版本的文件时忽略该文件，不尝试迁移
 
-Package Manager Tool 扩展启用后，V1–V13 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
+Machine Tool Search PATH 来源扩展启用后，V1–V14 快照视为不支持版本并立即重新扫描；Machine Snapshot 是可重建的本机缓存，不提供旧版本迁移。
 
 只要 macOS 版本和芯片架构可读取，就允许保存部分快照。Runtime、Homebrew、Package Manager Tool、Terminal Application、Shell Installation、Git CLI、Git LFS 或 User Git Configuration 子项缺失、失败都不会阻止持久化；无法建立主机基础信息时保留上一份快照，并展示本次扫描失败。
 
@@ -117,7 +120,7 @@ Package Manager Tool 扩展启用后，V1–V13 快照视为不支持版本并�
 - 总览页依次展示 Runtime 类别、已发现数据库类别、Local Service 组数和环境配置项数四张指标卡，以及双列的系统信息与环境状态，最后展示环境配置；不在正文中单独展示 Scan Notice 模块。
 - 环境状态展示 PATH 冲突、未发现 Runtime、已发现但未监听的数据库和非回环 TCP Listener Binding 数量；任一数量大于零时整体标记“需关注”，否则标记“正常”。该摘要不改变 Scan Notice 的定义，也不证明对应工具或服务健康可用。
 - 系统信息卡使用大号系统 Apple 标志，集中展示 macOS 版本、Build、架构，并以图标指标展示主机名和内存；系统卷使用线性进度条显示已用容量占总容量的比例，并同时标注已用、可用和总容量。
-- 系统信息页依次展示主机与系统卷、环境配置、Runtime 列表和数据库列表；Runtime 与数据库不展示顶部指标卡，列表固定使用双列卡片网格。本地服务页先展示四张指标卡，再使用单列列表。包管理器、Git、PATH、Terminal 与 Shell 在系统信息页的“环境配置”中作为同级卡片展示；包管理器卡聚合 Homebrew、uv、Bun、npm、pnpm 与 Yarn，摘要展示已发现数量，展开后展示品牌 Logo、版本、状态和路径。Terminal 摘要展示已发现应用数量，展开后按支持清单顺序展示名称、版本和应用路径；Shell 摘要展示 Default Login Shell 与已发现数量，展开后将默认项置顶并展示名称、路径、默认标记和可用状态。五张卡片复用同一时间只展开一张、选中卡片置顶并占满整行的交互。
+- 系统信息页依次展示主机与系统卷、环境配置、Runtime 列表和数据库列表；Runtime 与数据库不展示顶部指标卡，列表固定使用双列卡片网格。本地服务页先展示四张指标卡，再使用单列列表。包管理器、Git、PATH、Terminal 与 Shell 在系统信息页的“环境配置”中作为同级卡片展示；PATH 卡摘要和展开态明确显示“来自 Default Login Shell”或“来自 App 进程 PATH（回退）”。包管理器卡聚合 Homebrew、uv、Bun、npm、pnpm 与 Yarn，摘要展示已发现数量，展开后展示品牌 Logo、版本、状态和路径。Terminal 摘要展示已发现应用数量，展开后按支持清单顺序展示名称、版本和应用路径；Shell 摘要展示 Default Login Shell 与已发现数量，展开后将默认项置顶并展示名称、路径、默认标记和可用状态。五张卡片复用同一时间只展开一张、选中卡片置顶并占满整行的交互。
 
 ### 扫描状态
 
@@ -147,7 +150,7 @@ Package Manager Tool 扩展启用后，V1–V13 快照视为不支持版本并�
 
 ### 发现与合并
 
-1. 按当前 `PATH` 顺序遍历每类 Runtime 的所有同名可执行文件。
+1. 按 Machine Tool Search PATH 顺序遍历每类 Runtime 的所有同名可执行文件。
 2. 以规范化路径和软链接实际目标去重；同一文件经 `PATH` 和 Runtime Provider 重复发现时只保留一项。
 3. `PATH` 候选继续执行对应版本命令。命令失败时保留路径并标记“版本读取失败”。
 4. Runtime Provider 补充未进入 `PATH` 的安装。Provider 已返回版本与路径时，只验证文件存在且可执行，不再次启动 Runtime。
@@ -170,7 +173,7 @@ Package Manager Tool 扩展启用后，V1–V13 快照视为不支持版本并�
 
 Go 和 Lua 首批不增加专用 Provider，由 `PATH`、Homebrew 和 mise 发现。asdf、fnm、Volta、gvm、RVM 不在首批范围。
 
-Provider 优先调用官方只读命令；nvm 等没有独立可执行命令的工具读取其标准目录。Provider 可执行文件从当前 `PATH` 和固定标准位置解析；管理器根目录只采用 App 已继承的对应环境变量或默认标准位置，不读取 `.zshrc`、`.zprofile` 等 Shell 配置，也不递归扫描整个磁盘。
+Provider 优先调用官方只读命令；nvm 等没有独立可执行命令的工具读取其标准目录。Provider 可执行文件从 Machine Tool Search PATH 和固定标准位置解析；管理器根目录仍只采用 App 已继承的对应环境变量或默认标准位置，不从 Shell 捕获其他环境变量，也不递归扫描整个磁盘。
 
 Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider 失败只在扫描提示中记录，不影响 `PATH`、其他 Provider 或 Machine Snapshot。完整取舍见 [ADR-0003](../adr/0003-source-aware-runtime-discovery.md)。
 
@@ -199,7 +202,7 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 
 ## Git Tooling State 扩展
 
-- 按当前 `PATH` 顺序只取第一个可执行 `git`，记录规范化的绝对调用路径，不枚举其他安装来源或软链接目标。
+- 按 Machine Tool Search PATH 顺序只取第一个可执行 `git`，记录规范化的绝对调用路径，不枚举其他安装来源或软链接目标。
 - 只以已发现的绝对路径和固定参数 `--version` 直接启动进程，不调用 Shell，不拼接用户输入，并沿用单命令 2 秒超时。
 - 状态固定为“可用”“未发现”或“读取失败”。未发现保持中性且不产生 Scan Notice；命令失败、超时或版本输出不可识别时保留路径并只产生一条 Git CLI Scan Notice。
 - Git CLI 子扫描失败不丢弃系统、Homebrew Availability、PATH、Runtime Installation 或 Local Service 结果，也不改变主机基础信息可用时 Machine Snapshot 的可持久化性。
@@ -208,12 +211,12 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 - User Excludes File 优先采用显式配置；未配置时采用 `$XDG_CONFIG_HOME/git/ignore`，`XDG_CONFIG_HOME` 为空则采用 `$HOME/.config/git/ignore`。Machine Snapshot 只保存标准化绝对路径、来源和文件是否存在，不读取规则内容。
 - 默认身份、默认分支或 User Excludes File 缺失均为中性状态，不产生 Scan Notice。配置命令失败或超时只产生一条 User Git Configuration Scan Notice，并保留 Git CLI、其他扫描结果和快照可持久化性；Git 未发现或版本读取失败时跳过配置子扫描。
 - “环境配置”中的 Git 卡片默认折叠；展开态顶部与 Runtime、Homebrew 使用一致的横向摘要，左侧显示 Git 版本与状态，右侧显示 Git LFS、默认分支与 GitHub CLI 认证概览；其下显示可复制的 Git CLI 路径、自适应双列配置卡片和全宽 GitHub Authentication Configuration 表格。配置卡片包含基础信息、Default Git Identity、签名配置和 Credential Helper Chain，并复用键盘、VoiceOver 与“减少动态效果”交互，不计算就绪度、健康分或配置完成度。
-- Git CLI 可用时，按当前 `PATH` 顺序只取第一个可执行 `git-lfs` 并以固定参数 `version` 读取版本；不扫描任何仓库的 LFS 跟踪规则、对象、缓存或同步状态。未发现保持中性，版本读取失败或超时只产生一条 Git LFS Scan Notice。
+- Git CLI 可用时，按 Machine Tool Search PATH 顺序只取第一个可执行 `git-lfs` 并以固定参数 `version` 读取版本；不扫描任何仓库的 LFS 跟踪规则、对象、缓存或同步状态。未发现保持中性，版本读取失败或超时只产生一条 Git LFS Scan Notice。
 - 签名子扫描只以 `git config --global --get` 查询 `gpg.format`、`user.signingKey`、`commit.gpgSign` 和 `tag.gpgSign`；不枚举、打开或验证 SSH/GPG 密钥，不访问钥匙串或 agent。缺失值显示“未配置”，命令失败只隔离签名详情并产生一条对应 Scan Notice。
 - Credential Helper Chain 只以 `git config --global --null --get-all credential.helper` 读取全部用户级值并保留顺序。Machine Snapshot 在编码前移除标准 helper 参数和路径，只保留 helper 标识；`!` 自定义命令只保存“自定义命令”，空值保存为 chain 重置事实。`store` 与其他 helper 一样只作事实展示，不评分或建议修复。
 - Git 未发现或版本读取失败时跳过 Git LFS、签名和 Credential Helper Chain 子扫描；任一配置子扫描失败仍保留 Git CLI、User Git Configuration 的其他子项、Machine Environment 数据及快照可持久化性。
 - GitHub Authentication Configuration 独立于 Git CLI 扫描。认证文件依次采用非空 `$GH_CONFIG_DIR/hosts.yml`、`$XDG_CONFIG_HOME/gh/hosts.yml`、`$HOME/.config/gh/hosts.yml`，只通过 Machine Access 检查文件存在性；进程级来源只记录非空 `GH_TOKEN` 与 `GITHUB_TOKEN` 是否存在。
-- 按当前 `PATH` 顺序只取第一个可执行 `gh`，固定执行 `gh config get git_protocol --host github.com`；未发现 CLI 或配置保持中性，命令失败或超时只产生一条 GitHub CLI Configuration Scan Notice。Environment Scan 不执行 `gh auth status`、GitHub API 请求或任何联网认证测试，遵循 [ADR-0004](../adr/0004-keep-environment-scan-local.md)。
+- 按 Machine Tool Search PATH 顺序只取第一个可执行 `gh`，固定执行 `gh config get git_protocol --host github.com`；未发现 CLI 或配置保持中性，命令失败或超时只产生一条 GitHub CLI Configuration Scan Notice。Environment Scan 不执行 `gh auth status`、GitHub API 请求或任何联网认证测试，遵循 [ADR-0004](../adr/0004-keep-environment-scan-local.md)。
 - Machine Snapshot 只保存 GitHub CLI 状态、`git_protocol` 和三种认证来源的布尔状态，不保存认证文件路径或内容、账号名及 token。Git 卡片只使用“已配置”“未配置”，不声称来源已登录、已认证或凭据有效。
 
 ## Database Installation 扩展
@@ -222,7 +225,7 @@ Provider 顺序执行并沿用每条外部命令 2 秒超时。单个 Provider �
 
 ### 发现与匹配
 
-1. 按当前 `PATH` 遍历已知数据库服务端可执行文件，Homebrew Database Provider 补充未进入 `PATH` 的安装。
+1. 按 Machine Tool Search PATH 遍历已知数据库服务端可执行文件，Homebrew Database Provider 补充未进入 Machine Tool Search PATH 的安装。
 2. Local Service Database Provider 使用 PID 读取进程真实可执行文件路径，并补充未被 `PATH` 或 Homebrew 发现的正在监听安装。
 3. 以规范化路径和软链接实际目标去重；只有 Local Service 的真实可执行文件路径与 Database Installation 实际路径精确匹配时，才标记为“正在监听”，不按进程名或端口猜测。
 4. 每项展示版本、调用路径和不同的实际路径。版本读取失败时保留 Database Installation，并产生 Scan Notice。
@@ -351,13 +354,18 @@ Database Listening State 为“正在监听”“未监听”或“监听状态�
 - `/etc/shells` 或 POSIX 账户记录读取失败：保留另一来源可建立的 Shell 结果，并分别产生一条 Scan Notice。
 - Terminal Application 与 Shell Installation 扩展读取 V1–V12 快照：忽略旧快照并执行扫描，成功后写入 V13 快照。
 - Package Manager Tool 扩展读取 V1–V13 快照：忽略旧快照并执行扫描，成功后写入 V14 快照。
+- App 进程只有 LaunchServices 最小 PATH，但 Default Login Shell 的交互式初始化加入 Homebrew、NVM 或其他工具目录：Machine Tool Search PATH 使用 Shell 结果，Runtime、包管理器、Git、Corepack、数据库与 PATH 冲突观察共享相同顺序。
+- Shell 初始化在 PATH 帧前后输出欢迎语、插件日志或警告：只解析随机控制字符帧内的 PATH，其他输出不进入 Machine Snapshot。
+- Shell 启动失败、超时、非零退出、输出无帧、PATH 为空或含控制字符：回退到规范化后的 App 进程 PATH，只产生一条 Machine Tool Search PATH Scan Notice，其他 Machine Environment 观察继续执行。
+- Machine Tool Search PATH 来源扩展读取 V1–V14 快照：忽略旧快照并执行扫描，成功后写入 V15 快照。
 
 ## 相关决策
 
 - [ADR-0001：不启用 App Sandbox](../adr/0001-run-without-app-sandbox.md)
 - [ADR-0002：只读扫描并持久化最新环境快照](../adr/0002-read-only-environment-scan-snapshot.md)
-- [ADR-0003：按 PATH 与 Provider 分层发现 Runtime](../adr/0003-source-aware-runtime-discovery.md)
+- [ADR-0003：按 Machine Tool Search PATH 与 Provider 分层发现 Runtime](../adr/0003-source-aware-runtime-discovery.md)
 - [ADR-0004：Environment Scan 保持本地观察](../adr/0004-keep-environment-scan-local.md)
 - [ADR-0005：按安装路径映射数据库 TCP 监听状态](../adr/0005-map-database-listeners-by-installation-path.md)
 - [ADR-0006：按工作目录与 App 路径识别运行时服务归属](../adr/0006-attribute-runtime-services-by-working-directory-and-app-path.md)
 - [ADR-0007：定时刷新动态监听状态](../adr/0007-refresh-dynamic-listening-status.md)
+- [ADR-0013：从 Default Login Shell 初始化 Machine Tool Search PATH](../adr/0013-initialize-machine-tool-search-path-from-login-shell.md)
