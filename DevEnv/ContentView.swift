@@ -3912,7 +3912,7 @@ struct ContentView: View {
                     title: "包管理器",
                     value: snapshot.homebrew.version.map { "Homebrew \($0)" }
                         ?? (snapshot.homebrew.available ? "Homebrew" : "未发现 Homebrew"),
-                    detail: "另发现 \(pathManagers) 个 PATH 工具",
+                    detail: "另发现 \(pathManagers) 个来自 Machine Tool Search PATH 的包管理器工具",
                     assetName: "PackageManagerHomebrewLogo",
                     systemImage: nil,
                     isProblem: !snapshot.homebrew.available,
@@ -5504,7 +5504,7 @@ struct ContentView: View {
                 "PATH 版本冲突",
                 "exclamationmark.triangle.fill",
                 .orange,
-                "当前 PATH 中存在该开发语言的多个不同版本。终端默认使用 PATH 顺序最靠前的版本，其他工具或项目可能解析到不同版本。"
+                "Machine Tool Search PATH 中存在该开发语言的多个不同版本。DevEnv 使用路径顺序最靠前的版本，其他工具或项目可能解析到不同版本。"
             )
         }
         if runtime.state == .failed {
@@ -5674,6 +5674,12 @@ struct ContentView: View {
             } else if expandedEnvironmentCard == .shell {
                 shellCard(snapshot.shellInstallations)
                 environmentCardGrid(snapshot, excluding: .shell)
+            } else if expandedEnvironmentCard == .path {
+                pathCard(
+                    snapshot.machineToolSearchPath,
+                    warningCount: snapshot.runtimes.count { $0.hasPathVersionConflict }
+                )
+                environmentCardGrid(snapshot, excluding: .path)
             } else {
                 environmentCardGrid(snapshot)
             }
@@ -5717,6 +5723,12 @@ struct ContentView: View {
                 }
                 if excludedCard != .shell {
                     shellCard(snapshot.shellInstallations)
+                }
+                if excludedCard != .path {
+                    pathCard(
+                        snapshot.machineToolSearchPath,
+                        warningCount: snapshot.runtimes.count { $0.hasPathVersionConflict }
+                    )
                 }
             }
 
@@ -5809,7 +5821,7 @@ struct ContentView: View {
                 if let executable = git.executable {
                     copyablePath(executable)
                 } else {
-                    Text("当前 PATH 未发现 Git")
+                    Text("Machine Tool Search PATH 未发现 Git")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -6388,7 +6400,7 @@ struct ContentView: View {
             card: .packageManagers,
             title: "包管理器",
             primaryValue: "\(discoveredCount) / 6",
-            subtitle: "Homebrew 与当前 PATH 工具",
+            subtitle: "Homebrew 与 Machine Tool Search PATH",
             systemImage: "shippingbox",
             tint: .orange,
             status: "已发现 \(discoveredCount) / 6",
@@ -6506,7 +6518,11 @@ struct ContentView: View {
         }
     }
 
-    private func pathCard(_ path: [String], warningCount: Int) -> some View {
+    private func pathCard(
+        _ toolSearchPath: MachineToolSearchPathSnapshot,
+        warningCount: Int
+    ) -> some View {
+        let path = toolSearchPath.entries
         let isExpanded = expandedEnvironmentCard == .path
 
         return VStack(alignment: .leading, spacing: 12) {
@@ -6515,17 +6531,17 @@ struct ContentView: View {
                     Button {
                         toggleEnvironmentCard(.path)
                     } label: {
-                        pathExpandedSummary(path, warningCount: warningCount)
+                        pathExpandedSummary(toolSearchPath, warningCount: warningCount)
                     }
                     .buttonStyle(.plain)
                     .accessibilityValue("已展开")
                 } else if path.isEmpty {
-                    pathCardSummary(path, warningCount: warningCount)
+                    pathCardSummary(toolSearchPath, warningCount: warningCount)
                 } else {
                     Button {
                         toggleEnvironmentCard(.path)
                     } label: {
-                        pathCardSummary(path, warningCount: warningCount)
+                        pathCardSummary(toolSearchPath, warningCount: warningCount)
                     }
                     .buttonStyle(.plain)
                     .accessibilityValue(isExpanded ? "已展开" : "已折叠")
@@ -6549,7 +6565,11 @@ struct ContentView: View {
         }
     }
 
-    private func pathExpandedSummary(_ path: [String], warningCount: Int) -> some View {
+    private func pathExpandedSummary(
+        _ toolSearchPath: MachineToolSearchPathSnapshot,
+        warningCount: Int
+    ) -> some View {
+        let path = toolSearchPath.entries
         let tint: Color = warningCount > 0 ? .orange : .green
 
         return HStack(alignment: .center, spacing: 18) {
@@ -6573,9 +6593,7 @@ struct ContentView: View {
                 Text("\(path.count) 个目录")
                     .font(.title2.bold())
                     .monospacedDigit()
-                Text("环境变量路径扫描")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                machineToolSearchPathSourceLabel(toolSearchPath.source)
                 Label(
                     warningCount > 0 ? "\(warningCount) 个开发语言冲突" : "未发现开发语言冲突",
                     systemImage: warningCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
@@ -6607,8 +6625,12 @@ struct ContentView: View {
         .contentShape(Rectangle())
     }
 
-    private func pathCardSummary(_ path: [String], warningCount: Int) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private func pathCardSummary(
+        _ toolSearchPath: MachineToolSearchPathSnapshot,
+        warningCount: Int
+    ) -> some View {
+        let path = toolSearchPath.entries
+        return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -6653,9 +6675,7 @@ struct ContentView: View {
                                 .font(.callout)
                         }
                     }
-                    Text("环境变量路径扫描")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    machineToolSearchPathSourceLabel(toolSearchPath.source)
                 }
             }
             .synchronizedEnvironmentCardUpperContent(minHeight: environmentCardUpperContentHeight)
@@ -6683,6 +6703,12 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+    }
+
+    private func machineToolSearchPathSourceLabel(_ source: MachineToolSearchPathSource) -> some View {
+        Text(source == .defaultLoginShell ? "来自 Default Login Shell" : "来自 App 进程 PATH（回退）")
+            .font(.caption)
+            .foregroundStyle(source == .appProcessFallback ? Color.orange : Color.secondary)
     }
 
     private func pathDetails(_ path: [String]) -> some View {
