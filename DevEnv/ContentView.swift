@@ -331,9 +331,16 @@ func groupLocalServicesForDisplay(
     return groups
 }
 
+// Kept for the existing local-service view tests; Overview uses OverviewAttention instead.
 struct EnvironmentNotice {
     let identities: Set<NoticeIdentity>
     let message: String
+}
+
+enum NoticeIdentity: Hashable {
+    case message(String)
+    case localService(ListenerBinding)
+    case overview(String)
 }
 
 func localServiceNotices(_ services: [LocalServiceSnapshot]) -> [EnvironmentNotice] {
@@ -341,9 +348,7 @@ func localServiceNotices(_ services: [LocalServiceSnapshot]) -> [EnvironmentNoti
         let exposedBindings = Set(group.bindings.filter { !$0.isLoopback })
         guard !exposedBindings.isEmpty else { return nil }
         return EnvironmentNotice(
-            identities: Set(exposedBindings.map {
-                .localService($0)
-            }),
+            identities: Set(exposedBindings.map(NoticeIdentity.localService)),
             message: "\(group.displayName)：\(exposedBindings.count) 个监听项可能可被局域网访问"
         )
     }
@@ -373,12 +378,6 @@ func listenerBindingText(_ binding: ListenerBinding) -> String {
     }
     let address = binding.family == .ipv6 ? "[\(rawAddress)]" : rawAddress
     return "\(address):\(binding.port)"
-}
-
-enum NoticeIdentity: Hashable {
-    case message(String)
-    case localService(ListenerBinding)
-    case overview(String)
 }
 
 @MainActor
@@ -574,27 +573,7 @@ struct ContentView: View {
         let repositoryState: ProjectRepositoryState
     }
 
-    private enum OverviewAttentionDestination {
-        case run(String)
-        case project(String, capability: String)
-        case runtime(String)
-        case database(String)
-        case localServices
-        case environmentRefresh
-        case dynamicRefresh
-        case storage
-    }
-
-    private struct OverviewAttentionItem: Identifiable {
-        let id: String
-        let title: String
-        let detail: String
-        let systemImage: String
-        let tint: Color
-        let priority: Int
-        let occurredAt: Date?
-        let destination: OverviewAttentionDestination
-    }
+    private typealias OverviewAttentionDestination = OverviewAttentionTarget
 
     private enum Page: CaseIterable, Hashable {
         case overview
@@ -671,7 +650,7 @@ struct ContentView: View {
     @State private var expandedEnvironmentCard: EnvironmentCard?
     @State private var showsAllPathEntries = false
     @State private var isShowingNotifications = false
-    @State private var readNoticeIdentities: Set<NoticeIdentity> = []
+    @State private var readNoticeIdentities: Set<String> = []
     @State private var settingsDraft = AutoRefreshSettings()
     @State private var pendingPage: Page?
     @State private var isShowingSettingsExitConfirmation = false
@@ -697,9 +676,7 @@ struct ContentView: View {
     @State private var runConfigurationSaveAttempted = false
     @State private var runConfigurationSourceIdentity: String?
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
-    @State private var pendingProjectRunTrust: ProjectRunTrustRequest?
-    @State private var pendingRunAllConfigurations: [ProjectRunConfiguration] = []
-    @State private var pendingStopAllConfigurationIDs: [String] = []
+    @State private var pendingProjectRunTrust: ProjectRunFrozenStartRequest?
     @State private var selectedRunConfigurationID: String?
     @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
     @State private var runSearchText = ""
@@ -759,17 +736,18 @@ struct ContentView: View {
             updateRefreshActivity()
         }
         .onReceive(NotificationCenter.default.publisher(for: .devEnvStatusBarAction)) { notification in
-            switch notification.userInfo?["action"] as? String {
-            case "open":
+            guard let rawAction = notification.userInfo?["action"] as? String,
+                  let action = DevEnvStatusBarAction(rawValue: rawAction) else { return }
+            switch action {
+            case .open:
                 if let configurationID = notification.userInfo?["configurationID"] as? String {
                     runProjectFilterID = nil
                     runSearchText = ""
                     selectedRunConfigurationID = configurationID
                     selectPage(.runs)
                 }
-            case "runAll": requestRunAllGlobal()
-            case "stopAll": requestStopAllGlobal()
-            default: break
+            case .showRuns:
+                selectPage(.runs)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { _ in
@@ -933,15 +911,15 @@ struct ContentView: View {
 
     private var isConfirmingRunAllTrust: Binding<Bool> {
         Binding(
-            get: { !pendingRunAllConfigurations.isEmpty },
-            set: { if !$0 { pendingRunAllConfigurations.removeAll() } }
+            get: { runCoordinator.pendingBatchTrustReview != nil },
+            set: { if !$0 { runCoordinator.cancelBatchTrustReview() } }
         )
     }
 
     private var isConfirmingStopAll: Binding<Bool> {
         Binding(
-            get: { !pendingStopAllConfigurationIDs.isEmpty },
-            set: { if !$0 { pendingStopAllConfigurationIDs.removeAll() } }
+            get: { runCoordinator.pendingBatchStopIntent != nil },
+            set: { if !$0 { runCoordinator.cancelBatchStop() } }
         )
     }
 
@@ -1002,6 +980,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
+                        .contentShape(Rectangle())
                         .background(
                             selectedPage == .settings ? AppTheme.accent.opacity(0.16) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 8)
@@ -1030,7 +1009,7 @@ struct ContentView: View {
         .controlSize(.regular)
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
-        .background(Color.white.opacity(0.86), in: Capsule())
+        .background(AppTheme.cardRaised, in: Capsule())
         .padding(8)
         .background(AppTheme.canvas.opacity(0.96), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .padding(.top, 12)
@@ -1470,13 +1449,13 @@ struct ContentView: View {
                     Label("全部启动", systemImage: "play.fill")
                 }
                 .buttonStyle(.bordered)
-                .disabled(runAllConfigurations.isEmpty)
+                .disabled(!runCoordinator.canStartBatch(in: visibleRunConfigurations))
                 Button(role: .destructive, action: requestStopAll) {
                     Label("全部停止", systemImage: "stop.fill")
                 }
                 .buttonStyle(.bordered)
                 .tint(.red)
-                .disabled(stopAllConfigurationIDs.isEmpty)
+                .disabled(!runCoordinator.canStopBatch(in: visibleRunConfigurations))
                 Button(action: beginCreatingRunConfiguration) {
                     Label("新建配置", systemImage: "plus")
                 }
@@ -1506,22 +1485,25 @@ struct ContentView: View {
                 selectedRunConfigurationID = visibleRunConfigurations.first?.id
             }
         }
-        .alert("信任并全部启动？", isPresented: isConfirmingRunAllTrust) {
-            Button("取消", role: .cancel) {}
-            Button("信任并全部启动", action: confirmRunAllTrust)
-        } message: {
-            let roots = untrustedProjectRoots(for: pendingRunAllConfigurations)
-            Text("将信任 \(roots.count) 个 Project Root，并启动 \(pendingRunAllConfigurations.count) 个运行配置：\n\n\(roots.joined(separator: "\n"))\n\n确认后，这些 Project Root 的后续运行不再重复询问。")
+        .alert(
+            "信任并全部启动？",
+            isPresented: isConfirmingRunAllTrust,
+            presenting: runCoordinator.pendingBatchTrustReview
+        ) { _ in
+            Button("取消", role: .cancel) { runCoordinator.cancelBatchTrustReview() }
+            Button("信任并全部启动") { runCoordinator.confirmBatchTrustAndStart() }
+        } message: { review in
+            Text(batchTrustReviewMessage(review))
         }
-        .alert("停止全部活动会话？", isPresented: isConfirmingStopAll) {
-            Button("取消", role: .cancel) {}
-            Button("全部停止", role: .destructive) {
-                let configurationIDs = pendingStopAllConfigurationIDs
-                pendingStopAllConfigurationIDs.removeAll()
-                configurationIDs.forEach { runCoordinator.stop(configurationID: $0) }
-            }
-        } message: {
-            Text("将停止 \(pendingStopAllConfigurationIDs.count) 个活动会话，包括取消正在进行的重启。")
+        .alert(
+            "停止全部活动会话？",
+            isPresented: isConfirmingStopAll,
+            presenting: runCoordinator.pendingBatchStopIntent
+        ) { _ in
+            Button("取消", role: .cancel) { runCoordinator.cancelBatchStop() }
+            Button("全部停止", role: .destructive) { runCoordinator.confirmBatchStop() }
+        } message: { intent in
+            Text("将停止 \(intent.executionIDs.count) 个活动会话，包括取消正在进行的重启。")
         }
     }
 
@@ -1573,6 +1555,7 @@ struct ContentView: View {
                             .layoutPriority(1)
                     }
                 }
+                .clipped()
                 runSessionStatusBar
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1620,78 +1603,33 @@ struct ContentView: View {
             ?? visibleRunConfigurations.first
     }
 
-    private var runAllConfigurations: [ProjectRunConfiguration] {
-        visibleRunConfigurations.filter { configuration in
-            guard configuration.isEnabled,
-                  runCoordinator.session(for: configuration.id)?.state.isLive != true,
-                  let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
-                return false
-            }
-            return !project.availability.isUnavailable
-        }
-    }
-
-    private var stopAllConfigurationIDs: [String] {
-        visibleRunConfigurations.compactMap { configuration in
-            guard let state = runCoordinator.session(for: configuration.id)?.state,
-                  state.isLive,
-                  state != .stopping else { return nil }
-            return configuration.id
-        }
-    }
-
     private func requestRunAll() {
-        let configurations = runAllConfigurations
-        guard !configurations.isEmpty else { return }
-        guard !untrustedProjectRoots(for: configurations).isEmpty else {
-            runAll(configurations)
-            return
-        }
-        pendingRunAllConfigurations = configurations
+        guard runCoordinator.canStartBatch(in: visibleRunConfigurations) else { return }
+        runCoordinator.startBatch(in: visibleRunConfigurations)
     }
 
-    private func requestRunAllGlobal() {
-        let configurations = runCoordinator.runConfigurationsToStart()
-        guard !configurations.isEmpty else { return }
-        selectPage(.runs)
-        guard !untrustedProjectRoots(for: configurations).isEmpty else {
-            runAll(configurations)
-            return
-        }
-        pendingRunAllConfigurations = configurations
-    }
+    private func batchTrustReviewMessage(_ review: ProjectRunBatchTrustReview) -> String {
+        let requestDetails = review.intent.startRequests.map { request in
+            """
+            配置：\(request.configuration.name)
+            Project Root：\(request.projectRoot)
+            完整命令：
+            \(request.command)
+            工作目录：
+            \(request.workingDirectory)
+            """
+        }.joined(separator: "\n\n")
+        return """
+        将信任 \(review.projectRootsRequiringTrust.count) 个 Project Root，并启动 \(review.intent.startRequests.count) 个运行配置。
 
-    private func confirmRunAllTrust() {
-        let configurations = pendingRunAllConfigurations
-        let roots = untrustedProjectRoots(for: configurations)
-        pendingRunAllConfigurations.removeAll()
-        guard roots.allSatisfy(projectsModel.trustProjectRunRoot) else { return }
-        runAll(configurations)
-    }
+        \(requestDetails)
 
-    private func runAll(_ configurations: [ProjectRunConfiguration]) {
-        for configuration in configurations
-        where runCoordinator.session(for: configuration.id)?.state.isLive != true {
-            guard let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
-                continue
-            }
-            _ = runCoordinator.run(configuration, project: project)
-        }
-    }
-
-    private func untrustedProjectRoots(for configurations: [ProjectRunConfiguration]) -> [String] {
-        Set(configurations.compactMap { configuration in
-            projectsModel.records.first { $0.id == configuration.projectID }?.path
-        }.filter { !projectsModel.isProjectRunTrusted($0) }).sorted()
+        确认后，成功保存 Project Trust 的 Project Root 后续运行不再重复询问。
+        """
     }
 
     private func requestStopAll() {
-        pendingStopAllConfigurationIDs = stopAllConfigurationIDs
-    }
-
-    private func requestStopAllGlobal() {
-        selectPage(.runs)
-        pendingStopAllConfigurationIDs = runCoordinator.activeRunConfigurationIDs
+        runCoordinator.requestBatchStop(in: visibleRunConfigurations)
     }
 
     private func selectFirstRunConfigurationIfNeeded() {
@@ -3528,8 +3466,9 @@ struct ContentView: View {
 
     private func overviewPage(_ snapshot: MachineSnapshot) -> some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
-            let runs = overviewRuns(snapshot)
-            let attention = overviewAttentionItems(snapshot, runs: runs, now: context.date)
+            let result = overviewAttention(snapshot, now: context.date)
+            let runs = result.runs.compactMap(overviewRun)
+            let attention = result.items
 
             VStack(alignment: .leading, spacing: 12) {
                 overviewHeader(snapshot, now: context.date)
@@ -4096,232 +4035,46 @@ struct ContentView: View {
     }
 
     private func overviewRuns(_ snapshot: MachineSnapshot) -> [OverviewRun] {
-        let projects = Dictionary(uniqueKeysWithValues: projectsModel.records.map { ($0.id, $0) })
-        return runCoordinator.runConfigurations().compactMap { configuration in
-            guard let project = projects[configuration.projectID],
-                  let session = runCoordinator.session(for: configuration.id),
-                  session.state.isLive || session.failureMessage != nil else { return nil }
-            let bindings: [ListenerBinding]? = if session.state == .running,
-                                                  let processIDs = session.ownedProcessIDs {
-                Array(Set(snapshot.localServices
-                    .filter { processIDs.contains(pid_t($0.pid)) }
-                    .flatMap(\.bindings)))
-                    .sorted { lhs, rhs in
-                        lhs.port == rhs.port ? lhs.address < rhs.address : lhs.port < rhs.port
-                    }
-            } else { nil }
-            return OverviewRun(
+        overviewAttention(snapshot, now: Date()).runs.compactMap(overviewRun)
+    }
+
+    private func overviewAttention(_ snapshot: MachineSnapshot, now: Date) -> OverviewAttentionResult {
+        let runs = runCoordinator.runConfigurations().compactMap { configuration -> OverviewAttentionRunInput? in
+            guard let project = projectsModel.records.first(where: { $0.id == configuration.projectID }),
+                  let session = runCoordinator.session(for: configuration.id) else { return nil }
+            return OverviewAttentionRunInput(
                 configuration: configuration,
                 project: project,
-                session: session,
-                bindings: bindings,
+                state: session.state,
+                lastSuccessfulCommand: session.lastSuccessfulCommand,
+                startedAt: session.startedAt,
+                failureMessage: session.failureMessage,
+                failureAt: session.failureAt,
+                ownedProcessIDs: session.ownedProcessIDs,
+                physicalMemoryBytes: session.physicalMemoryBytes,
                 repositoryState: ProjectRepositoryState.read(projectRoot: project.path)
             )
         }
-        .sorted { lhs, rhs in
-            let lhsStarting = lhs.session.state == .starting
-            let rhsStarting = rhs.session.state == .starting
-            if lhsStarting != rhsStarting { return lhsStarting }
-            let lhsDate = lhs.session.startedAt ?? .distantPast
-            let rhsDate = rhs.session.startedAt ?? .distantPast
-            if lhsDate != rhsDate { return lhsDate > rhsDate }
-            return lhs.configuration.id < rhs.configuration.id
-        }
+        return OverviewAttention.project(OverviewAttentionInput(
+            snapshot: snapshot,
+            runs: runs,
+            analyses: projectsModel.analyses,
+            staleProjectIDs: projectsModel.staleProjectIDs,
+            refreshingProjectIDs: projectsModel.refreshingProjectIDs,
+            scanError: model.scanError,
+            dynamicRefreshError: model.dynamicRefreshError,
+            dynamicStatusRefreshedAt: model.dynamicStatusRefreshedAt
+        ), now: now)
     }
 
-    private func overviewAttentionItems(
-        _ snapshot: MachineSnapshot,
-        runs: [OverviewRun],
-        now: Date
-    ) -> [OverviewAttentionItem] {
-        let configurations = runCoordinator.runConfigurations()
-        let projects = Dictionary(uniqueKeysWithValues: projectsModel.records.map { ($0.id, $0) })
-        var items: [OverviewAttentionItem] = configurations.compactMap { configuration in
-            guard let session = runCoordinator.session(for: configuration.id),
-                  let message = session.failureMessage else { return nil }
-            return OverviewAttentionItem(
-                id: "run-failure:\(configuration.id)",
-                title: "\(projects[configuration.projectID]?.title ?? configuration.name) 运行失败",
-                detail: "\(configuration.name)：\(message)",
-                systemImage: "exclamationmark.octagon.fill",
-                tint: .red,
-                priority: 0,
-                occurredAt: session.failureAt,
-                destination: .run(configuration.id)
-            )
-        }
-
-        let dynamicUpdatedAt = model.dynamicStatusRefreshedAt ?? snapshot.scannedAt
-        if let error = model.dynamicRefreshError {
-            items.append(OverviewAttentionItem(
-                id: "dynamic-refresh-failed",
-                title: "运行状态刷新失败",
-                detail: error,
-                systemImage: "clock.badge.exclamationmark",
-                tint: .orange,
-                priority: 1,
-                occurredAt: dynamicUpdatedAt,
-                destination: .dynamicRefresh
-            ))
-        } else if now.timeIntervalSince(dynamicUpdatedAt) > 60 {
-            items.append(OverviewAttentionItem(
-                id: "dynamic-status-stale",
-                title: "运行状态已过期",
-                detail: "超过 60 秒没有成功刷新监听状态",
-                systemImage: "clock.badge.exclamationmark",
-                tint: .orange,
-                priority: 1,
-                occurredAt: dynamicUpdatedAt,
-                destination: .dynamicRefresh
-            ))
-        }
-
-        if let error = model.scanError {
-            items.append(OverviewAttentionItem(
-                id: "environment-scan-failed",
-                title: "环境扫描失败",
-                detail: error,
-                systemImage: "exclamationmark.triangle.fill",
-                tint: .orange,
-                priority: 1,
-                occurredAt: snapshot.scannedAt,
-                destination: .environmentRefresh
-            ))
-        } else if now.timeIntervalSince(snapshot.scannedAt) > 24 * 60 * 60 {
-            items.append(OverviewAttentionItem(
-                id: "environment-snapshot-stale",
-                title: "环境扫描结果已过期",
-                detail: "超过 24 小时没有完成一次环境扫描",
-                systemImage: "clock.badge.exclamationmark",
-                tint: .orange,
-                priority: 1,
-                occurredAt: snapshot.scannedAt,
-                destination: .environmentRefresh
-            ))
-        }
-
-        let runtimeCapabilities: Set<String> = ["node", "python", "go", "java", "rust", "ruby", "lua"]
-        let databaseCapabilities: Set<String> = ["postgresql", "mysql", "mariadb", "mongodb", "redis", "mysql-compatible"]
-        let activeProjectIDs = Set(runs.filter { $0.session.state.isLive }.map { $0.project.id })
-        var runtimeProblemIDs: Set<String> = []
-
-        for projectID in activeProjectIDs.sorted() {
-            guard let project = projects[projectID], let analysis = projectsModel.analyses[projectID] else { continue }
-            for requirement in analysis.requirements {
-                let itemID = "project-requirement:\(projectID):\(requirement.capability)"
-                if runtimeCapabilities.contains(requirement.capability)
-                    && (requirement.satisfaction == .unsatisfied
-                        || requirement.satisfaction == .declarationConflict) {
-                    runtimeProblemIDs.insert(itemID)
-                    items.append(OverviewAttentionItem(
-                        id: itemID,
-                        title: "\(project.title) 的 \(projectCapabilityTitle(requirement.capability)) 要求未满足",
-                        detail: requirement.satisfaction == .declarationConflict
-                            ? "项目内存在无法同时满足的版本声明"
-                            : "要求 \(requirement.expression)",
-                        systemImage: "terminal.fill",
-                        tint: .red,
-                        priority: 2,
-                        occurredAt: nil,
-                        destination: .project(projectID, capability: requirement.capability)
-                    ))
-                    continue
-                }
-
-                if databaseCapabilities.contains(requirement.capability) {
-                    if requirement.satisfaction == .unsatisfied {
-                        items.append(OverviewAttentionItem(
-                            id: itemID,
-                            title: "\(project.title) 缺少 \(projectCapabilityTitle(requirement.capability))",
-                            detail: "未发现满足项目要求的数据库安装",
-                            systemImage: "cylinder.split.1x2.fill",
-                            tint: .red,
-                            priority: 2,
-                            occurredAt: nil,
-                            destination: .database(databaseDestinationID(requirement.capability))
-                        ))
-                    } else if !requirement.matches.isEmpty,
-                              requirement.matches.allSatisfy({ $0.listeningState == .notListening }) {
-                        items.append(OverviewAttentionItem(
-                            id: itemID,
-                            title: "\(projectCapabilityTitle(requirement.capability)) 当前未监听",
-                            detail: "\(project.title) 的数据库要求已匹配安装，但没有 TCP Listener Binding",
-                            systemImage: "cylinder.split.1x2.fill",
-                            tint: .red,
-                            priority: 2,
-                            occurredAt: nil,
-                            destination: .database(databaseDestinationID(requirement.capability))
-                        ))
-                    }
-                }
-            }
-        }
-
-        for projectID in activeProjectIDs.sorted() {
-            guard let project = projects[projectID], let analysis = projectsModel.analyses[projectID] else { continue }
-            for requirement in analysis.requirements where runtimeCapabilities.contains(requirement.capability) {
-                let itemID = "project-requirement:\(projectID):\(requirement.capability)"
-                guard !runtimeProblemIDs.contains(itemID),
-                      let runtime = snapshot.runtimes.first(where: { $0.id == requirement.capability }),
-                      runtime.hasPathVersionConflict else {
-                    continue
-                }
-                let effectiveVersion = runtime.installations.first(where: \.isEffective)?.version ?? "未知"
-                items.append(OverviewAttentionItem(
-                    id: "path-conflict:\(projectID):\(requirement.capability)",
-                    title: "\(projectCapabilityTitle(requirement.capability)) PATH 版本冲突",
-                    detail: "\(project.title)：要求 \(requirement.expression) · 当前生效 \(effectiveVersion)",
-                    systemImage: "point.3.connected.trianglepath.dotted",
-                    tint: .orange,
-                    priority: 4,
-                    occurredAt: nil,
-                    destination: .runtime(requirement.capability)
-                ))
-            }
-        }
-
-        for run in runs {
-            let exposed = Array(Set((run.bindings ?? []).filter { !$0.isLoopback })).sorted {
-                $0.port == $1.port ? $0.address < $1.address : $0.port < $1.port
-            }
-            guard !exposed.isEmpty else { continue }
-            items.append(OverviewAttentionItem(
-                id: "exposed-run:\(run.id)",
-                title: "\(run.project.title) 可能对局域网开放",
-                detail: "监听地址：\(exposed.map(listenerBindingText).joined(separator: " · "))",
-                systemImage: "antenna.radiowaves.left.and.right",
-                tint: .orange,
-                priority: 3,
-                occurredAt: run.session.startedAt,
-                destination: .localServices
-            ))
-        }
-
-        if let free = snapshot.system.diskFreeBytes, free < 20 * 1_024 * 1_024 * 1_024 {
-            items.append(OverviewAttentionItem(
-                id: "low-disk-space",
-                title: "系统卷可用空间不足",
-                detail: "当前可用 \(byteCount(free))，低于 20 GB",
-                systemImage: "internaldrive.fill",
-                tint: .orange,
-                priority: 5,
-                occurredAt: snapshot.scannedAt,
-                destination: .storage
-            ))
-        }
-
-        return items.sorted { lhs, rhs in
-            if lhs.priority != rhs.priority { return lhs.priority < rhs.priority }
-            let lhsDate = lhs.occurredAt ?? .distantPast
-            let rhsDate = rhs.occurredAt ?? .distantPast
-            if lhsDate != rhsDate { return lhsDate > rhsDate }
-            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-        }
+    private func overviewRun(_ projection: OverviewRunProjection) -> OverviewRun? {
+        guard let session = runCoordinator.session(for: projection.id) else { return nil }
+        return OverviewRun(configuration: projection.configuration, project: projection.project, session: session, bindings: projection.bindings, repositoryState: projection.repositoryState)
     }
 
     private var currentOverviewAttentionItems: [OverviewAttentionItem] {
         guard let snapshot = model.snapshot else { return [] }
-        return overviewAttentionItems(snapshot, runs: overviewRuns(snapshot), now: Date())
+        return overviewAttention(snapshot, now: Date()).items
     }
 
     private func navigate(to destination: OverviewAttentionDestination) {
@@ -4332,7 +4085,7 @@ struct ContentView: View {
             selectPage(.runs)
         case let .project(projectID, capability):
             selectedProjectID = projectID
-            expandedProjectRequirementID = capability
+            if let capability { expandedProjectRequirementID = capability }
             selectPage(.projects)
         case let .runtime(runtimeID):
             expandedRuntimeID = runtimeID
@@ -7195,18 +6948,8 @@ struct ContentView: View {
         readNoticeIdentities = currentNoticeIdentities
     }
 
-    private var currentNoticeIdentities: Set<NoticeIdentity> {
-        Set(currentOverviewAttentionItems.map { .overview($0.id) })
-    }
-
-    private var currentEnvironmentNotices: [EnvironmentNotice] {
-        guard let snapshot = model.snapshot else { return [] }
-        let messages = snapshot.runtimes
-            .filter(\.hasPathVersionConflict)
-            .map { "\($0.name)：PATH 版本冲突" }
-            + snapshot.issues
-        return messages.map { EnvironmentNotice(identities: [.message($0)], message: $0) }
-            + localServiceNotices(snapshot.localServices)
+    private var currentNoticeIdentities: Set<String> {
+        Set(currentOverviewAttentionItems.map(\.id))
     }
 
     private func effectiveVersion(for runtime: RuntimeSnapshot) -> String {
@@ -7237,6 +6980,32 @@ struct ContentView: View {
         return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory)
     }
 
+}
+
+private extension OverviewAttentionItem {
+    var systemImage: String {
+        switch kind {
+        case .runFailure: "exclamationmark.octagon.fill"
+        case .runEvidence: "questionmark.circle.fill"
+        case .refresh: "clock.badge.exclamationmark"
+        case .projectRequirementsEvidence: "doc.questionmark"
+        case .projectRequirement:
+            target.isDatabaseTarget ? "cylinder.split.1x2.fill" : "terminal.fill"
+        case .exposedPort: "antenna.radiowaves.left.and.right"
+        case .pathConflict: "point.3.connected.trianglepath.dotted"
+        case .disk: "internaldrive.fill"
+        }
+    }
+
+    var tint: Color { severity == .critical ? .red : .orange }
+    var destination: OverviewAttentionTarget { target }
+}
+
+private extension OverviewAttentionTarget {
+    var isDatabaseTarget: Bool {
+        if case .database = self { return true }
+        return false
+    }
 }
 
 private struct RuntimeHelpIcon: View {

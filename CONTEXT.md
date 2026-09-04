@@ -32,6 +32,10 @@ _Avoid_: Project Snapshot, Project Files
 DevEnv 保存、归属于一个 Project Record 的运行意图，包含稳定身份、名称、命令、Project Root 相对工作目录和可选来源身份；它不是 Project Requirement 或 Project Requirements Summary，不表示项目可运行，也不执行命令。
 _Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
 
+**Project Run Batch Intent**:
+用户明确触发批量启动或停止时，从触发入口的当前作用域解析并冻结、仅用于本次提交的一组单项启动请求或 Active Project Run Execution；运行页作用域包含当前项目筛选与搜索结果，状态栏作用域为全部项目。它不是持久化运行组或运行编排，各目标按单项语义独立处理。
+_Avoid_: Saved Run Group, Live Filter Query, All Configurations, Atomic Run, Run Orchestration, Batch Run History
+
 **Disabled Project Run Configuration**:
 由用户暂时停用、不可通过任何入口启动且持久保留以便后续重新启用的 Project Run Configuration；禁用状态只属于该配置，不改变所属 Project Record 或同项目的其他运行配置。
 _Avoid_: Disabled Project, Deleted Project Run Configuration
@@ -41,15 +45,23 @@ DevEnv 从项目声明中只读识别、可由用户选择保存为 Project Run 
 _Avoid_: Auto Run, Project Requirement, Runnable Status
 
 **Project Run Session**:
-用户从已保存的 Project Run Configuration 显式启动、仅存在于当前 App 进程中的交互式 PTY 会话；它保留本次实际启动命令、启动时间、进程状态、内存中的终端输出和退出码，但不持久化为 Project Record 或 Machine Snapshot。
-_Avoid_: Shell Session, Terminal Application, Machine Snapshot
+用户从已保存的 Project Run Configuration 显式启动后、仅存在于当前 App 进程中的交互式终端上下文；同一配置后续的启动或重启可以复用该上下文及其内存终端输出，但每次运行属于不同的 Project Run Execution，Session 不持久化为 Project Record 或 Machine Snapshot。
+_Avoid_: Shell Session, Terminal Application, Machine Snapshot, Project Run Execution
+
+**Project Run Execution**:
+Project Run Session 中一次启动或重启的独立运行代次，具有自身稳定身份与冻结的完整命令、Project Root 和解析后的工作目录；它从启动尝试开始，到退出、用户停止或启动失败时结束，同一 Session 的后续运行属于新的 Execution。
+_Avoid_: Project Run Session, Configuration Run State, Process ID
+
+**Active Project Run Execution**:
+处于“启动中”“运行中”“停止中”“停止失败”“重启中”或“重启失败”的 Project Run Execution；“已结束”“已退出”和“启动失败”的 Execution 不属于活动运行。
+_Avoid_: Running Project, Active Project, Active Project Run Session
 
 **Active Project Run Session**:
-处于“启动中”“运行中”“停止中”“停止失败”“重启中”或“重启失败”的 Project Run Session；“已结束”“已退出”和“启动失败”的会话不属于活动会话。
-_Avoid_: Running Project, Active Project
+当前承载 Active Project Run Execution 的 Project Run Session；没有当前 Execution，或当前 Execution 已结束、已退出或启动失败的 Session 不属于活动会话。
+_Avoid_: Running Project, Active Project, Active Project Run Execution
 
 **Project Run Failure**:
-Project Run Session 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
+Project Run Execution 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
 _Avoid_: Project Health, Project Error
 
 **Status Bar Residency**:
@@ -73,12 +85,16 @@ _Avoid_: Project Port, Inferred Session Port
 _Avoid_: Git Tooling State, Launch Branch
 
 **Overview Attention**:
-与 Active Project Run Session 或尚未清除的 Project Run Failure 相关，或会降低总览可信度与整机安全性的明确风险集合；未运行项目的要求缺口和普通未安装、未启动状态不属于该集合。
+与 Active Project Run Session 或尚未清除的 Project Run Failure 相关，或会降低总览可信度与整机安全性的明确风险集合；Active Project Run Session 所属 Project Root 的 Requirement Satisfaction State 为“未满足”“声明冲突”或“无法判断”时均属于该集合，其中“无法判断”只表示证据不足；已匹配的 Database Installation 没有“正在监听”结果时，全部明确“未监听”表示当前未监听，含“监听状态未知”则只表示监听证据不足；处于运行中但无法确证进程所有权的 Project Run Session 也以证据不足进入该集合。未运行项目的要求缺口和普通未安装、未启动状态不属于该集合。
 _Avoid_: Machine Health, Environment Issue, All Notices
 
 **Overview Attention Item**:
-Overview Attention 中一个可独立导航的风险：项目要求按 Project Root 与能力唯一，运行失败按 Project Run Session 唯一，端口暴露按会话汇总，扫描与磁盘风险各自唯一。
+Overview Attention 中一个可独立导航的风险：项目要求按 Project Root 与能力唯一，Project Requirements 缺失或过期证据按 Project Root 唯一且不替代上次已知风险，其中刷新中的暂态不算证据缺失；运行失败和运行证据不足各按 Project Run Session 唯一，端口暴露按会话汇总，扫描与磁盘风险各自唯一。Overview Attention Item 依次按运行失败、运行证据不足、全局刷新失败或过期、Project Requirements 证据缺失或过期、要求未满足或声明冲突或无法判断、端口暴露、PATH 冲突和磁盘不足排序；同类风险按发生时间倒序、再按标题稳定排序，无发生时间的项目排在有时间项目之后。
 _Avoid_: Notice Count, Duplicate Session Warning
+
+**Overview Attention Severity**:
+Overview Attention Item 的严重度只有 `critical` 与 `warning`：运行失败、要求未满足或声明冲突、数据库全部明确未监听属于 `critical`，证据不足、结果过期、端口暴露、PATH 冲突和磁盘不足属于 `warning`。
+_Avoid_: Priority, Health Level
 
 **Environment Snapshot Freshness**:
 最近一次成功 Environment Scan 距今不超过 24 小时；超过该时间的 Machine Snapshot 属于过期结果。
@@ -140,12 +156,16 @@ _Avoid_: Issue, Error, Health Problem
 一次 Environment Scan 产生的、描述主机基础信息与当前 App 运行用户可见开发工具状态的结果。
 _Avoid_: Environment, System Profile
 
+**Machine Tool Search PATH**:
+DevEnv 解释 Machine Environment 中命令解析优先级时采用的路径序列：优先使用当前用户的 Default Login Shell 完成交互式登录初始化后形成的有效 `PATH`；无法可靠取得时退回 App 进程继承的 `PATH` 并产生 Scan Notice。它不是某个既有终端窗口、Project Root、direnv 或其他目录局部上下文的动态 `PATH`。
+_Avoid_: App PATH, Terminal PATH, Project PATH
+
 **Package Manager Tool**:
-当前 App `PATH` 对 uv、Bun、npm、pnpm 或 Yarn 首先解析到的可执行工具，包含调用路径、可确认的实际路径、版本和读取状态；它不枚举未进入 `PATH` 的其他安装。
+Machine Tool Search PATH 对 uv、Bun、npm、pnpm 或 Yarn 首先解析到的可执行工具，包含调用路径、可确认的实际路径、版本和读取状态；它不枚举未进入 Machine Tool Search PATH 的其他安装。
 _Avoid_: Runtime Installation, Package, Package Manager Environment
 
 **Corepack Proxy Configuration**:
-当前 `PATH` 已存在指向 Corepack 的 pnpm 或 Yarn 代理；Environment Scan 只记录已配置事实和路径，不执行代理获取版本，也不触发下载或激活。
+Machine Tool Search PATH 已存在指向 Corepack 的 pnpm 或 Yarn 代理；Environment Scan 只记录已配置事实和路径，不执行代理获取版本，也不触发下载或激活。
 _Avoid_: Installed Package Manager, Available Version
 
 **Project Package Manager Requirement**:
@@ -189,15 +209,15 @@ Environment Scan 对 Database Installation 发现完整性的观察结果，取�
 _Avoid_: Installation State, Installed Status
 
 **Database Provider**:
-从已知工具、平台索引或 Local Service 的真实可执行文件路径中，发现未进入当前 `PATH` 的 Database Installation 的来源。
+从已知工具、平台索引或 Local Service 的真实可执行文件路径中，发现未进入 Machine Tool Search PATH 的 Database Installation 的来源。
 _Avoid_: Database Scanner, Database Manager
 
 **Runtime Provider**:
-从已知工具或平台索引中发现未进入当前 `PATH` 的 Runtime Installation 的来源。
+从已知工具或平台索引中发现未进入 Machine Tool Search PATH 的 Runtime Installation 的来源。
 _Avoid_: Scanner, Version Manager
 
 **Runtime Installation Source**:
-Environment Scan 能够确认的 Runtime Installation 管理或发现来源；它与该安装是否进入 `PATH`、是否当前生效无关，不声称还原历史安装操作。
+Environment Scan 能够确认的 Runtime Installation 管理或发现来源；它与该安装是否进入 Machine Tool Search PATH、是否当前生效无关，不声称还原历史安装操作。
 _Avoid_: Installation Method, Runtime State
 
 **Local Service**:
@@ -213,11 +233,11 @@ Local Service 监听 TCP 连接的地址、端口和地址族组合。
 _Avoid_: Port, Endpoint
 
 **Effective Runtime Installation**:
-当前 `PATH` 对某类语言运行时优先解析到的 Runtime Installation。
+Machine Tool Search PATH 对某类语言运行时优先解析到的 Runtime Installation。
 _Avoid_: Current Runtime, Active Runtime
 
 **Runtime Conflict**:
-同类语言运行时在当前 `PATH` 中存在多个版本不同的 Runtime Installation，因 `PATH` 顺序可能产生不同解析结果的状态。Provider 发现但未进入 `PATH` 的安装不构成冲突。
+同类语言运行时在 Machine Tool Search PATH 中存在多个版本不同的 Runtime Installation，因路径顺序可能产生不同解析结果的状态。Provider 发现但未进入 Machine Tool Search PATH 的安装不构成冲突。
 _Avoid_: Version Conflict, PATH Error
 
 **Homebrew Availability**:
