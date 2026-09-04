@@ -290,6 +290,181 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(factory.engines.isEmpty)
     }
 
+    func testBatchStartWithMixedTrustCreatesOneFrozenReviewWithoutLaunching() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let trustedRoot = directory.appendingPathComponent("trusted")
+        let untrustedRoot = directory.appendingPathComponent("untrusted")
+        let untrustedWorkingDirectory = untrustedRoot.appendingPathComponent("app")
+        try FileManager.default.createDirectory(at: trustedRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: untrustedWorkingDirectory, withIntermediateDirectories: true)
+        let trusted = ProjectRunConfiguration(
+            id: "trusted",
+            projectID: trustedRoot.path,
+            name: "Trusted API",
+            command: "swift run api --port 8080",
+            workingDirectory: "."
+        )
+        let untrusted = ProjectRunConfiguration(
+            id: "untrusted",
+            projectID: untrustedRoot.path,
+            name: "Untrusted Web",
+            command: "pnpm run dev -- --host 127.0.0.1",
+            workingDirectory: "app"
+        )
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: [trusted, untrusted])
+        document.addDirect([trustedRoot.path, untrustedRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        XCTAssertTrue(projectsModel.trustProjectRunRoot(trustedRoot.path))
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+
+        coordinator.startBatch(in: [trusted, untrusted])
+
+        let review = try XCTUnwrap(coordinator.pendingBatchTrustReview)
+        XCTAssertEqual(review.projectRootsRequiringTrust, [untrustedRoot.path])
+        XCTAssertEqual(review.intent.startRequests, [
+            ProjectRunTrustRequest(
+                configuration: trusted,
+                projectRoot: trustedRoot.path,
+                command: trusted.command,
+                workingDirectory: trustedRoot.path
+            ),
+            ProjectRunTrustRequest(
+                configuration: untrusted,
+                projectRoot: untrustedRoot.path,
+                command: untrusted.command,
+                workingDirectory: untrustedWorkingDirectory.path
+            ),
+        ])
+        XCTAssertTrue(factory.engines.isEmpty)
+        XCTAssertNil(coordinator.session(for: trusted.id))
+        XCTAssertNil(coordinator.session(for: untrusted.id))
+    }
+
+    func testCancellingBatchTrustReviewDiscardsIntentWithoutTrustOrLaunches() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("untrusted")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(
+            id: "cancelled",
+            projectID: projectRoot.path,
+            name: "Cancelled",
+            command: "npm run cancelled",
+            workingDirectory: "."
+        )
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: [configuration])
+        document.addDirect([projectRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        coordinator.startBatch(in: [configuration])
+        XCTAssertNotNil(coordinator.pendingBatchTrustReview)
+
+        coordinator.cancelBatchTrustReview()
+
+        XCTAssertNil(coordinator.pendingBatchTrustReview)
+        XCTAssertFalse(projectsModel.isProjectRunTrusted(projectRoot.path))
+        XCTAssertTrue(try store.load().trustedProjectRoots.isEmpty)
+        XCTAssertTrue(factory.engines.isEmpty)
+        XCTAssertNil(coordinator.session(for: configuration.id))
+    }
+
+    func testConfirmingBatchTrustPersistsRootsIndependentlyAndContinuesAfterFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let alreadyTrustedRoot = directory.appendingPathComponent("already-trusted")
+        let failingRoot = directory.appendingPathComponent("failing")
+        let successfulRoot = directory.appendingPathComponent("successful")
+        for root in [alreadyTrustedRoot, failingRoot, successfulRoot] {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        }
+        let alreadyTrusted = ProjectRunConfiguration(
+            id: "already-trusted",
+            projectID: alreadyTrustedRoot.path,
+            name: "Already Trusted",
+            command: "run already trusted",
+            workingDirectory: "."
+        )
+        let failing = ProjectRunConfiguration(
+            id: "failing",
+            projectID: failingRoot.path,
+            name: "Failing Trust",
+            command: "run failing trust",
+            workingDirectory: "."
+        )
+        let successful = ProjectRunConfiguration(
+            id: "successful",
+            projectID: successfulRoot.path,
+            name: "Successful Trust",
+            command: "run successful trust",
+            workingDirectory: "."
+        )
+        let configurations = [alreadyTrusted, failing, successful]
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: configurations)
+        document.addDirect([alreadyTrustedRoot.path, failingRoot.path, successfulRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        projectsModel.refreshProjects()
+        for _ in 0 ..< 100 where projectsModel.records.contains(where: { $0.availability == .unknown }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        var trustedRoots: Set<String> = [alreadyTrustedRoot.path]
+        var persistenceAttempts: [String] = []
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler(),
+            isProjectRunTrusted: { trustedRoots.contains($0) },
+            trustProjectRunRoot: { projectRoot in
+                persistenceAttempts.append(projectRoot)
+                guard projectRoot != failingRoot.path else { return false }
+                trustedRoots.insert(projectRoot)
+                return true
+            }
+        )
+        coordinator.startBatch(in: configurations)
+        XCTAssertEqual(
+            coordinator.pendingBatchTrustReview?.projectRootsRequiringTrust,
+            [failingRoot.path, successfulRoot.path]
+        )
+
+        coordinator.confirmBatchTrustAndStart()
+
+        XCTAssertNil(coordinator.pendingBatchTrustReview)
+        XCTAssertEqual(persistenceAttempts, [failingRoot.path, successfulRoot.path])
+        XCTAssertEqual(trustedRoots, [alreadyTrustedRoot.path, successfulRoot.path])
+        XCTAssertEqual(coordinator.session(for: alreadyTrusted.id)?.state, .running)
+        XCTAssertNil(coordinator.session(for: failing.id))
+        XCTAssertEqual(coordinator.session(for: successful.id)?.state, .running)
+        XCTAssertEqual(factory.engines.count, 2)
+        XCTAssertEqual(
+            factory.engines.flatMap(\.launches).map(\.arguments),
+            [
+                ["-i", "-c", alreadyTrusted.command],
+                ["-i", "-c", successful.command],
+            ]
+        )
+    }
+
     func testBatchStartIntentUsesOnlySuppliedEligibleScope() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

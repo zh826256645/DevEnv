@@ -677,7 +677,6 @@ struct ContentView: View {
     @State private var runConfigurationSourceIdentity: String?
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
     @State private var pendingProjectRunTrust: ProjectRunTrustRequest?
-    @State private var pendingRunAllConfigurations: [ProjectRunConfiguration] = []
     @State private var pendingStopAllConfigurationIDs: [String] = []
     @State private var selectedRunConfigurationID: String?
     @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
@@ -912,8 +911,8 @@ struct ContentView: View {
 
     private var isConfirmingRunAllTrust: Binding<Bool> {
         Binding(
-            get: { !pendingRunAllConfigurations.isEmpty },
-            set: { if !$0 { pendingRunAllConfigurations.removeAll() } }
+            get: { runCoordinator.pendingBatchTrustReview != nil },
+            set: { if !$0 { runCoordinator.cancelBatchTrustReview() } }
         )
     }
 
@@ -1486,12 +1485,15 @@ struct ContentView: View {
                 selectedRunConfigurationID = visibleRunConfigurations.first?.id
             }
         }
-        .alert("信任并全部启动？", isPresented: isConfirmingRunAllTrust) {
-            Button("取消", role: .cancel) {}
-            Button("信任并全部启动", action: confirmRunAllTrust)
-        } message: {
-            let roots = untrustedProjectRoots(for: pendingRunAllConfigurations)
-            Text("将信任 \(roots.count) 个 Project Root，并启动 \(pendingRunAllConfigurations.count) 个运行配置：\n\n\(roots.joined(separator: "\n"))\n\n确认后，这些 Project Root 的后续运行不再重复询问。")
+        .alert(
+            "信任并全部启动？",
+            isPresented: isConfirmingRunAllTrust,
+            presenting: runCoordinator.pendingBatchTrustReview
+        ) { _ in
+            Button("取消", role: .cancel) { runCoordinator.cancelBatchTrustReview() }
+            Button("信任并全部启动") { runCoordinator.confirmBatchTrustAndStart() }
+        } message: { review in
+            Text(batchTrustReviewMessage(review))
         }
         .alert("停止全部活动会话？", isPresented: isConfirmingStopAll) {
             Button("取消", role: .cancel) {}
@@ -1622,38 +1624,29 @@ struct ContentView: View {
         in scope: [ProjectRunConfiguration],
         selectsRunPage: Bool
     ) {
-        let configurations = runCoordinator.batchStartCandidates(in: scope)
-        guard !configurations.isEmpty else { return }
+        guard runCoordinator.canStartBatch(in: scope) else { return }
         if selectsRunPage { selectPage(.runs) }
-        guard !untrustedProjectRoots(for: configurations).isEmpty else {
-            runCoordinator.startBatch(in: scope)
-            return
-        }
-        pendingRunAllConfigurations = configurations
+        runCoordinator.startBatch(in: scope)
     }
 
-    private func confirmRunAllTrust() {
-        let configurations = pendingRunAllConfigurations
-        let roots = untrustedProjectRoots(for: configurations)
-        pendingRunAllConfigurations.removeAll()
-        guard roots.allSatisfy(projectsModel.trustProjectRunRoot) else { return }
-        runAll(configurations)
-    }
+    private func batchTrustReviewMessage(_ review: ProjectRunBatchTrustReview) -> String {
+        let requestDetails = review.intent.startRequests.map { request in
+            """
+            配置：\(request.configuration.name)
+            Project Root：\(request.projectRoot)
+            完整命令：
+            \(request.command)
+            工作目录：
+            \(request.workingDirectory)
+            """
+        }.joined(separator: "\n\n")
+        return """
+        将信任 \(review.projectRootsRequiringTrust.count) 个 Project Root，并启动 \(review.intent.startRequests.count) 个运行配置。
 
-    private func runAll(_ configurations: [ProjectRunConfiguration]) {
-        for configuration in configurations
-        where runCoordinator.session(for: configuration.id)?.state.isLive != true {
-            guard let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
-                continue
-            }
-            _ = runCoordinator.run(configuration, project: project)
-        }
-    }
+        \(requestDetails)
 
-    private func untrustedProjectRoots(for configurations: [ProjectRunConfiguration]) -> [String] {
-        Set(configurations.compactMap { configuration in
-            projectsModel.records.first { $0.id == configuration.projectID }?.path
-        }.filter { !projectsModel.isProjectRunTrusted($0) }).sorted()
+        确认后，成功保存 Project Trust 的 Project Root 后续运行不再重复询问。
+        """
     }
 
     private func requestStopAll() {

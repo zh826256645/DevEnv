@@ -123,6 +123,11 @@ struct ProjectRunBatchIntent: Equatable, Sendable {
     let startRequests: [ProjectRunTrustRequest]
 }
 
+struct ProjectRunBatchTrustReview: Equatable, Sendable {
+    let intent: ProjectRunBatchIntent
+    let projectRootsRequiringTrust: [String]
+}
+
 enum ProjectRunActionResult: Equatable, Sendable {
     case needsTrust(ProjectRunTrustRequest)
     case started
@@ -857,23 +862,30 @@ struct ProjectRunWorkingDirectory {
 @MainActor
 final class ProjectRunCoordinator: ObservableObject {
     @Published private(set) var sessions: [String: ProjectRunSession] = [:]
+    @Published private(set) var pendingBatchTrustReview: ProjectRunBatchTrustReview?
 
     private let projectsModel: ProjectsViewModel
     private let makeEngine: () -> any ProjectRunProcessEngine
     private let shellProvider: any ProjectRunShellProviding
     private let scheduler: any ProjectRunScheduling
+    private let isProjectRunTrusted: (String) -> Bool
+    private let trustProjectRunRoot: (String) -> Bool
     private var commandDrafts: [String: String] = [:]
 
     init(
         projectsModel: ProjectsViewModel,
         makeEngine: @escaping () -> any ProjectRunProcessEngine,
         shellProvider: any ProjectRunShellProviding,
-        scheduler: any ProjectRunScheduling
+        scheduler: any ProjectRunScheduling,
+        isProjectRunTrusted: ((String) -> Bool)? = nil,
+        trustProjectRunRoot: ((String) -> Bool)? = nil
     ) {
         self.projectsModel = projectsModel
         self.makeEngine = makeEngine
         self.shellProvider = shellProvider
         self.scheduler = scheduler
+        self.isProjectRunTrusted = isProjectRunTrusted ?? projectsModel.isProjectRunTrusted
+        self.trustProjectRunRoot = trustProjectRunRoot ?? projectsModel.trustProjectRunRoot
     }
 
     convenience init(projectsModel: ProjectsViewModel) {
@@ -1082,7 +1094,7 @@ final class ProjectRunCoordinator: ObservableObject {
             let project = projectsModel.records.first(where: { $0.id == currentConfiguration.projectID }),
             project.path == request.projectRoot,
             project.availability == .available,
-            projectsModel.isProjectRunTrusted(request.projectRoot) else {
+            isProjectRunTrusted(request.projectRoot) else {
                 continue
             }
             _ = launch(request)
@@ -1091,7 +1103,37 @@ final class ProjectRunCoordinator: ObservableObject {
 
     func startBatch(in scope: [ProjectRunConfiguration]) {
         let intent = makeBatchStartIntent(in: scope)
-        submitBatchStart(intent)
+        guard !intent.startRequests.isEmpty else { return }
+        let projectRootsRequiringTrust = Set(intent.startRequests.map(\.projectRoot).filter {
+            !isProjectRunTrusted($0)
+        }).sorted()
+        guard !projectRootsRequiringTrust.isEmpty else {
+            submitBatchStart(intent)
+            return
+        }
+        pendingBatchTrustReview = ProjectRunBatchTrustReview(
+            intent: intent,
+            projectRootsRequiringTrust: projectRootsRequiringTrust
+        )
+    }
+
+    func cancelBatchTrustReview() {
+        pendingBatchTrustReview = nil
+    }
+
+    func confirmBatchTrustAndStart() {
+        guard let review = pendingBatchTrustReview else { return }
+        pendingBatchTrustReview = nil
+        var launchableProjectRoots = Set(review.intent.startRequests.map(\.projectRoot).filter {
+            isProjectRunTrusted($0)
+        })
+        for projectRoot in review.projectRootsRequiringTrust
+        where isProjectRunTrusted(projectRoot) || trustProjectRunRoot(projectRoot) {
+            launchableProjectRoots.insert(projectRoot)
+        }
+        submitBatchStart(ProjectRunBatchIntent(startRequests: review.intent.startRequests.filter {
+            launchableProjectRoots.contains($0.projectRoot)
+        }))
     }
 
     func runConfigurationsToStart() -> [ProjectRunConfiguration] {
