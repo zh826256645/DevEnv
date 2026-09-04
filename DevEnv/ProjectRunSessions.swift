@@ -68,6 +68,28 @@ struct ProjectRunSessionSummary: Equatable, Sendable {
     let exceptional: Int
 }
 
+struct ProjectRunExecution: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let configurationID: String
+    let command: String
+    let projectRoot: String
+    let workingDirectory: String
+
+    init(
+        id: UUID = UUID(),
+        configurationID: String,
+        command: String,
+        projectRoot: String,
+        workingDirectory: String
+    ) {
+        self.id = id
+        self.configurationID = configurationID
+        self.command = command
+        self.projectRoot = projectRoot
+        self.workingDirectory = workingDirectory
+    }
+}
+
 enum ProjectRunSessionSummaryCategory: Equatable, Sendable {
     case running
     case stopped
@@ -350,6 +372,7 @@ enum ProjectRunLaunchError: LocalizedError, Equatable {
     case processDidNotStart
     case processCouldNotBeContained
     case previousProcessesStillRunning
+    case reviewedWorkingDirectoryChanged
 
     var errorDescription: String? {
         switch self {
@@ -357,6 +380,7 @@ enum ProjectRunLaunchError: LocalizedError, Equatable {
         case .processDidNotStart: "PTY 进程启动失败"
         case .processCouldNotBeContained: "PTY 所有权建立失败，启动进程未能安全终止"
         case .previousProcessesStillRunning: "上一次运行仍有进程未退出"
+        case .reviewedWorkingDirectoryChanged: "工作目录已变化，需要重新确认"
         }
     }
 }
@@ -744,10 +768,15 @@ final class ProjectRunSession: ObservableObject, Identifiable {
     let id: String
     let terminalView: NSView
     @Published fileprivate(set) var state: ProjectRunSessionState = .inactive
+    @Published fileprivate(set) var currentExecution: ProjectRunExecution?
     @Published fileprivate(set) var lastSuccessfulCommand: String?
     @Published fileprivate(set) var startedAt: Date?
     @Published fileprivate(set) var failureMessage: String?
     @Published fileprivate(set) var failureAt: Date?
+
+    var activeExecution: ProjectRunExecution? {
+        state.isLive ? currentExecution : nil
+    }
 
     var ownedProcessIDs: Set<pid_t>? { engine.ownedProcessIDs }
     var physicalMemoryBytes: UInt64? { engine.physicalMemoryBytes }
@@ -1019,6 +1048,8 @@ final class ProjectRunCoordinator: ObservableObject {
             guard projectsModel.isProjectRunTrusted(projectRoot) else { return .needsTrust(request) }
             return launch(request)
         } catch {
+            let session = sessions[configuration.id] ?? makeSession(for: configuration.id)
+            session.currentExecution = nil
             return reject(configurationID: configuration.id, error: error)
         }
     }
@@ -1031,10 +1062,18 @@ final class ProjectRunCoordinator: ObservableObject {
         return launch(request)
     }
 
-    func stop(configurationID: String) {
-        guard let session = sessions[configurationID],
-              session.state.isLive,
+    func stop(executionID: ProjectRunExecution.ID) {
+        guard let session = sessions.values.first(where: { $0.activeExecution?.id == executionID }),
               session.state != .stopping else { return }
+        stopCurrentExecution(in: session)
+    }
+
+    func stop(configurationID: String) {
+        guard let executionID = sessions[configurationID]?.activeExecution?.id else { return }
+        stop(executionID: executionID)
+    }
+
+    private func stopCurrentExecution(in session: ProjectRunSession) {
         session.pendingRestart = nil
         if session.state == .restarting {
             session.stopRequestedByUser = true
@@ -1234,22 +1273,31 @@ final class ProjectRunCoordinator: ObservableObject {
         guard sessions[request.configuration.id]?.state.isLive != true else {
             return .rejected("该运行配置已有活动会话")
         }
+        let session = sessions[request.configuration.id] ?? makeSession(for: request.configuration.id)
+        session.currentExecution = ProjectRunExecution(
+            configurationID: request.configuration.id,
+            command: request.command,
+            projectRoot: request.projectRoot,
+            workingDirectory: request.workingDirectory
+        )
+        session.state = .starting
+        objectWillChange.send()
         do {
             let directory = try ProjectRunWorkingDirectory.resolve(
                 projectRoot: request.projectRoot,
                 relativePath: request.configuration.workingDirectory
             )
+            guard directory.path == request.workingDirectory else {
+                throw ProjectRunLaunchError.reviewedWorkingDirectoryChanged
+            }
             let shell = try shellProvider.defaultLoginShell()
-            let session = sessions[request.configuration.id] ?? makeSession(for: request.configuration.id)
-            session.state = .starting
-            objectWillChange.send()
             try session.engine.start(
                 executable: shell,
-                arguments: ["-i", "-c", request.configuration.command],
+                arguments: ["-i", "-c", request.command],
                 loginName: "-\(URL(fileURLWithPath: shell).lastPathComponent)",
-                workingDirectory: directory.path
+                workingDirectory: request.workingDirectory
             )
-            session.lastSuccessfulCommand = request.configuration.command
+            session.lastSuccessfulCommand = request.command
             session.startedAt = Date()
             session.failureMessage = nil
             session.failureAt = nil
@@ -1258,7 +1306,7 @@ final class ProjectRunCoordinator: ObservableObject {
                projectsModel.updateRunConfiguration(
                    request.configuration,
                    name: request.configuration.name,
-                   command: request.configuration.command,
+                   command: request.command,
                    workingDirectory: request.configuration.workingDirectory
                ) {
                 commandDrafts.removeValue(forKey: request.configuration.id)
