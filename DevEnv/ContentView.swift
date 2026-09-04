@@ -736,17 +736,18 @@ struct ContentView: View {
             updateRefreshActivity()
         }
         .onReceive(NotificationCenter.default.publisher(for: .devEnvStatusBarAction)) { notification in
-            switch notification.userInfo?["action"] as? String {
-            case "open":
+            guard let rawAction = notification.userInfo?["action"] as? String,
+                  let action = DevEnvStatusBarAction(rawValue: rawAction) else { return }
+            switch action {
+            case .open:
                 if let configurationID = notification.userInfo?["configurationID"] as? String {
                     runProjectFilterID = nil
                     runSearchText = ""
                     selectedRunConfigurationID = configurationID
                     selectPage(.runs)
                 }
-            case "runAll": requestRunAllGlobal()
-            case "stopAll": requestStopAllGlobal()
-            default: break
+            case .showRuns:
+                selectPage(.runs)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { _ in
@@ -1603,20 +1604,8 @@ struct ContentView: View {
     }
 
     private func requestRunAll() {
-        requestBatchStart(in: visibleRunConfigurations, selectsRunPage: false)
-    }
-
-    private func requestRunAllGlobal() {
-        requestBatchStart(in: runCoordinator.runConfigurations(), selectsRunPage: true)
-    }
-
-    private func requestBatchStart(
-        in scope: [ProjectRunConfiguration],
-        selectsRunPage: Bool
-    ) {
-        guard runCoordinator.canStartBatch(in: scope) else { return }
-        if selectsRunPage { selectPage(.runs) }
-        runCoordinator.startBatch(in: scope)
+        guard runCoordinator.canStartBatch(in: visibleRunConfigurations) else { return }
+        runCoordinator.startBatch(in: visibleRunConfigurations)
     }
 
     private func batchTrustReviewMessage(_ review: ProjectRunBatchTrustReview) -> String {
@@ -1641,11 +1630,6 @@ struct ContentView: View {
 
     private func requestStopAll() {
         runCoordinator.requestBatchStop(in: visibleRunConfigurations)
-    }
-
-    private func requestStopAllGlobal() {
-        selectPage(.runs)
-        runCoordinator.requestBatchStop(in: runCoordinator.runConfigurations())
     }
 
     private func selectFirstRunConfigurationIfNeeded() {

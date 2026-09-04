@@ -1141,7 +1141,10 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func startBatch(in scope: [ProjectRunConfiguration]) {
-        let intent = makeBatchStartIntent(in: scope)
+        requestBatchStart(makeBatchStartIntent(in: scope))
+    }
+
+    func requestBatchStart(_ intent: ProjectRunBatchIntent) {
         guard !intent.startRequests.isEmpty else { return }
         let projectRootsRequiringTrust = Set(intent.startRequests.map(\.projectRoot).filter {
             !isProjectRunTrusted($0)
@@ -1173,10 +1176,6 @@ final class ProjectRunCoordinator: ObservableObject {
         submitBatchStart(ProjectRunBatchIntent(startRequests: review.intent.startRequests.filter {
             launchableProjectRoots.contains($0.projectRoot)
         }))
-    }
-
-    func runConfigurationsToStart() -> [ProjectRunConfiguration] {
-        batchStartCandidates(in: runConfigurations())
     }
 
     func activeConfigurationsFirst(

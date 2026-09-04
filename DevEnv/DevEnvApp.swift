@@ -6,6 +6,11 @@ extension Notification.Name {
     static let devEnvStatusBarAction = Notification.Name("DevEnv.statusBarAction")
 }
 
+enum DevEnvStatusBarAction: String {
+    case open
+    case showRuns
+}
+
 @MainActor
 final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     let projectsModel: ProjectsViewModel
@@ -15,6 +20,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
     private var windowObservers: [NSObjectProtocol] = []
     private var fallbackWindow: NSWindow?
+    private let statusBarRunPageHandoff: (() -> Void)?
 
     override convenience init() {
         let projectsModel = ProjectsViewModel()
@@ -24,10 +30,16 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    init(projectsModel: ProjectsViewModel, runCoordinator: ProjectRunCoordinator) {
+    init(
+        projectsModel: ProjectsViewModel,
+        runCoordinator: ProjectRunCoordinator,
+        statusBarRunPageHandoff: (() -> Void)? = nil
+    ) {
         self.projectsModel = projectsModel
         self.runCoordinator = runCoordinator
+        self.statusBarRunPageHandoff = statusBarRunPageHandoff
         super.init()
+        observeStatusMenuInputs()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -67,7 +79,10 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         item.button?.toolTip = "DevEnv"
         item.menu = statusMenu
         statusItem = item
-        runCoordinator.objectWillChange
+    }
+
+    private func observeStatusMenuInputs() {
+        Publishers.Merge(runCoordinator.objectWillChange, projectsModel.objectWillChange)
             .sink { [weak self] _ in
                 Task { @MainActor in self?.rebuildStatusMenu() }
             }
@@ -124,7 +139,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         var userInfo: [AnyHashable: Any] = [:]
         if let configurationID { userInfo["configurationID"] = configurationID }
         let notificationInfo = userInfo.isEmpty ? nil : userInfo
-        postStatusBarAction("open", userInfo: notificationInfo)
+        postStatusBarAction(.open, userInfo: notificationInfo)
     }
 
     static func configureMainWindow(_ window: NSWindow) {
@@ -153,7 +168,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
 
         let start = NSMenuItem(title: "全部启动", action: #selector(requestRunAll(_:)), keyEquivalent: "")
         start.target = self
-        start.isEnabled = !runCoordinator.runConfigurationsToStart().isEmpty
+        start.isEnabled = runCoordinator.canStartBatch(in: runCoordinator.runConfigurations())
         menu.addItem(start)
         let stop = NSMenuItem(title: "全部停止", action: #selector(requestStopAll(_:)), keyEquivalent: "")
         stop.target = self
@@ -230,13 +245,27 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func requestRunAll(_: NSMenuItem) {
-        openMainWindow()
-        postStatusBarAction("runAll")
+        let scope = runCoordinator.runConfigurations()
+        guard runCoordinator.canStartBatch(in: scope) else { return }
+        let intent = runCoordinator.makeBatchStartIntent(in: scope)
+        handoffToRunsPage()
+        runCoordinator.requestBatchStart(intent)
     }
 
     @objc private func requestStopAll(_: NSMenuItem) {
-        openMainWindow()
-        postStatusBarAction("stopAll")
+        let scope = runCoordinator.runConfigurations()
+        guard runCoordinator.canStopBatch(in: scope) else { return }
+        runCoordinator.requestBatchStop(in: scope)
+        handoffToRunsPage()
+    }
+
+    private func handoffToRunsPage() {
+        if let statusBarRunPageHandoff {
+            statusBarRunPageHandoff()
+        } else {
+            openMainWindow()
+            postStatusBarAction(.showRuns)
+        }
     }
 
     @objc private func openDevEnv(_: NSMenuItem) {
@@ -247,10 +276,13 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.terminate(nil)
     }
 
-    private func postStatusBarAction(_ action: String, userInfo: [AnyHashable: Any]? = nil) {
+    private func postStatusBarAction(
+        _ action: DevEnvStatusBarAction,
+        userInfo: [AnyHashable: Any]? = nil
+    ) {
         DispatchQueue.main.async {
             var info = userInfo ?? [:]
-            info["action"] = action
+            info["action"] = action.rawValue
             NotificationCenter.default.post(name: .devEnvStatusBarAction, object: nil, userInfo: info)
         }
     }

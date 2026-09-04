@@ -44,6 +44,247 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部停止")?.isEnabled ?? true)
     }
 
+    func testStatusBarGlobalStartSubmitsAllProjectsToSharedFrozenIntent() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstRoot = directory.appendingPathComponent("first")
+        let secondRoot = directory.appendingPathComponent("second")
+        let secondWorkingDirectory = secondRoot.appendingPathComponent("app")
+        try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondWorkingDirectory, withIntermediateDirectories: true)
+        let first = ProjectRunConfiguration(
+            id: "first",
+            projectID: firstRoot.path,
+            name: "First",
+            command: "swift run",
+            workingDirectory: "."
+        )
+        let second = ProjectRunConfiguration(
+            id: "second",
+            projectID: secondRoot.path,
+            name: "Second",
+            command: "pnpm run dev",
+            workingDirectory: "app"
+        )
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: [first, second])
+        document.addDirect([firstRoot.path, secondRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        var handoffCount = 0
+        let appDelegate = DevEnvAppDelegate(
+            projectsModel: projectsModel,
+            runCoordinator: coordinator,
+            statusBarRunPageHandoff: {
+                handoffCount += 1
+                XCTAssertTrue(coordinator.updateRunConfiguration(
+                    first,
+                    name: first.name,
+                    command: "changed during handoff",
+                    workingDirectory: first.workingDirectory
+                ))
+            }
+        )
+        appDelegate.rebuildStatusMenu()
+        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部启动"))
+
+        XCTAssertTrue(startItem.isEnabled)
+        XCTAssertTrue(NSApplication.shared.sendAction(
+            try XCTUnwrap(startItem.action),
+            to: startItem.target,
+            from: startItem
+        ))
+
+        XCTAssertEqual(handoffCount, 1)
+        XCTAssertEqual(coordinator.pendingBatchTrustReview?.intent.startRequests, [
+            ProjectRunTrustRequest(
+                configuration: first,
+                projectRoot: firstRoot.path,
+                command: first.command,
+                workingDirectory: firstRoot.path
+            ),
+            ProjectRunTrustRequest(
+                configuration: second,
+                projectRoot: secondRoot.path,
+                command: second.command,
+                workingDirectory: secondWorkingDirectory.path
+            ),
+        ])
+        XCTAssertEqual(
+            coordinator.pendingBatchTrustReview?.projectRootsRequiringTrust,
+            [firstRoot.path, secondRoot.path].sorted()
+        )
+        XCTAssertTrue(factory.engines.isEmpty)
+    }
+
+    func testStatusBarTrustedGlobalStartIsImmediateAndRetainsSharedSessions() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(
+            id: "trusted",
+            projectID: projectRoot.path,
+            name: "Trusted",
+            command: "swift run",
+            workingDirectory: "."
+        )
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: [configuration])
+        document.addDirect([projectRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        projectsModel.refreshProjects()
+        for _ in 0 ..< 100 where projectsModel.records.contains(where: { $0.availability == .unknown }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler(),
+            isProjectRunTrusted: { $0 == projectRoot.path }
+        )
+        var handoffCount = 0
+        let appDelegate = DevEnvAppDelegate(
+            projectsModel: projectsModel,
+            runCoordinator: coordinator,
+            statusBarRunPageHandoff: { handoffCount += 1 }
+        )
+        appDelegate.rebuildStatusMenu()
+        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部启动"))
+
+        XCTAssertTrue(NSApplication.shared.sendAction(
+            try XCTUnwrap(startItem.action),
+            to: startItem.target,
+            from: startItem
+        ))
+
+        let session = try XCTUnwrap(coordinator.session(for: configuration.id))
+        let executionID = try XCTUnwrap(session.activeExecution?.id)
+        XCTAssertEqual(handoffCount, 1)
+        XCTAssertNil(coordinator.pendingBatchTrustReview)
+        XCTAssertEqual(session.state, .running)
+        XCTAssertEqual(coordinator.sessionSummary, ProjectRunSessionSummary(running: 1, stopped: 0, exceptional: 0))
+        _ = ContentView(projectsModel: projectsModel, runCoordinator: coordinator)
+        _ = ContentView(projectsModel: projectsModel, runCoordinator: coordinator)
+        XCTAssertTrue(coordinator.session(for: configuration.id) === session)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.activeExecution?.id, executionID)
+    }
+
+    func testStatusBarGlobalStopFreezesEveryCurrentExecution() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstRoot = directory.appendingPathComponent("first")
+        let secondRoot = directory.appendingPathComponent("second")
+        try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
+        let first = ProjectRunConfiguration(
+            id: "first",
+            projectID: firstRoot.path,
+            name: "First",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        let second = ProjectRunConfiguration(
+            id: "second",
+            projectID: secondRoot.path,
+            name: "Second",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: [first, second])
+        document.addDirect([firstRoot.path, secondRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        XCTAssertTrue(projectsModel.trustProjectRunRoot(firstRoot.path))
+        XCTAssertTrue(projectsModel.trustProjectRunRoot(secondRoot.path))
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        XCTAssertEqual(coordinator.run(first, projectRoot: firstRoot.path), .started)
+        XCTAssertEqual(coordinator.run(second, projectRoot: secondRoot.path), .started)
+        let executionIDs = try [first, second].map {
+            try XCTUnwrap(coordinator.session(for: $0.id)?.activeExecution?.id)
+        }
+        var handoffCount = 0
+        let appDelegate = DevEnvAppDelegate(
+            projectsModel: projectsModel,
+            runCoordinator: coordinator,
+            statusBarRunPageHandoff: {
+                handoffCount += 1
+                factory.engines[0].finish(exitCode: 0)
+                XCTAssertEqual(coordinator.run(first, projectRoot: firstRoot.path), .started)
+            }
+        )
+        appDelegate.rebuildStatusMenu()
+        let stopItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部停止"))
+
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部启动")?.isEnabled ?? true)
+        XCTAssertTrue(stopItem.isEnabled)
+        XCTAssertTrue(NSApplication.shared.sendAction(
+            try XCTUnwrap(stopItem.action),
+            to: stopItem.target,
+            from: stopItem
+        ))
+
+        let replacementExecutionID = try XCTUnwrap(coordinator.session(for: first.id)?.activeExecution?.id)
+        XCTAssertEqual(handoffCount, 1)
+        XCTAssertNotEqual(replacementExecutionID, executionIDs[0])
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs, executionIDs)
+        XCTAssertEqual(factory.engines.map(\.signals), [[SIGKILL], []])
+        coordinator.confirmBatchStop()
+        XCTAssertEqual(factory.engines.map(\.signals), [[SIGKILL], [SIGINT]])
+        XCTAssertEqual(coordinator.session(for: first.id)?.activeExecution?.id, replacementExecutionID)
+        XCTAssertEqual(coordinator.session(for: first.id)?.state, .running)
+        appDelegate.rebuildStatusMenu()
+        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部停止")?.isEnabled ?? false)
+    }
+
+    func testStatusBarMenuRebuildsWhenProjectConfigurationsChange() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument()
+        document.addDirect([projectRoot.path])
+        try store.save(document)
+        let projectsModel = ProjectsViewModel(store: store)
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: { FakeProjectRunEngine() },
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        let appDelegate = DevEnvAppDelegate(projectsModel: projectsModel, runCoordinator: coordinator)
+        appDelegate.rebuildStatusMenu()
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部启动")?.isEnabled ?? true)
+
+        XCTAssertNotNil(coordinator.createRunConfiguration(
+            projectID: projectRoot.path,
+            name: "Dev",
+            command: "swift run",
+            workingDirectory: "."
+        ))
+        for _ in 0 ..< 3 { await Task.yield() }
+
+        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部启动")?.isEnabled ?? false)
+    }
+
     func testReopenedMainWindowUsesFullSizeHiddenTitleBar() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -284,7 +525,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(projectsModel.setRunConfigurationEnabled(configuration, isEnabled: false))
         let disabled = try XCTUnwrap(projectsModel.runConfigurations().first)
 
-        XCTAssertTrue(coordinator.runConfigurationsToStart().isEmpty)
+        XCTAssertFalse(coordinator.canStartBatch(in: coordinator.runConfigurations()))
         XCTAssertEqual(coordinator.run(disabled, projectRoot: projectRoot.path), .rejected("运行配置已禁用"))
         XCTAssertEqual(coordinator.confirmTrustAndRun(request), .rejected("运行配置已禁用"))
         XCTAssertTrue(factory.engines.isEmpty)
