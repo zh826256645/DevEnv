@@ -144,12 +144,16 @@ _Avoid_: Issue, Error, Health Problem
 一次 Environment Scan 产生的、描述主机基础信息与当前 App 运行用户可见开发工具状态的结果。
 _Avoid_: Environment, System Profile
 
+**Machine Tool Search PATH**:
+DevEnv 解释 Machine Environment 中命令解析优先级时采用的路径序列：优先使用当前用户的 Default Login Shell 完成交互式登录初始化后形成的有效 `PATH`；无法可靠取得时退回 App 进程继承的 `PATH` 并产生 Scan Notice。它不是某个既有终端窗口、Project Root、direnv 或其他目录局部上下文的动态 `PATH`。
+_Avoid_: App PATH, Terminal PATH, Project PATH
+
 **Package Manager Tool**:
-当前 App `PATH` 对 uv、Bun、npm、pnpm 或 Yarn 首先解析到的可执行工具，包含调用路径、可确认的实际路径、版本和读取状态；它不枚举未进入 `PATH` 的其他安装。
+Machine Tool Search PATH 对 uv、Bun、npm、pnpm 或 Yarn 首先解析到的可执行工具，包含调用路径、可确认的实际路径、版本和读取状态；它不枚举未进入 Machine Tool Search PATH 的其他安装。
 _Avoid_: Runtime Installation, Package, Package Manager Environment
 
 **Corepack Proxy Configuration**:
-当前 `PATH` 已存在指向 Corepack 的 pnpm 或 Yarn 代理；Environment Scan 只记录已配置事实和路径，不执行代理获取版本，也不触发下载或激活。
+Machine Tool Search PATH 已存在指向 Corepack 的 pnpm 或 Yarn 代理；Environment Scan 只记录已配置事实和路径，不执行代理获取版本，也不触发下载或激活。
 _Avoid_: Installed Package Manager, Available Version
 
 **Project Package Manager Requirement**:
@@ -193,15 +197,15 @@ Environment Scan 对 Database Installation 发现完整性的观察结果，取�
 _Avoid_: Installation State, Installed Status
 
 **Database Provider**:
-从已知工具、平台索引或 Local Service 的真实可执行文件路径中，发现未进入当前 `PATH` 的 Database Installation 的来源。
+从已知工具、平台索引或 Local Service 的真实可执行文件路径中，发现未进入 Machine Tool Search PATH 的 Database Installation 的来源。
 _Avoid_: Database Scanner, Database Manager
 
 **Runtime Provider**:
-从已知工具或平台索引中发现未进入当前 `PATH` 的 Runtime Installation 的来源。
+从已知工具或平台索引中发现未进入 Machine Tool Search PATH 的 Runtime Installation 的来源。
 _Avoid_: Scanner, Version Manager
 
 **Runtime Installation Source**:
-Environment Scan 能够确认的 Runtime Installation 管理或发现来源；它与该安装是否进入 `PATH`、是否当前生效无关，不声称还原历史安装操作。
+Environment Scan 能够确认的 Runtime Installation 管理或发现来源；它与该安装是否进入 Machine Tool Search PATH、是否当前生效无关，不声称还原历史安装操作。
 _Avoid_: Installation Method, Runtime State
 
 **Local Service**:
@@ -217,11 +221,11 @@ Local Service 监听 TCP 连接的地址、端口和地址族组合。
 _Avoid_: Port, Endpoint
 
 **Effective Runtime Installation**:
-当前 `PATH` 对某类语言运行时优先解析到的 Runtime Installation。
+Machine Tool Search PATH 对某类语言运行时优先解析到的 Runtime Installation。
 _Avoid_: Current Runtime, Active Runtime
 
 **Runtime Conflict**:
-同类语言运行时在当前 `PATH` 中存在多个版本不同的 Runtime Installation，因 `PATH` 顺序可能产生不同解析结果的状态。Provider 发现但未进入 `PATH` 的安装不构成冲突。
+同类语言运行时在 Machine Tool Search PATH 中存在多个版本不同的 Runtime Installation，因路径顺序可能产生不同解析结果的状态。Provider 发现但未进入 Machine Tool Search PATH 的安装不构成冲突。
 _Avoid_: Version Conflict, PATH Error
 
 **Homebrew Availability**:
