@@ -73,12 +73,16 @@ _Avoid_: Project Port, Inferred Session Port
 _Avoid_: Git Tooling State, Launch Branch
 
 **Overview Attention**:
-与 Active Project Run Session 或尚未清除的 Project Run Failure 相关，或会降低总览可信度与整机安全性的明确风险集合；未运行项目的要求缺口和普通未安装、未启动状态不属于该集合。
+与 Active Project Run Session 或尚未清除的 Project Run Failure 相关，或会降低总览可信度与整机安全性的明确风险集合；Active Project Run Session 所属 Project Root 的 Requirement Satisfaction State 为“未满足”“声明冲突”或“无法判断”时均属于该集合，其中“无法判断”只表示证据不足；已匹配的 Database Installation 没有“正在监听”结果时，全部明确“未监听”表示当前未监听，含“监听状态未知”则只表示监听证据不足；处于运行中但无法确证进程所有权的 Project Run Session 也以证据不足进入该集合。未运行项目的要求缺口和普通未安装、未启动状态不属于该集合。
 _Avoid_: Machine Health, Environment Issue, All Notices
 
 **Overview Attention Item**:
-Overview Attention 中一个可独立导航的风险：项目要求按 Project Root 与能力唯一，运行失败按 Project Run Session 唯一，端口暴露按会话汇总，扫描与磁盘风险各自唯一。
+Overview Attention 中一个可独立导航的风险：项目要求按 Project Root 与能力唯一，Project Requirements 缺失或过期证据按 Project Root 唯一且不替代上次已知风险，其中刷新中的暂态不算证据缺失；运行失败和运行证据不足各按 Project Run Session 唯一，端口暴露按会话汇总，扫描与磁盘风险各自唯一。Overview Attention Item 依次按运行失败、运行证据不足、全局刷新失败或过期、Project Requirements 证据缺失或过期、要求未满足或声明冲突或无法判断、端口暴露、PATH 冲突和磁盘不足排序；同类风险按发生时间倒序、再按标题稳定排序，无发生时间的项目排在有时间项目之后。
 _Avoid_: Notice Count, Duplicate Session Warning
+
+**Overview Attention Severity**:
+Overview Attention Item 的严重度只有 `critical` 与 `warning`：运行失败、要求未满足或声明冲突、数据库全部明确未监听属于 `critical`，证据不足、结果过期、端口暴露、PATH 冲突和磁盘不足属于 `warning`。
+_Avoid_: Priority, Health Level
 
 **Environment Snapshot Freshness**:
 最近一次成功 Environment Scan 距今不超过 24 小时；超过该时间的 Machine Snapshot 属于过期结果。
