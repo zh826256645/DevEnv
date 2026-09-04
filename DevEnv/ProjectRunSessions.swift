@@ -102,6 +102,25 @@ struct ProjectRunTrustRequest: Equatable, Sendable {
     let projectRoot: String
     let command: String
     let workingDirectory: String
+    let commandWasDraft: Bool
+
+    init(
+        configuration: ProjectRunConfiguration,
+        projectRoot: String,
+        command: String,
+        workingDirectory: String,
+        commandWasDraft: Bool = false
+    ) {
+        self.configuration = configuration
+        self.projectRoot = projectRoot
+        self.command = command
+        self.workingDirectory = workingDirectory
+        self.commandWasDraft = commandWasDraft
+    }
+}
+
+struct ProjectRunBatchIntent: Equatable, Sendable {
+    let startRequests: [ProjectRunTrustRequest]
 }
 
 enum ProjectRunActionResult: Equatable, Sendable {
@@ -1000,15 +1019,83 @@ final class ProjectRunCoordinator: ObservableObject {
         sessions.compactMap { id, session in session.state.isLive ? id : nil }.sorted()
     }
 
-    func runConfigurationsToStart() -> [ProjectRunConfiguration] {
-        runConfigurations().filter { configuration in
-            guard configuration.isEnabled,
-                  sessions[configuration.id]?.state.isLive != true,
-                  let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
-                return false
+    func batchStartCandidates(
+        in scope: [ProjectRunConfiguration]
+    ) -> [ProjectRunConfiguration] {
+        let effectiveConfigurations = Dictionary(
+            uniqueKeysWithValues: runConfigurations().map { ($0.id, $0) }
+        )
+        var includedConfigurationIDs: Set<String> = []
+        return scope.compactMap { scopedConfiguration in
+            guard includedConfigurationIDs.insert(scopedConfiguration.id).inserted,
+                  let configuration = effectiveConfigurations[scopedConfiguration.id],
+                  configuration.isEnabled,
+                  sessions[configuration.id]?.activeExecution == nil,
+                  let project = projectsModel.records.first(where: { $0.id == configuration.projectID }),
+                  !project.availability.isUnavailable else {
+                return nil
             }
-            return !project.availability.isUnavailable
+            return configuration
         }
+    }
+
+    func canStartBatch(in scope: [ProjectRunConfiguration]) -> Bool {
+        !batchStartCandidates(in: scope).isEmpty
+    }
+
+    func makeBatchStartIntent(
+        in scope: [ProjectRunConfiguration]
+    ) -> ProjectRunBatchIntent {
+        let requests: [ProjectRunTrustRequest] = batchStartCandidates(in: scope).compactMap { configuration in
+            guard let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
+                return nil
+            }
+            do {
+                let directory = try ProjectRunWorkingDirectory.resolve(
+                    projectRoot: project.path,
+                    relativePath: configuration.workingDirectory
+                )
+                return ProjectRunTrustRequest(
+                    configuration: configuration,
+                    projectRoot: project.path,
+                    command: configuration.command,
+                    workingDirectory: directory.path,
+                    commandWasDraft: hasCommandDraft(configurationID: configuration.id)
+                )
+            } catch {
+                let session = sessions[configuration.id] ?? makeSession(for: configuration.id)
+                session.currentExecution = nil
+                _ = reject(configurationID: configuration.id, error: error)
+                return nil
+            }
+        }
+        return ProjectRunBatchIntent(startRequests: requests)
+    }
+
+    func submitBatchStart(_ intent: ProjectRunBatchIntent) {
+        for request in intent.startRequests {
+            guard let currentConfiguration = projectsModel.runConfigurations().first(where: {
+                $0.id == request.configuration.id
+            }),
+            currentConfiguration.isEnabled,
+            currentConfiguration.projectID == request.configuration.projectID,
+            let project = projectsModel.records.first(where: { $0.id == currentConfiguration.projectID }),
+            project.path == request.projectRoot,
+            project.availability == .available,
+            projectsModel.isProjectRunTrusted(request.projectRoot) else {
+                continue
+            }
+            _ = launch(request)
+        }
+    }
+
+    func startBatch(in scope: [ProjectRunConfiguration]) {
+        let intent = makeBatchStartIntent(in: scope)
+        submitBatchStart(intent)
+    }
+
+    func runConfigurationsToStart() -> [ProjectRunConfiguration] {
+        batchStartCandidates(in: runConfigurations())
     }
 
     func activeConfigurationsFirst(
@@ -1043,7 +1130,8 @@ final class ProjectRunCoordinator: ObservableObject {
                 configuration: configuration,
                 projectRoot: projectRoot,
                 command: configuration.command,
-                workingDirectory: directory.path
+                workingDirectory: directory.path,
+                commandWasDraft: hasCommandDraft(configurationID: configuration.id)
             )
             guard projectsModel.isProjectRunTrusted(projectRoot) else { return .needsTrust(request) }
             return launch(request)
@@ -1110,7 +1198,8 @@ final class ProjectRunCoordinator: ObservableObject {
                 configuration: configuration,
                 projectRoot: projectRoot,
                 command: configuration.command,
-                workingDirectory: directory.path
+                workingDirectory: directory.path,
+                commandWasDraft: hasCommandDraft(configurationID: configuration.id)
             )
             session.failureMessage = nil
             session.failureAt = nil
@@ -1302,14 +1391,20 @@ final class ProjectRunCoordinator: ObservableObject {
             session.failureMessage = nil
             session.failureAt = nil
             session.state = .running
-            if commandDrafts[request.configuration.id] != nil,
-               projectsModel.updateRunConfiguration(
-                   request.configuration,
-                   name: request.configuration.name,
-                   command: request.command,
-                   workingDirectory: request.configuration.workingDirectory
-               ) {
-                commandDrafts.removeValue(forKey: request.configuration.id)
+            if request.commandWasDraft,
+               let currentConfiguration = projectsModel.runConfigurations().first(where: {
+                   $0.id == request.configuration.id
+               }) {
+                let currentDraft = commandDrafts[request.configuration.id]
+                if projectsModel.updateRunConfiguration(
+                    currentConfiguration,
+                    name: currentConfiguration.name,
+                    command: request.command,
+                    workingDirectory: currentConfiguration.workingDirectory
+                ), currentDraft == request.command,
+                   commandDrafts[request.configuration.id] == request.command {
+                    commandDrafts.removeValue(forKey: request.configuration.id)
+                }
             }
             objectWillChange.send()
             return .started

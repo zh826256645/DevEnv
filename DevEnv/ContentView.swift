@@ -1450,7 +1450,7 @@ struct ContentView: View {
                     Label("全部启动", systemImage: "play.fill")
                 }
                 .buttonStyle(.bordered)
-                .disabled(runAllConfigurations.isEmpty)
+                .disabled(!runCoordinator.canStartBatch(in: visibleRunConfigurations))
                 Button(role: .destructive, action: requestStopAll) {
                     Label("全部停止", systemImage: "stop.fill")
                 }
@@ -1601,17 +1601,6 @@ struct ContentView: View {
             ?? visibleRunConfigurations.first
     }
 
-    private var runAllConfigurations: [ProjectRunConfiguration] {
-        visibleRunConfigurations.filter { configuration in
-            guard configuration.isEnabled,
-                  runCoordinator.session(for: configuration.id)?.state.isLive != true,
-                  let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
-                return false
-            }
-            return !project.availability.isUnavailable
-        }
-    }
-
     private var stopAllConfigurationIDs: [String] {
         visibleRunConfigurations.compactMap { configuration in
             guard let state = runCoordinator.session(for: configuration.id)?.state,
@@ -1622,21 +1611,22 @@ struct ContentView: View {
     }
 
     private func requestRunAll() {
-        let configurations = runAllConfigurations
-        guard !configurations.isEmpty else { return }
-        guard !untrustedProjectRoots(for: configurations).isEmpty else {
-            runAll(configurations)
-            return
-        }
-        pendingRunAllConfigurations = configurations
+        requestBatchStart(in: visibleRunConfigurations, selectsRunPage: false)
     }
 
     private func requestRunAllGlobal() {
-        let configurations = runCoordinator.runConfigurationsToStart()
+        requestBatchStart(in: runCoordinator.runConfigurations(), selectsRunPage: true)
+    }
+
+    private func requestBatchStart(
+        in scope: [ProjectRunConfiguration],
+        selectsRunPage: Bool
+    ) {
+        let configurations = runCoordinator.batchStartCandidates(in: scope)
         guard !configurations.isEmpty else { return }
-        selectPage(.runs)
+        if selectsRunPage { selectPage(.runs) }
         guard !untrustedProjectRoots(for: configurations).isEmpty else {
-            runAll(configurations)
+            runCoordinator.startBatch(in: scope)
             return
         }
         pendingRunAllConfigurations = configurations
