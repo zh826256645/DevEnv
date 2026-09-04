@@ -32,6 +32,10 @@ _Avoid_: Project Snapshot, Project Files
 DevEnv 保存、归属于一个 Project Record 的运行意图，包含稳定身份、名称、命令、Project Root 相对工作目录和可选来源身份；它不是 Project Requirement 或 Project Requirements Summary，不表示项目可运行，也不执行命令。
 _Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
 
+**Project Run Batch Intent**:
+用户明确触发批量启动或停止时，从触发入口的当前作用域解析并冻结、仅用于本次提交的一组单项启动请求或 Active Project Run Execution；运行页作用域包含当前项目筛选与搜索结果，状态栏作用域为全部项目。它不是持久化运行组或运行编排，各目标按单项语义独立处理。
+_Avoid_: Saved Run Group, Live Filter Query, All Configurations, Atomic Run, Run Orchestration, Batch Run History
+
 **Disabled Project Run Configuration**:
 由用户暂时停用、不可通过任何入口启动且持久保留以便后续重新启用的 Project Run Configuration；禁用状态只属于该配置，不改变所属 Project Record 或同项目的其他运行配置。
 _Avoid_: Disabled Project, Deleted Project Run Configuration
@@ -41,15 +45,23 @@ DevEnv 从项目声明中只读识别、可由用户选择保存为 Project Run 
 _Avoid_: Auto Run, Project Requirement, Runnable Status
 
 **Project Run Session**:
-用户从已保存的 Project Run Configuration 显式启动、仅存在于当前 App 进程中的交互式 PTY 会话；它保留本次实际启动命令、启动时间、进程状态、内存中的终端输出和退出码，但不持久化为 Project Record 或 Machine Snapshot。
-_Avoid_: Shell Session, Terminal Application, Machine Snapshot
+用户从已保存的 Project Run Configuration 显式启动后、仅存在于当前 App 进程中的交互式终端上下文；同一配置后续的启动或重启可以复用该上下文及其内存终端输出，但每次运行属于不同的 Project Run Execution，Session 不持久化为 Project Record 或 Machine Snapshot。
+_Avoid_: Shell Session, Terminal Application, Machine Snapshot, Project Run Execution
+
+**Project Run Execution**:
+Project Run Session 中一次启动或重启的独立运行代次，具有自身稳定身份与冻结的完整命令、Project Root 和解析后的工作目录；它从启动尝试开始，到退出、用户停止或启动失败时结束，同一 Session 的后续运行属于新的 Execution。
+_Avoid_: Project Run Session, Configuration Run State, Process ID
+
+**Active Project Run Execution**:
+处于“启动中”“运行中”“停止中”“停止失败”“重启中”或“重启失败”的 Project Run Execution；“已结束”“已退出”和“启动失败”的 Execution 不属于活动运行。
+_Avoid_: Running Project, Active Project, Active Project Run Session
 
 **Active Project Run Session**:
-处于“启动中”“运行中”“停止中”“停止失败”“重启中”或“重启失败”的 Project Run Session；“已结束”“已退出”和“启动失败”的会话不属于活动会话。
-_Avoid_: Running Project, Active Project
+当前承载 Active Project Run Execution 的 Project Run Session；没有当前 Execution，或当前 Execution 已结束、已退出或启动失败的 Session 不属于活动会话。
+_Avoid_: Running Project, Active Project, Active Project Run Execution
 
 **Project Run Failure**:
-Project Run Session 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
+Project Run Execution 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
 _Avoid_: Project Health, Project Error
 
 **Status Bar Residency**:

@@ -150,6 +150,7 @@ DevEnv 当前使用本地开发签名，不提供正式安装包、自动更新�
 - [只读 Environment Scan 与 Machine Snapshot](docs/adr/0002-read-only-environment-scan-snapshot.md)
 - [Project Root 与 Project Component](docs/adr/0008-model-projects-by-root-and-component.md)
 - [可信 Project Run 与 Environment Scan 的边界](docs/adr/0010-separate-trusted-project-runs-from-environment-scans.md)
+- [临时冻结的 Project Run Batch Intent](docs/adr/0012-model-batch-runs-as-ephemeral-frozen-intents.md)
 
 ## 参与项目
 

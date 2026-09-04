@@ -7,9 +7,10 @@ Project Run Session 使用当前用户可用的 Default Login Shell 和 SwiftTer
 ## Consequences
 
 - Project Trust 只表示用户允许 DevEnv 在该 Project Root 中执行已核对的运行配置，不表示项目安全、健康或满足 Project Requirements。
+- Project Run Batch Intent 跨越未信任 Project Root 时不得弱化首次运行核对：同一次批量确认必须逐项展示将首次信任并启动的完整命令与解析后的工作目录；用户可以一次确认多个 Project Root，各 Root 的信任保存彼此独立，某个 Root 保存失败只阻止该 Root 的目标，其余目标继续独立启动。
 - Project Run Coordinator 是配置、建议、信任、会话和进程生命周期的统一用户意图边界；项目文档与静态 Project Requirements 分析仍由既有 Projects 模型提供存储和只读发现能力。
-- 已保存配置的命令编辑先作为 App 内 launch draft 保留，PTY 与 Shell 进程成功启动后才写回项目文档；启动失败继续保留上次保存的命令。命令除空值校验外按用户输入原样展示并传给 Shell。
-- 工作目录或 Default Login Shell 在后续启动时失效会直接导致 launch failed，不按旧快照继续执行，也不回退到其他 Shell。
+- 已保存配置的命令编辑先作为 App 内 launch draft 保留；单项与批量启动都冻结并使用当前 draft，只有对应 PTY 与 Shell 进程成功启动后才写回项目文档，启动失败继续保留上次保存的命令。命令除空值校验外按用户输入原样展示并传给 Shell。
+- 冻结的单项或批量启动请求不会绕过执行时复核：配置启用状态、Project Root、工作目录边界与活动运行冲突必须再次验证；工作目录或 Default Login Shell 在后续启动时失效会直接导致 launch failed，不以新的命令或目录替换用户核对的快照，也不回退到其他 Shell。
 - 命令通过交互式登录 Shell 的单次 `-c` 调用执行；命令结束后 PTY 关闭并保留只读输出与退出码，不留下空闲通用 Shell。
 - 停止和 App 退出只向属于当前用户、仍绑定本次持有 PTY，或曾由该 PTY 明确见证且 PID 与启动时间身份仍匹配的进程组发信号，并始终排除 `<= 1` 与 App 自身进程组；不以登录 session 扫描推断所有权。
 - 进程若在被本次持有 PTY 明确见证前已完全脱离并重挂父进程，DevEnv 不再具备可安全验证的所有权，因此不会按登录 session、工作目录或命令文本猜测并发信号。

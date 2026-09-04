@@ -676,7 +676,7 @@ struct ContentView: View {
     @State private var runConfigurationSaveAttempted = false
     @State private var runConfigurationSourceIdentity: String?
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
-    @State private var pendingProjectRunTrust: ProjectRunTrustRequest?
+    @State private var pendingProjectRunTrust: ProjectRunFrozenStartRequest?
     @State private var selectedRunConfigurationID: String?
     @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
     @State private var runSearchText = ""

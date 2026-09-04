@@ -104,13 +104,13 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         XCTAssertEqual(handoffCount, 1)
         XCTAssertEqual(coordinator.pendingBatchTrustReview?.intent.startRequests, [
-            ProjectRunTrustRequest(
+            ProjectRunFrozenStartRequest(
                 configuration: first,
                 projectRoot: firstRoot.path,
                 command: first.command,
                 workingDirectory: firstRoot.path
             ),
-            ProjectRunTrustRequest(
+            ProjectRunFrozenStartRequest(
                 configuration: second,
                 projectRoot: secondRoot.path,
                 command: second.command,
@@ -465,7 +465,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
     }
 
-    func testUnavailableProjectCannotCreateAProcessEngine() throws {
+    func testUnavailableProjectRecordsRejectedStartWithoutLaunchingProcess() throws {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: storageDirectory) }
         let factory = FakeProjectRunEngineFactory()
@@ -491,8 +491,45 @@ final class ProjectRunSessionsTests: XCTestCase {
             coordinator.run(configuration, project: project),
             .rejected("项目不可用，不能执行：项目根目录不存在")
         )
-        XCTAssertTrue(factory.engines.isEmpty)
-        XCTAssertNil(coordinator.session(for: configuration.id))
+        let session = try XCTUnwrap(coordinator.session(for: configuration.id))
+        XCTAssertEqual(session.state, .launchFailed("项目不可用，不能执行：项目根目录不存在"))
+        XCTAssertEqual(session.currentExecution?.id, session.failureExecution?.id)
+        XCTAssertNil(session.failureExecution?.workingDirectory)
+        XCTAssertEqual(factory.engines.count, 1)
+        XCTAssertTrue(factory.engines[0].launches.isEmpty)
+    }
+
+    func testUnknownProjectRecordsRejectedStartForTheRunPage() throws {
+        let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: storageDirectory) }
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: ProjectsViewModel(
+                store: ProjectRecordStore(fileURL: storageDirectory.appendingPathComponent("records.json"))
+            ),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        let project = ProjectRecord(path: storageDirectory.appendingPathComponent("project").path, discoveredAt: Date())
+        let configuration = ProjectRunConfiguration(
+            id: "unknown-run",
+            projectID: project.id,
+            name: "Unknown Run",
+            command: "npm run dev",
+            workingDirectory: "."
+        )
+
+        XCTAssertEqual(
+            coordinator.run(configuration, project: project),
+            .rejected("正在确认项目是否可用")
+        )
+        let session = try XCTUnwrap(coordinator.session(for: configuration.id))
+        XCTAssertEqual(session.state, .launchFailed("正在确认项目是否可用"))
+        XCTAssertEqual(session.currentExecution?.id, session.failureExecution?.id)
+        XCTAssertNil(session.failureExecution?.workingDirectory)
+        XCTAssertEqual(factory.engines.count, 1)
+        XCTAssertTrue(factory.engines[0].launches.isEmpty)
     }
 
     func testDisabledConfigurationCannotStartDirectlyOrFromPendingTrust() throws {
@@ -553,41 +590,34 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "pnpm run dev -- --host 127.0.0.1",
             workingDirectory: "app"
         )
-        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        var document = ProjectRecordDocument(runConfigurations: [trusted, untrusted])
-        document.addDirect([trustedRoot.path, untrustedRoot.path])
-        try store.save(document)
-        let projectsModel = ProjectsViewModel(store: store)
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(trustedRoot.path))
-        let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: projectsModel,
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
+        let fixture = try ProjectRunTestFixture(
+            directory: directory,
+            configurations: [trusted, untrusted],
+            projectRoots: [trustedRoot, untrustedRoot]
         )
+        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(trustedRoot.path))
 
-        coordinator.startBatch(in: [trusted, untrusted])
+        fixture.coordinator.startBatch(in: [trusted, untrusted])
 
-        let review = try XCTUnwrap(coordinator.pendingBatchTrustReview)
+        let review = try XCTUnwrap(fixture.coordinator.pendingBatchTrustReview)
         XCTAssertEqual(review.projectRootsRequiringTrust, [untrustedRoot.path])
         XCTAssertEqual(review.intent.startRequests, [
-            ProjectRunTrustRequest(
+            ProjectRunFrozenStartRequest(
                 configuration: trusted,
                 projectRoot: trustedRoot.path,
                 command: trusted.command,
                 workingDirectory: trustedRoot.path
             ),
-            ProjectRunTrustRequest(
+            ProjectRunFrozenStartRequest(
                 configuration: untrusted,
                 projectRoot: untrustedRoot.path,
                 command: untrusted.command,
                 workingDirectory: untrustedWorkingDirectory.path
             ),
         ])
-        XCTAssertTrue(factory.engines.isEmpty)
-        XCTAssertNil(coordinator.session(for: trusted.id))
-        XCTAssertNil(coordinator.session(for: untrusted.id))
+        XCTAssertTrue(fixture.factory.engines.isEmpty)
+        XCTAssertNil(fixture.coordinator.session(for: trusted.id))
+        XCTAssertNil(fixture.coordinator.session(for: untrusted.id))
     }
 
     func testCancellingBatchTrustReviewDiscardsIntentWithoutTrustOrLaunches() throws {
@@ -694,9 +724,11 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(persistenceAttempts, [failingRoot.path, successfulRoot.path])
         XCTAssertEqual(trustedRoots, [alreadyTrustedRoot.path, successfulRoot.path])
         XCTAssertEqual(coordinator.session(for: alreadyTrusted.id)?.state, .running)
-        XCTAssertNil(coordinator.session(for: failing.id))
+        let failedTrustSession = try XCTUnwrap(coordinator.session(for: failing.id))
+        XCTAssertEqual(failedTrustSession.state, .launchFailed("Project Root 尚未信任"))
+        XCTAssertEqual(failedTrustSession.currentExecution?.id, failedTrustSession.failureExecution?.id)
         XCTAssertEqual(coordinator.session(for: successful.id)?.state, .running)
-        XCTAssertEqual(factory.engines.count, 2)
+        XCTAssertEqual(factory.engines.count, 3)
         XCTAssertEqual(
             factory.engines.flatMap(\.launches).map(\.arguments),
             [
@@ -785,7 +817,7 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         let intent = coordinator.makeBatchStartIntent(in: scope)
         XCTAssertEqual(intent.startRequests, [
-            ProjectRunTrustRequest(
+            ProjectRunFrozenStartRequest(
                 configuration: included,
                 projectRoot: includedRoot.path,
                 command: included.command,
@@ -853,6 +885,39 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(factory.engines[0].signals, [SIGINT])
         XCTAssertTrue(factory.engines[1].signals.isEmpty)
         XCTAssertEqual(coordinator.session(for: outside.id)?.state, .running)
+    }
+
+    func testBatchStopIntentIncludesAnExecutionAlreadyStoppingWithoutResendingSignals() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(
+            id: "stopping",
+            projectID: directory.path,
+            name: "Stopping",
+            command: "sleep 30",
+            workingDirectory: "."
+        )
+        let fixture = try ProjectRunTestFixture(
+            directory: directory,
+            configurations: [configuration],
+            projectRoots: [directory]
+        )
+        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(directory.path))
+        XCTAssertEqual(fixture.coordinator.run(configuration, projectRoot: directory.path), .started)
+        let executionID = try XCTUnwrap(fixture.coordinator.session(for: configuration.id)?.activeExecution?.id)
+        fixture.coordinator.stop(executionID: executionID)
+        XCTAssertEqual(fixture.coordinator.session(for: configuration.id)?.state, .stopping)
+        XCTAssertEqual(fixture.factory.engines[0].signals, [SIGINT])
+
+        XCTAssertTrue(fixture.coordinator.canStopBatch(in: [configuration]))
+        fixture.coordinator.requestBatchStop(in: [configuration])
+        XCTAssertEqual(fixture.coordinator.pendingBatchStopIntent?.executionIDs, [executionID])
+
+        fixture.coordinator.confirmBatchStop()
+
+        XCTAssertEqual(fixture.factory.engines[0].signals, [SIGINT])
+        XCTAssertEqual(fixture.coordinator.session(for: configuration.id)?.state, .stopping)
     }
 
     func testCancellingBatchStopDiscardsIntentWithoutSendingSignals() throws {
@@ -981,7 +1046,7 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopping)
         XCTAssertEqual(factory.engines[0].signals, [SIGINT])
-        XCTAssertFalse(coordinator.canStopBatch(in: [configuration]))
+        XCTAssertTrue(coordinator.canStopBatch(in: [configuration]))
         scheduler.runNext()
         scheduler.runNext()
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(137))
@@ -1141,7 +1206,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertFalse(coordinator.canStartBatch(in: [running, stopFailed, restartFailed, restarting]))
     }
 
-    func testBatchStartKeepsUnknownAvailabilityAsCandidateWithoutLaunchingIt() throws {
+    func testBatchStartKeepsUnknownAvailabilityAsCandidateAndRecordsItsRejection() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let projectRoot = directory.appendingPathComponent("project")
@@ -1153,29 +1218,26 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "run unknown",
             workingDirectory: "."
         )
-        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        var document = ProjectRecordDocument(runConfigurations: [configuration])
-        document.addDirect([projectRoot.path])
-        try store.save(document)
-        let projectsModel = ProjectsViewModel(store: store)
-        XCTAssertEqual(projectsModel.records.first?.availability, .unknown)
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(projectRoot.path))
-        let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: projectsModel,
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
+        let fixture = try ProjectRunTestFixture(
+            directory: directory,
+            configurations: [configuration],
+            projectRoots: [projectRoot]
         )
+        XCTAssertEqual(fixture.projectsModel.records.first?.availability, .unknown)
+        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(projectRoot.path))
 
-        XCTAssertEqual(coordinator.batchStartCandidates(in: [configuration]).map(\.id), [configuration.id])
-        let intent = coordinator.makeBatchStartIntent(in: [configuration])
+        XCTAssertEqual(fixture.coordinator.batchStartCandidates(in: [configuration]).map(\.id), [configuration.id])
+        let intent = fixture.coordinator.makeBatchStartIntent(in: [configuration])
         XCTAssertEqual(intent.startRequests.map(\.configuration.id), [configuration.id])
 
-        coordinator.submitBatchStart(intent)
+        fixture.coordinator.submitBatchStart(intent)
 
-        XCTAssertNil(coordinator.session(for: configuration.id))
-        XCTAssertTrue(factory.engines.isEmpty)
+        let session = try XCTUnwrap(fixture.coordinator.session(for: configuration.id))
+        XCTAssertEqual(session.state, .launchFailed("正在确认项目是否可用"))
+        XCTAssertEqual(session.currentExecution?.id, session.failureExecution?.id)
+        XCTAssertEqual(session.failureExecution?.command, configuration.command)
+        XCTAssertEqual(fixture.factory.engines.count, 1)
+        XCTAssertTrue(fixture.factory.engines[0].launches.isEmpty)
     }
 
     func testBatchStartRecordsPreflightFailureAndStartsValidSiblingsIndependently() async throws {
@@ -1197,39 +1259,38 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "run invalid",
             workingDirectory: "missing"
         )
-        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        var document = ProjectRecordDocument(runConfigurations: [valid, invalid])
-        document.addDirect([projectRoot.path])
-        try store.save(document)
-        let projectsModel = ProjectsViewModel(store: store)
-        projectsModel.refreshProjects()
-        for _ in 0 ..< 100 where projectsModel.records.contains(where: { $0.availability == .unknown }) {
+        let fixture = try ProjectRunTestFixture(
+            directory: directory,
+            configurations: [valid, invalid],
+            projectRoots: [projectRoot]
+        )
+        fixture.projectsModel.refreshProjects()
+        for _ in 0 ..< 100 where fixture.projectsModel.records.contains(where: { $0.availability == .unknown }) {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(projectRoot.path))
-        let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: projectsModel,
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
+        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(projectRoot.path))
 
-        let intent = coordinator.makeBatchStartIntent(in: [invalid, valid])
+        let intent = fixture.coordinator.makeBatchStartIntent(in: [invalid, valid])
         XCTAssertEqual(intent.startRequests.map(\.configuration.id), [valid.id])
+        let failedSession = try XCTUnwrap(fixture.coordinator.session(for: invalid.id))
         XCTAssertEqual(
-            coordinator.session(for: invalid.id)?.state,
+            failedSession.state,
             .launchFailed(ProjectRunConfigurationError.workingDirectoryMissing.localizedDescription)
         )
+        XCTAssertEqual(failedSession.currentExecution?.id, failedSession.failureExecution?.id)
+        XCTAssertNil(failedSession.failureExecution?.workingDirectory)
+        let firstFailureExecutionID = try XCTUnwrap(failedSession.failureExecution?.id)
+        _ = fixture.coordinator.makeBatchStartIntent(in: [invalid])
+        XCTAssertNotEqual(failedSession.failureExecution?.id, firstFailureExecutionID)
 
-        coordinator.submitBatchStart(intent)
+        fixture.coordinator.submitBatchStart(intent)
 
-        XCTAssertEqual(coordinator.session(for: valid.id)?.state, .running)
-        XCTAssertEqual(factory.engines.last?.launches.first?.arguments, ["-i", "-c", valid.command])
-        let validExecutionID = coordinator.session(for: valid.id)?.currentExecution?.id
-        coordinator.submitBatchStart(intent)
-        XCTAssertEqual(coordinator.session(for: valid.id)?.currentExecution?.id, validExecutionID)
-        XCTAssertEqual(factory.engines.last?.launches.count, 1)
+        XCTAssertEqual(fixture.coordinator.session(for: valid.id)?.state, .running)
+        XCTAssertEqual(fixture.factory.engines.last?.launches.first?.arguments, ["-i", "-c", valid.command])
+        let validExecutionID = fixture.coordinator.session(for: valid.id)?.currentExecution?.id
+        fixture.coordinator.submitBatchStart(intent)
+        XCTAssertEqual(fixture.coordinator.session(for: valid.id)?.currentExecution?.id, validExecutionID)
+        XCTAssertEqual(fixture.factory.engines.last?.launches.count, 1)
     }
 
     func testBatchStartFreezesDraftAndDirectoryWhileRejectingDisabledStateDrift() async throws {
@@ -1298,11 +1359,13 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         coordinator.submitBatchStart(intent)
 
-        let launch = try XCTUnwrap(factory.engines.first?.launches.first)
+        let launch = try XCTUnwrap(factory.engines.flatMap(\.launches).first)
         XCTAssertEqual(launch.arguments, ["-i", "-c", draftCommand])
         XCTAssertEqual(launch.workingDirectory, firstDirectory.path)
         XCTAssertEqual(coordinator.session(for: drafted.id)?.currentExecution?.command, draftCommand)
-        XCTAssertNil(coordinator.session(for: disabledAfterReview.id))
+        let disabledSession = try XCTUnwrap(coordinator.session(for: disabledAfterReview.id))
+        XCTAssertEqual(disabledSession.state, .launchFailed("运行配置已禁用"))
+        XCTAssertEqual(disabledSession.currentExecution?.id, disabledSession.failureExecution?.id)
         let savedDrafted = try XCTUnwrap(try store.load().runConfigurations.first { $0.id == drafted.id })
         XCTAssertEqual(savedDrafted.command, draftCommand)
         XCTAssertEqual(savedDrafted.workingDirectory, "second")
@@ -1311,6 +1374,45 @@ final class ProjectRunSessionsTests: XCTestCase {
             coordinator.runConfigurations().first { $0.id == drafted.id }?.command,
             newerDraft
         )
+    }
+
+    func testBatchStartRecordsActiveExecutionConflictWithoutReplacingTheRunningExecution() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(
+            id: "conflict",
+            projectID: projectRoot.path,
+            name: "Conflict",
+            command: "run conflict",
+            workingDirectory: "."
+        )
+        let fixture = try ProjectRunTestFixture(
+            directory: directory,
+            configurations: [configuration],
+            projectRoots: [projectRoot]
+        )
+        fixture.projectsModel.refreshProjects()
+        for _ in 0 ..< 100 where fixture.projectsModel.records.contains(where: { $0.availability == .unknown }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(projectRoot.path))
+        let intent = fixture.coordinator.makeBatchStartIntent(in: [configuration])
+        XCTAssertEqual(fixture.coordinator.run(configuration, projectRoot: projectRoot.path), .started)
+        let runningExecutionID = try XCTUnwrap(
+            fixture.coordinator.session(for: configuration.id)?.activeExecution?.id
+        )
+
+        fixture.coordinator.submitBatchStart(intent)
+
+        let session = try XCTUnwrap(fixture.coordinator.session(for: configuration.id))
+        XCTAssertEqual(session.state, .running)
+        XCTAssertEqual(session.activeExecution?.id, runningExecutionID)
+        XCTAssertEqual(session.currentExecution?.id, runningExecutionID)
+        XCTAssertNotEqual(session.failureExecution?.id, runningExecutionID)
+        XCTAssertEqual(session.failureMessage, "该运行配置已有活动会话")
+        XCTAssertEqual(fixture.factory.engines[0].launches.count, 1)
     }
 
     func testBatchStartRejectsChangedWorkingDirectoryWithoutBlockingSibling() async throws {
@@ -1416,9 +1518,13 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         coordinator.submitBatchStart(intent)
 
-        XCTAssertNil(coordinator.session(for: removed.id))
+        let removedSession = try XCTUnwrap(coordinator.session(for: removed.id))
+        XCTAssertEqual(removedSession.state, .launchFailed("运行配置已删除"))
+        XCTAssertEqual(removedSession.currentExecution?.id, removedSession.failureExecution?.id)
         XCTAssertEqual(coordinator.session(for: surviving.id)?.state, .running)
-        XCTAssertEqual(factory.engines.count, 1)
+        XCTAssertEqual(factory.engines.count, 2)
+        XCTAssertTrue(factory.engines[0].launches.isEmpty)
+        XCTAssertEqual(factory.engines[1].launches.first?.arguments, ["-i", "-c", surviving.command])
     }
 
     func testBatchStartPersistsSuccessfulDraftsWithoutBlockingOnSiblingLaunchFailure() async throws {
@@ -1647,6 +1753,44 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertNotEqual(retryExecution.id, failedExecution.id)
         XCTAssertEqual(session.activeExecution?.id, retryExecution.id)
         XCTAssertEqual(factory.engines[0].launches.count, 1)
+    }
+
+    func testRestartPreflightFailureHasDistinctExecutionIdentityWithoutReplacingActiveExecution() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        let workingDirectory = projectRoot.appendingPathComponent("app")
+        try FileManager.default.createDirectory(at: workingDirectory, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(
+            id: "restart-preflight",
+            projectID: projectRoot.path,
+            name: "Restart Preflight",
+            command: "run restart",
+            workingDirectory: "app"
+        )
+        let fixture = try ProjectRunTestFixture(
+            directory: directory,
+            configurations: [configuration],
+            projectRoots: [projectRoot]
+        )
+        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(projectRoot.path))
+        XCTAssertEqual(fixture.coordinator.run(configuration, projectRoot: projectRoot.path), .started)
+        let session = try XCTUnwrap(fixture.coordinator.session(for: configuration.id))
+        let activeExecutionID = try XCTUnwrap(session.activeExecution?.id)
+        try FileManager.default.removeItem(at: workingDirectory)
+
+        fixture.coordinator.restart(configuration, projectRoot: projectRoot.path)
+
+        XCTAssertEqual(
+            session.state,
+            .restartFailed(ProjectRunConfigurationError.workingDirectoryMissing.localizedDescription)
+        )
+        XCTAssertEqual(session.activeExecution?.id, activeExecutionID)
+        XCTAssertEqual(session.currentExecution?.id, activeExecutionID)
+        XCTAssertNotEqual(session.failureExecution?.id, activeExecutionID)
+        XCTAssertNil(session.failureExecution?.workingDirectory)
+        XCTAssertEqual(fixture.factory.engines[0].launches.count, 1)
+        XCTAssertTrue(fixture.factory.engines[0].signals.isEmpty)
     }
 
     func testLaunchRejectsAWorkingDirectoryChangedAfterTrustReview() throws {
@@ -1896,7 +2040,7 @@ final class ProjectRunSessionsTests: XCTestCase {
             workingDirectory: "scripts"
         )
 
-        let request: ProjectRunTrustRequest
+        let request: ProjectRunFrozenStartRequest
         switch coordinator.run(configuration, projectRoot: projectRoot.path) {
         case let .needsTrust(pendingRequest):
             request = pendingRequest
@@ -2268,7 +2412,10 @@ final class ProjectRunSessionsTests: XCTestCase {
         }
         XCTAssertEqual(engine.launches.count, 2)
         XCTAssertEqual(coordinator.session(for: configuration.id)?.lastSuccessfulCommand, "exit 0")
-        XCTAssertNil(session.currentExecution)
+        let preflightFailureExecution = try XCTUnwrap(session.currentExecution)
+        XCTAssertNotEqual(preflightFailureExecution.id, successfulExecutionID)
+        XCTAssertEqual(preflightFailureExecution.id, session.failureExecution?.id)
+        XCTAssertNil(preflightFailureExecution.workingDirectory)
         XCTAssertNil(session.activeExecution)
 
         try FileManager.default.removeItem(at: workingDirectory)
@@ -2647,6 +2794,36 @@ final class ProjectRunSessionsTests: XCTestCase {
         }
         childNeedsCleanup = isRunning(childPID)
         XCTAssertFalse(childNeedsCleanup, "后台子进程仍然存活：\(childPID)")
+    }
+}
+
+@MainActor
+private struct ProjectRunTestFixture {
+    let store: ProjectRecordStore
+    let projectsModel: ProjectsViewModel
+    let factory: FakeProjectRunEngineFactory
+    let scheduler: FakeProjectRunScheduler
+    let coordinator: ProjectRunCoordinator
+
+    init(
+        directory: URL,
+        configurations: [ProjectRunConfiguration],
+        projectRoots: [URL],
+        shellProvider: FakeProjectRunShellProvider = FakeProjectRunShellProvider(path: "/bin/zsh")
+    ) throws {
+        store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        var document = ProjectRecordDocument(runConfigurations: configurations)
+        document.addDirect(projectRoots.map(\.path))
+        try store.save(document)
+        projectsModel = ProjectsViewModel(store: store)
+        factory = FakeProjectRunEngineFactory()
+        scheduler = FakeProjectRunScheduler()
+        coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: shellProvider,
+            scheduler: scheduler
+        )
     }
 }
 
