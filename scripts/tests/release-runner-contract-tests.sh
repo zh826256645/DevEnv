@@ -61,6 +61,11 @@ EOF
 
     cat > "$fixture_root/runner/svc.sh" <<'EOF'
 #!/bin/bash
+runner_root="$(cd "$(dirname "$0")" && pwd -P)"
+if [[ "$PWD" != "$runner_root" ]]; then
+    printf 'Must run from runner root: expected %s, found %s\n' "$runner_root" "$PWD" >&2
+    exit 1
+fi
 printf '%s\n' 'status dev.github.actions.runner: Started'
 EOF
 
@@ -94,8 +99,16 @@ test_preflight_accepts_expected_release_host() {
     make_fixture "$fixture_root"
 
     local output
+    local status
+    set +e
     output="$(run_preflight "$fixture_root")"
+    status=$?
+    set -e
 
+    if [[ $status -ne 0 ]]; then
+        printf 'Expected release host preflight to pass. Actual output:\n%s\n' "$output" >&2
+        fail 'preflight should invoke Runner service control from the Runner root'
+    fi
     assert_contains "$output" 'Release Runner preflight passed.' 'expected release host should pass preflight'
 }
 
