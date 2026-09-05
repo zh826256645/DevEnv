@@ -37,6 +37,10 @@ jobs:
         shell: bash
         run: bash scripts/tests/release-runner-contract-tests.sh
 
+      - name: Validate Release artifact contracts
+        shell: bash
+        run: bash scripts/tests/release-artifact-contract-tests.sh
+
       - name: Record Xcode and Swift versions
         shell: bash
         run: |

@@ -249,6 +249,31 @@ DMG 采用不依赖 Finder 或 AppleScript 的简洁结构：
 - SHA-256 文件与 DMG 实际摘要一致；
 - 校验完成后卷能够正常卸载。
 
+### 6.3 构建与校验脚本
+
+Release workflow 必须调用仓库脚本，而不是在 YAML 中复制签名或 DMG 逻辑：
+
+```bash
+scripts/release/build-release-artifacts.sh \
+  --version 0.1.0 \
+  --build 1 \
+  --output-dir "$RUNNER_TEMP/release-artifacts" \
+  --derived-data "$RUNNER_TEMP/ReleaseRunnerDerivedData" \
+  --source-packages "$RUNNER_TEMP/SourcePackages"
+```
+
+脚本把 `--version` 与 `--build` 仅作为期望值校验，不会改写 Xcode 项目的 `MARKETING_VERSION` 或 `CURRENT_PROJECT_VERSION`。它在临时目录中构建并签名 App、核对 dSYM UUID、创建 DMG 和 SHA-256，调用 `verify-release-artifacts.sh` 挂载最终 DMG 完成验收后，才把三个产物发布到输出目录。若需独立复核已有产物，运行：
+
+```bash
+scripts/release/verify-release-artifacts.sh \
+  --dmg DevEnv-0.1.0-arm64.dmg \
+  --checksum DevEnv-0.1.0-arm64.dmg.sha256 \
+  --version 0.1.0 \
+  --build 1
+```
+
+两个脚本均为非交互式；已有同名输出时构建脚本会拒绝覆盖。
+
 ## 7. 数据兼容边界
 
 `v0.1.0` 保留现有开发构建中的 Project Record、Project Run Configuration 和 Project Trust：
