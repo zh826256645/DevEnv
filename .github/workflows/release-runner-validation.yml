@@ -87,18 +87,14 @@ jobs:
       - name: Run XCTest on arm64
         shell: bash
         run: |
-          set -o pipefail
-          xcodebuild test \
-            -project "$PROJECT_PATH" \
-            -scheme "$SCHEME" \
-            -configuration Debug \
-            -destination "platform=macOS,arch=arm64" \
-            -derivedDataPath "$RUNNER_TEMP/ReleaseRunnerDerivedData" \
-            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
-            -disableAutomaticPackageResolution \
-            -onlyUsePackageVersionsFromResolvedFile \
-            -resultBundlePath "$RUNNER_TEMP/DevEnvTests.xcresult" \
-            2>&1 | tee "$RUNNER_TEMP/release-runner-logs/tests.log"
+          set -euo pipefail
+          scripts/test/run-xctest-suite.sh \
+            --project "$PROJECT_PATH" \
+            --scheme "$SCHEME" \
+            --destination "platform=macOS,arch=arm64" \
+            --derived-data "$RUNNER_TEMP/ReleaseRunnerDerivedData" \
+            --source-packages "$RUNNER_TEMP/SourcePackages" \
+            --test-log "$RUNNER_TEMP/release-runner-logs/DevEnvTests.log"
 
       - name: Build Release app for arm64
         shell: bash
@@ -139,9 +135,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-runner-validation-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/release-runner-logs
-            ${{ runner.temp }}/DevEnvTests.xcresult
+          path: ${{ runner.temp }}/release-runner-logs
           if-no-files-found: warn
           retention-days: 7
 

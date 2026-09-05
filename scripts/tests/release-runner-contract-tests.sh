@@ -166,7 +166,7 @@ required_patterns = {
     "manual-only trigger": r"(?m)^on:\s*\n\s+workflow_dispatch:\s*$",
     "exact runner labels": r"(?ms)^\s+runs-on:\s*\n\s+- self-hosted\s*\n\s+- macOS\s*\n\s+- ARM64\s*\n\s+- release\s*$",
     "preflight invocation": r"scripts/release-runner/preflight\.sh",
-    "arm64 XCTest": r"xcodebuild test[\s\S]*?-destination [\"']platform=macOS,arch=arm64[\"']",
+    "arm64 XCTest": r"scripts/test/run-xctest-suite\.sh[\s\S]*?--destination [\"']platform=macOS,arch=arm64[\"'][\s\S]*?--test-log",
     "Release build": r"xcodebuild build[\s\S]*?-configuration Release[\s\S]*?ARCHS=arm64",
     "post-job cleanup": r"if:\s*\$\{\{ always\(\) \}\}[\s\S]*?scripts/release-runner/cleanup\.sh",
 }
@@ -181,7 +181,7 @@ preflight_index = text.find("Preflight dedicated Release Runner")
 if precheck_index < 0 or not (precheck_index < checkout_index < preflight_index):
     raise SystemExit("workflow must inspect the existing Runner workspace before checkout")
 
-for forbidden in ("pull_request:", "push:", "schedule:", "xcode-select", "RUNNER_WORKSPACE"):
+for forbidden in ("pull_request:", "push:", "schedule:", "xcode-select", "RUNNER_WORKSPACE", "xcodebuild test"):
     if forbidden in text:
         raise SystemExit(f"workflow must not contain {forbidden}")
 PY

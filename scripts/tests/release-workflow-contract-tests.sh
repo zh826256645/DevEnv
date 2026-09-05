@@ -5,19 +5,24 @@ set -euo pipefail
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW_FILE="$REPOSITORY_ROOT/.github/workflows/release.yml"
 CI_WORKFLOW_FILE="$REPOSITORY_ROOT/.github/workflows/ci.yml"
+XCTEST_RUNNER="$REPOSITORY_ROOT/scripts/test/run-xctest-suite.sh"
 
-python3 - "$WORKFLOW_FILE" "$CI_WORKFLOW_FILE" <<'PY'
+python3 - "$WORKFLOW_FILE" "$CI_WORKFLOW_FILE" "$XCTEST_RUNNER" <<'PY'
 from pathlib import Path
 import re
 import sys
 
 workflow_path = Path(sys.argv[1])
 ci_path = Path(sys.argv[2])
+xctest_runner_path = Path(sys.argv[3])
 if not workflow_path.exists():
     raise SystemExit(f"missing workflow: {workflow_path}")
+if not xctest_runner_path.exists():
+    raise SystemExit(f"missing XCTest runner: {xctest_runner_path}")
 
 text = workflow_path.read_text()
 ci_text = ci_path.read_text()
+xctest_runner_text = xctest_runner_path.read_text()
 
 required_patterns = {
     "manual workflow inputs": r"(?ms)^on:\s*\n\s+workflow_dispatch:\s*\n\s+inputs:\s*\n.*?mode:\s*\n.*?type:\s*choice\s*\n.*?options:\s*\n\s+- dry-run\s*\n\s+- release\s*\n.*?version:\s*\n.*?required:\s*true\s*\n.*?target_sha:\s*\n.*?required:\s*true",
@@ -31,10 +36,10 @@ required_patterns = {
     "locked v0.1.0 metadata": r"EXPECTED_RELEASE_VERSION:\s*0\.1\.0[\s\S]*?EXPECTED_RELEASE_BUILD:\s*[\"']?1[\"']?[\s\S]*?RELEASE_VERSION[\s\S]*?EXPECTED_RELEASE_VERSION[\s\S]*?builds != \{expected_build\}",
     "release runner preflight": r"scripts/release-runner/preflight\.sh",
     "locked dependency resolution": r"xcodebuild -resolvePackageDependencies[\s\S]*?-disableAutomaticPackageResolution[\s\S]*?-onlyUsePackageVersionsFromResolvedFile[\s\S]*?git diff --quiet",
-    "all arm64 XCTest": r"xcodebuild test[\s\S]*?-destination [\"']platform=macOS,arch=arm64[\"'][\s\S]*?-resultBundlePath",
+    "all arm64 XCTest": r"scripts/test/run-xctest-suite\.sh[\s\S]*?--destination [\"']platform=macOS,arch=arm64[\"'][\s\S]*?--test-log",
     "artifact build script": r"scripts/release/build-release-artifacts\.sh[\s\S]*?--version[\s\S]*?--build[\s\S]*?--output-dir",
     "temporary distribution artifact": r"(?m)uses:\s*actions/upload-artifact@[0-9a-f]{40}[\s\S]*?DevEnv-.*-arm64\.dmg[\s\S]*?retention-days:\s*(?:[1-9]|[1-8][0-9])\s*$",
-    "restricted diagnostics retention": r"(?m)uses:\s*actions/upload-artifact@[0-9a-f]{40}[\s\S]*?DevEnvTests\.xcresult[\s\S]*?DevEnv\.app\.dSYM[\s\S]*?retention-days:\s*90\s*$",
+    "restricted diagnostics retention": r"(?m)--test-log [\"']\$RUNNER_TEMP/release-runner-logs/DevEnvTests\.log[\"'][\s\S]*?uses:\s*actions/upload-artifact@[0-9a-f]{40}[\s\S]*?release-runner-logs[\s\S]*?DevEnv\.app\.dSYM[\s\S]*?retention-days:\s*90\s*$",
     "release-only publish job": r"(?ms)^\s+publish-release:\s*\n\s+name:.*\n\s+if:\s*\$\{\{[^\n]*inputs\.mode == 'release'[^\n]*\}\}",
     "publish dependency": r"(?ms)^\s+publish-release:\s*\n.*?needs:\s*build-and-verify",
     "publish dedicated runner": r"(?ms)^\s+publish-release:\s*\n.*?runs-on:\s*\n\s+- self-hosted\s*\n\s+- macOS\s*\n\s+- ARM64\s*\n\s+- release\s*$",
@@ -66,8 +71,22 @@ if "always() && steps.validate-checkout.outcome == 'success'" not in text:
 
 if "bash scripts/tests/release-workflow-contract-tests.sh" not in ci_text:
     raise SystemExit("CI must run the release workflow contract tests")
+if "bash scripts/tests/xctest-runner-contract-tests.sh" not in ci_text:
+    raise SystemExit("CI must run the direct XCTest runner contract tests")
+if "scripts/test/run-xctest-suite.sh" not in ci_text:
+    raise SystemExit("CI must use the direct XCTest runner")
 
-for forbidden in ("pull_request:", "push:", "schedule:", "continue-on-error:", "xcode-select", "release-distribution"):
+xctest_runner_patterns = {
+    "build-for-testing": r"xcodebuild build-for-testing",
+    "direct XCTest executable": r"DEVELOPER_DIR_PATH.*usr/bin/xctest",
+    "host app library injection": r"DYLD_INSERT_LIBRARIES=.*APP_LIBRARY",
+    "test result logging": r"tee -a \"\$TEST_LOG\"",
+}
+for description, pattern in xctest_runner_patterns.items():
+    if re.search(pattern, xctest_runner_text) is None:
+        raise SystemExit(f"XCTest runner is missing {description}")
+
+for forbidden in ("pull_request:", "push:", "schedule:", "continue-on-error:", "xcode-select", "release-distribution", "xcodebuild test"):
     if forbidden in text:
         raise SystemExit(f"release workflow must not contain {forbidden}")
 
