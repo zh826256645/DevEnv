@@ -114,30 +114,48 @@ if [[ -n "${DYLD_FRAMEWORK_PATH:-}" ]]; then
     framework_path="$framework_path:$DYLD_FRAMEWORK_PATH"
 fi
 
-DYLD_INSERT_LIBRARIES="$APP_LIBRARY:$SANITIZER_LIBRARY" \
-DYLD_FRAMEWORK_PATH="$framework_path" \
-LLVM_PROFILE_FILE="$PROFILE_PATH" \
-NSUnbufferedIO=YES \
-    "$XCTEST_EXECUTABLE" "$TEST_BUNDLE" 2>&1 | tee -a "$TEST_LOG"
+TEST_CLASSES=(
+    EnvironmentScannerTests
+    HomebrewServiceManagerTests
+    OverviewAttentionTests
+    ProjectRecordsTests
+    ProjectRequirementsTests
+    ProjectRunSessionsTests
+)
 
-python3 - "$TEST_LOG" <<'PY'
+for test_class in "${TEST_CLASSES[@]}"; do
+    printf '\nRunning isolated XCTest class: %s\n' "$test_class" | tee -a "$TEST_LOG"
+    DYLD_INSERT_LIBRARIES="$APP_LIBRARY:$SANITIZER_LIBRARY" \
+    DYLD_FRAMEWORK_PATH="$framework_path" \
+    LLVM_PROFILE_FILE="$PROFILE_PATH" \
+    NSUnbufferedIO=YES \
+        "$XCTEST_EXECUTABLE" \
+        -XCTest "DevEnvTests.$test_class" \
+        "$TEST_BUNDLE" 2>&1 | tee -a "$TEST_LOG"
+done
+
+python3 - "$TEST_LOG" "${#TEST_CLASSES[@]}" <<'PY'
 from pathlib import Path
 import re
 import sys
 
 text = Path(sys.argv[1]).read_text(errors="replace")
+expected_suites = int(sys.argv[2])
 summaries = re.findall(
-    r"Executed ([0-9]+) tests?, with ([0-9]+) failures? \(([0-9]+) unexpected\)",
+    r"Test Suite '(?:All|Selected) tests' passed[^\n]*\n"
+    r"\s*Executed ([0-9]+) tests?, with ([0-9]+) failures? \(([0-9]+) unexpected\)",
     text,
 )
-if not summaries:
-    raise SystemExit("XCTest output did not contain an executed-test summary")
-executed, failures, unexpected = (int(value) for value in summaries[-1])
-if executed == 0:
-    raise SystemExit("XCTest reported zero tests; refusing to pass the release gate")
-if failures != 0 or unexpected != 0:
+if len(summaries) != expected_suites:
     raise SystemExit(
-        f"XCTest summary reported {failures} failures ({unexpected} unexpected)"
+        f"XCTest output contained {len(summaries)} completed class summaries; "
+        f"expected {expected_suites}"
     )
+counts = [(int(executed), int(failures), int(unexpected)) for executed, failures, unexpected in summaries]
+if any(executed == 0 for executed, _, _ in counts):
+    raise SystemExit("XCTest reported zero tests for an isolated class; refusing to pass the release gate")
+if any(failures != 0 or unexpected != 0 for _, failures, unexpected in counts):
+    raise SystemExit("XCTest summary reported failures in an isolated class")
+executed = sum(count for count, _, _ in counts)
 print(f"Verified XCTest execution: {executed} tests, 0 failures.")
 PY

@@ -80,11 +80,28 @@ xctest_runner_patterns = {
     "build-for-testing": r"xcodebuild build-for-testing",
     "direct XCTest executable": r"DEVELOPER_DIR_PATH.*usr/bin/xctest",
     "host app library injection": r"DYLD_INSERT_LIBRARIES=.*APP_LIBRARY",
+    "isolated class execution": r"-XCTest \"DevEnvTests\.\$test_class\"",
     "test result logging": r"tee -a \"\$TEST_LOG\"",
 }
 for description, pattern in xctest_runner_patterns.items():
     if re.search(pattern, xctest_runner_text) is None:
         raise SystemExit(f"XCTest runner is missing {description}")
+
+class_block = re.search(r"TEST_CLASSES=\(\n([\s\S]*?)\n\)", xctest_runner_text)
+if class_block is None:
+    raise SystemExit("XCTest runner is missing its isolated test class list")
+configured_classes = set(re.findall(r"^\s+([A-Za-z0-9_]+Tests)\s*$", class_block.group(1), re.MULTILINE))
+declared_classes = set()
+for source in (xctest_runner_path.parents[2] / "DevEnvTests").glob("*.swift"):
+    declared_classes.update(re.findall(
+        r"\b(?:final\s+)?class\s+([A-Za-z0-9_]+Tests)\s*:\s*XCTestCase",
+        source.read_text(),
+    ))
+if configured_classes != declared_classes:
+    raise SystemExit(
+        f"XCTest runner class list mismatch: configured={sorted(configured_classes)}, "
+        f"declared={sorted(declared_classes)}"
+    )
 
 for forbidden in ("pull_request:", "push:", "schedule:", "continue-on-error:", "xcode-select", "release-distribution", "xcodebuild test"):
     if forbidden in text:
