@@ -46,6 +46,8 @@ jobs:
       target_sha: ${{ steps.release-metadata.outputs.target_sha }}
       version: ${{ steps.release-metadata.outputs.version }}
     env:
+      EXPECTED_RELEASE_VERSION: 0.1.0
+      EXPECTED_RELEASE_BUILD: "1"
       PROJECT_PATH: DevEnv.xcodeproj
       SCHEME: DevEnv
       RESOLVED_FILE: DevEnv.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
@@ -131,6 +133,10 @@ jobs:
             echo "::error::Invalid semantic version: $RELEASE_VERSION"
             exit 1
           fi
+          if [[ "$RELEASE_VERSION" != "$EXPECTED_RELEASE_VERSION" ]]; then
+            echo "::error::This release workflow is locked to version $EXPECTED_RELEASE_VERSION"
+            exit 1
+          fi
 
       - name: Preflight dedicated Release Runner
         shell: bash
@@ -204,7 +210,8 @@ jobs:
           python3 - \
             "$RUNNER_TEMP/release-runner-logs/build-settings-debug.json" \
             "$RUNNER_TEMP/release-runner-logs/build-settings-release.json" \
-            "$RELEASE_VERSION" \
+            "$EXPECTED_RELEASE_VERSION" \
+            "$EXPECTED_RELEASE_BUILD" \
             "$GITHUB_OUTPUT" \
             "$VERIFIED_TARGET_SHA" <<'PY'
           import json
@@ -212,7 +219,7 @@ jobs:
           import re
           import sys
 
-          debug_path, release_path, expected_version, output_path, target_sha = sys.argv[1:]
+          debug_path, release_path, expected_version, expected_build, output_path, target_sha = sys.argv[1:]
 
           def app_settings(path):
               entries = json.loads(Path(path).read_text())
@@ -227,11 +234,11 @@ jobs:
           builds = {debug.get("CURRENT_PROJECT_VERSION"), release.get("CURRENT_PROJECT_VERSION")}
           if versions != {expected_version}:
               raise SystemExit(f"project version mismatch: expected {expected_version}, found {sorted(str(value) for value in versions)}")
-          if len(builds) != 1:
-              raise SystemExit(f"Debug and Release Build values differ: {sorted(str(value) for value in builds)}")
-          build = next(iter(builds))
-          if not isinstance(build, str) or re.fullmatch(r"[0-9]+", build) is None:
-              raise SystemExit(f"invalid CURRENT_PROJECT_VERSION: {build}")
+          if builds != {expected_build}:
+              raise SystemExit(f"project Build mismatch: expected {expected_build}, found {sorted(str(value) for value in builds)}")
+          build = expected_build
+          if re.fullmatch(r"[0-9]+", build) is None:
+              raise SystemExit(f"invalid expected CURRENT_PROJECT_VERSION: {build}")
 
           tag_name = f"v{expected_version}"
           dmg_name = f"DevEnv-{expected_version}-arm64.dmg"
@@ -348,6 +355,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       CHECKSUM_NAME: ${{ needs.build-and-verify.outputs.checksum_name }}
       DMG_NAME: ${{ needs.build-and-verify.outputs.dmg_name }}
+      RELEASE_NOTES_FILE: docs/releases/v${{ needs.build-and-verify.outputs.version }}.md
       TAG_NAME: ${{ needs.build-and-verify.outputs.tag_name }}
       TARGET_SHA: ${{ needs.build-and-verify.outputs.target_sha }}
 
@@ -400,6 +408,7 @@ jobs:
           checksum_path="$RUNNER_TEMP/release-artifacts/$CHECKSUM_NAME"
           [[ -f "$dmg_path" ]] || { echo "::error::Verified DMG is missing: $dmg_path"; exit 1; }
           [[ -f "$checksum_path" ]] || { echo "::error::Verified checksum is missing: $checksum_path"; exit 1; }
+          [[ -s "$RELEASE_NOTES_FILE" ]] || { echo "::error::Locked Release Notes are missing: $RELEASE_NOTES_FILE"; exit 1; }
 
       - name: Create immutable annotated Tag
         shell: bash
@@ -429,7 +438,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "DevEnv $TAG_NAME Private Preview" \
-            --notes "受控发布工作流已生成此草稿。正式发布前，请由仓库所有者补充并核对已锁定的中文 Release Notes。" \
+            --notes-file "$RELEASE_NOTES_FILE" \
             --draft \
             --prerelease; then
             echo "::error::Draft Prerelease creation failed after the immutable annotated Tag was created. Do not move or recreate the Tag; use a new patch version."

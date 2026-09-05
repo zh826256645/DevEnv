@@ -28,6 +28,7 @@ required_patterns = {
     "full SHA validation": r"TARGET_SHA[^\n]*\^\[0-9a-fA-F\]\{40\}\$",
     "remote master validation": r"git/ref/heads/master[\s\S]*?remote_master_sha[\s\S]*?TARGET_SHA",
     "exact target checkout": r"uses:\s*actions/checkout@[0-9a-f]{40}[\s\S]*?ref:\s*\$\{\{ inputs\.target_sha \}\}[\s\S]*?persist-credentials:\s*false",
+    "locked v0.1.0 metadata": r"EXPECTED_RELEASE_VERSION:\s*0\.1\.0[\s\S]*?EXPECTED_RELEASE_BUILD:\s*[\"']?1[\"']?[\s\S]*?RELEASE_VERSION[\s\S]*?EXPECTED_RELEASE_VERSION[\s\S]*?builds != \{expected_build\}",
     "release runner preflight": r"scripts/release-runner/preflight\.sh",
     "locked dependency resolution": r"xcodebuild -resolvePackageDependencies[\s\S]*?-disableAutomaticPackageResolution[\s\S]*?-onlyUsePackageVersionsFromResolvedFile[\s\S]*?git diff --quiet",
     "all arm64 XCTest": r"xcodebuild test[\s\S]*?-destination [\"']platform=macOS,arch=arm64[\"'][\s\S]*?-resultBundlePath",
@@ -41,7 +42,8 @@ required_patterns = {
     "existing tag guard": r"git/matching-refs/tags/\$TAG_NAME[\s\S]*?refusing to overwrite existing tag",
     "existing release guard": r"releases\?per_page=100[\s\S]*?refusing to overwrite existing release",
     "annotated tag creation": r"repos/\$GITHUB_REPOSITORY/git/tags[\s\S]*?repos/\$GITHUB_REPOSITORY/git/refs",
-    "draft prerelease creation": r"gh release create[\s\S]*?--draft[\s\S]*?--prerelease",
+    "locked release notes": r"RELEASE_NOTES_FILE:\s*docs/releases/v\$\{\{ needs\.build-and-verify\.outputs\.version \}\}\.md[\s\S]*?\[\[ -s \"\$RELEASE_NOTES_FILE\" \]\][\s\S]*?--notes-file \"\$RELEASE_NOTES_FILE\"",
+    "draft prerelease creation": r"gh release create[\s\S]*?--notes-file \"\$RELEASE_NOTES_FILE\"[\s\S]*?--draft[\s\S]*?--prerelease",
     "post-job cleanup": r"if:\s*\$\{\{ always\(\) \}\}[\s\S]*?scripts/release-runner/cleanup\.sh",
 }
 
