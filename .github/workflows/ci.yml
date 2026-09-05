@@ -33,6 +33,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate Release Runner contracts
+        shell: bash
+        run: bash scripts/tests/release-runner-contract-tests.sh
+
       - name: Record Xcode and Swift versions
         shell: bash
         run: |

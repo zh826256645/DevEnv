@@ -124,25 +124,14 @@ Release Runner 固定：
 
 ### 4.3 Runner 生命周期操作手册
 
-Dry Run 或正式发布前：
+Runner 的首次注册、启动、停止、更新、发版前检查、发版后清理和故障恢复命令统一记录在 [Apple Silicon Release Runner 操作手册](release-runner.md)。核心约束如下：
 
-1. 确认 Runner 没有处理其他 Job，宿主机只供受控发版使用；
-2. 启动 Runner 服务，并用 Runner 安装目录中的 `./svc.sh status` 确认服务正在运行；
-3. 在 GitHub 仓库的 Actions Runner 页面确认它处于 `Idle`，且同时具有 `self-hosted`、`macOS`、`ARM64`、`release` 标签；
-4. 确认 `uname -m` 输出 `arm64`，`xcodebuild -version` 输出 `Xcode 26.6` 与 Build `17F113`；
-5. 检查可用磁盘空间、Runner `_work` 目录和 `hdiutil info`，清除已确认不再使用的旧工作区与残留挂载卷；
-6. 先触发 Dry Run；只有目标 `master` SHA 的 Dry Run 成功后才允许正式发布。
-
-运行结束后：
-
-1. 确认没有仍在执行或排队等待该 Runner 的发版 Job；
-2. 使用 `./svc.sh stop` 停止服务，并再次用 `./svc.sh status` 与 GitHub 页面确认 Runner 已离线；
-3. 卸载发版流程创建的卷，删除 `_work` 中未发布产物、临时凭据和残留 Checkout；
-4. 保留 GitHub Actions 中受控上传的日志、测试结果与 dSYM，不在 Runner 宿主机长期保存副本。
-
-Runner 需要更新时，先停止服务和接单，按 GitHub Actions Runner 的官方升级流程更新现有安装；更新后重新核对注册身份、四个标签、服务状态、CPU 架构和 Xcode 版本，再通过受控 Dry Run 恢复使用。
-
-Runner 故障时，不得把 Release Job 改派到普通开发机或 GitHub Hosted Runner。应取消尚未完成的正式工作流，保存诊断日志，确认没有正在写入的 Tag 或 Draft Release，再处理服务、注册、磁盘或挂载卷问题。恢复后必须从干净 Checkout 对新的完整工作流重新执行，不能只续跑 Tag/Release 写入步骤。
+- 常态下 Runner 服务停止，GitHub 页面显示 `Offline`；
+- 发版窗口开始时启动服务并确认 `Idle`、四个标签、`arm64` 和 `Xcode 26.6 (17F113)`；
+- 先运行 `.github/workflows/release-runner-validation.yml`，通过后才允许 Dry Run 或正式发布；
+- 工作流预检至少要求 50 GiB 可用磁盘、干净 Checkout、无 DevEnv 残留挂载卷且 Runner 服务正在运行；
+- 发版窗口结束后清理未发布产物并停止服务，不在宿主机长期保留日志、测试结果或 dSYM 副本；
+- Runner 或工具链异常时不得改派到普通开发机或 GitHub Hosted Runner，恢复后必须从干净 Checkout 重新执行完整门禁。
 
 ## 5. GitHub Actions 结构
 
@@ -162,18 +151,31 @@ Runner 故障时，不得把 Release Job 改派到普通开发机或 GitHub Host
 职责：
 
 1. Checkout 精确 Commit；
-2. 输出 Xcode 与 Swift 版本；
-3. 校验 `Package.resolved` 未被解析过程改写；
-4. 执行 XCTest；
-5. 执行 Release 编译检查；
-6. 保存失败时需要的测试结果和构建日志。
+2. 校验 Release Runner 预检脚本与受控工作流契约；
+3. 输出 Xcode 与 Swift 版本；
+4. 校验 `Package.resolved` 未被解析过程改写；
+5. 执行 XCTest；
+6. 执行 Release 编译检查；
+7. 保存失败时需要的测试结果和构建日志。
 
 CI 专属权限约束：
 
 - 工作流保持 `contents: read`；
 - 不授予 Release、Issues、Pull Requests 或 Packages 写权限。
 
-### 5.2 `.github/workflows/release.yml`
+### 5.2 `.github/workflows/release-runner-validation.yml`
+
+只允许 `workflow_dispatch`，使用 `self-hosted`、`macOS`、`ARM64`、`release` 四个标签的交集选择专用 Runner。该受控验证工作流负责：
+
+1. 执行 Release Runner 服务、架构、固定 Xcode、磁盘、工作区和挂载卷预检；
+2. 使用锁定依赖在 `arm64` 上运行全部 XCTest；
+3. 生成 Release App，并确认可执行文件仅包含 `arm64`；
+4. 失败时上传诊断日志与测试结果；
+5. 无论成功或失败都清理宿主机上的未发布产物。
+
+该工作流不切换 Xcode、不创建 DMG、不写入 Tag 或 GitHub Release，也不能替代正式 Dry Run。
+
+### 5.3 `.github/workflows/release.yml`
 
 只允许 `workflow_dispatch`。输入至少包括：
 

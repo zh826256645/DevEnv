@@ -1,0 +1,154 @@
+name: Release Runner Validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-runner-validation
+  cancel-in-progress: false
+
+jobs:
+  validate-release-runner:
+    name: Validate Apple Silicon Release Runner
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - release
+    timeout-minutes: 45
+    env:
+      PROJECT_PATH: DevEnv.xcodeproj
+      SCHEME: DevEnv
+      RESOLVED_FILE: DevEnv.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+    steps:
+      - name: Inspect existing Runner workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "$GITHUB_WORKSPACE/.git" ]]; then
+            residue="$(git -C "$GITHUB_WORKSPACE" status --porcelain=v1 --untracked-files=all)"
+            if [[ -n "$residue" ]]; then
+              echo "::error::Release Runner workspace contains changes from an earlier job"
+              printf '%s\n' "$residue"
+              exit 1
+            fi
+          elif [[ -n "$(find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+            echo "::error::Release Runner workspace contains non-Git residue"
+            exit 1
+          fi
+
+      - name: Check out selected commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          clean: true
+
+      - name: Preflight dedicated Release Runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_root="$(cd "$RUNNER_TEMP/../.." && pwd -P)"
+          scripts/release-runner/preflight.sh \
+            --workspace "$GITHUB_WORKSPACE" \
+            --runner-root "$runner_root" \
+            --minimum-free-gb 50
+
+      - name: Record toolchain versions
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-runner-logs"
+          {
+            xcodebuild -version
+            swift --version
+          } 2>&1 | tee "$RUNNER_TEMP/release-runner-logs/toolchain.log"
+
+      - name: Resolve locked dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            2>&1 | tee "$RUNNER_TEMP/release-runner-logs/dependencies.log"
+
+          if ! git diff --quiet -- "$RESOLVED_FILE"; then
+            echo "::error file=$RESOLVED_FILE::Dependency resolution modified the committed Package.resolved"
+            git diff -- "$RESOLVED_FILE" | tee -a "$RUNNER_TEMP/release-runner-logs/dependencies.log"
+            exit 1
+          fi
+
+      - name: Run XCTest on arm64
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "platform=macOS,arch=arm64" \
+            -derivedDataPath "$RUNNER_TEMP/ReleaseRunnerDerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath "$RUNNER_TEMP/DevEnvTests.xcresult" \
+            2>&1 | tee "$RUNNER_TEMP/release-runner-logs/tests.log"
+
+      - name: Build Release app for arm64
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination "platform=macOS,arch=arm64" \
+            -derivedDataPath "$RUNNER_TEMP/ReleaseRunnerDerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$RUNNER_TEMP/release-runner-logs/release-build.log"
+
+      - name: Verify Release executable architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          executable="$RUNNER_TEMP/ReleaseRunnerDerivedData/Build/Products/Release/DevEnv.app/Contents/MacOS/DevEnv"
+          [[ -x "$executable" ]] || {
+            echo "::error::Release executable is missing: $executable"
+            exit 1
+          }
+          architectures="$(lipo -archs "$executable")"
+          [[ "$architectures" == "arm64" ]] || {
+            echo "::error::Expected arm64-only Release executable, found: $architectures"
+            exit 1
+          }
+
+      - name: Upload failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-runner-validation-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/release-runner-logs
+            ${{ runner.temp }}/DevEnvTests.xcresult
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Clean unpublished artifacts
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          scripts/release-runner/cleanup.sh \
+            --workspace "$GITHUB_WORKSPACE" \
+            --temp-root "$RUNNER_TEMP"
