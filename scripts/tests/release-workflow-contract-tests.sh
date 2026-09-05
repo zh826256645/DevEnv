@@ -69,6 +69,15 @@ if first_master_check > text.find("source scripts/release/release-common.sh"):
 if "always() && steps.validate-checkout.outcome == 'success'" not in text:
     raise SystemExit("build cleanup must not execute repository code for a rejected or incomplete checkout")
 
+if "runs-on: macos-26" not in ci_text:
+    raise SystemExit("CI must use the arm64 macOS 26 image with the locked Xcode 26.6 toolchain")
+for expected_toolchain_contract in (
+    'EXPECTED_XCODE_VERSION: "26.6"',
+    'EXPECTED_XCODE_BUILD: "17F113"',
+    'unexpected Xcode toolchain',
+):
+    if expected_toolchain_contract not in ci_text:
+        raise SystemExit(f"CI is missing locked toolchain contract: {expected_toolchain_contract}")
 if "bash scripts/tests/release-workflow-contract-tests.sh" not in ci_text:
     raise SystemExit("CI must run the release workflow contract tests")
 if "bash scripts/tests/xctest-runner-contract-tests.sh" not in ci_text:

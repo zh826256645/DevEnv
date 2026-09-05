@@ -20,12 +20,14 @@ concurrency:
 jobs:
   test-and-build:
     name: Test and Release Build
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     env:
       PROJECT_PATH: DevEnv.xcodeproj
       SCHEME: DevEnv
       RESOLVED_FILE: DevEnv.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+      EXPECTED_XCODE_VERSION: "26.6"
+      EXPECTED_XCODE_BUILD: "17F113"
 
     steps:
       - name: Check out repository
@@ -49,14 +51,22 @@ jobs:
         shell: bash
         run: bash scripts/tests/xctest-runner-contract-tests.sh
 
-      - name: Record Xcode and Swift versions
+      - name: Verify Xcode and record toolchain versions
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/ci-logs"
+          xcode_output="$(xcodebuild -version)"
           {
-            xcodebuild -version
+            printf '%s\n' "$xcode_output"
             swift --version
           } 2>&1 | tee "$RUNNER_TEMP/ci-logs/toolchain.log"
+
+          if [[ "$xcode_output" != *"Xcode $EXPECTED_XCODE_VERSION"* \
+            || "$xcode_output" != *"Build version $EXPECTED_XCODE_BUILD"* ]]; then
+            echo "::error::unexpected Xcode toolchain; expected $EXPECTED_XCODE_VERSION ($EXPECTED_XCODE_BUILD)"
+            exit 1
+          fi
 
       - name: Resolve locked dependencies
         shell: bash

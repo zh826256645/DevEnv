@@ -153,7 +153,7 @@ Runner 的首次注册、启动、停止、更新、发版前检查、发版后�
 
 1. Checkout 精确 Commit；
 2. 校验 Release Runner 预检脚本与受控工作流契约；
-3. 输出 Xcode 与 Swift 版本；
+3. 在 `macos-26` arm64 镜像上校验 Xcode `26.6 (17F113)`，并输出 Swift 版本；
 4. 校验 `Package.resolved` 未被解析过程改写；
 5. 执行 XCTest；
 6. 执行 Release 编译检查；
