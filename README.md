@@ -8,7 +8,7 @@ DevEnv 是一个原生 macOS App，用来保存本地项目的运行方式，在
 
 DevEnv 不负责替代终端、包管理器或版本管理器。它调用项目本来就在使用的 Shell 和工具，并用 Machine Environment 扫描结果解释当前 Mac 是否具备项目声明的运行条件。
 
-> 当前项目仍处于早期开发阶段，尚未提供可下载的 Tag 或 GitHub Release。
+> 当前项目仍处于早期开发阶段；首个可下载版本是面向受邀测试者的 [`v0.1.0` Private Preview](https://github.com/zh826256645/DevEnv/releases/tag/v0.1.0)。
 
 ## 核心工作流
 
@@ -132,7 +132,7 @@ open DevEnv.xcodeproj
 
 在 Xcode 中等待 Swift Package Manager 解析固定版本的 SwiftTerm，选择 `DevEnv` scheme 和 `My Mac`，然后运行项目。
 
-DevEnv 当前使用本地开发签名，不提供正式安装包、自动更新或已发布版本的兼容性保证。
+源码构建使用本地开发签名；已发布的 `v0.1.0` Private Preview 使用完整 ad-hoc Bundle 签名，但不提供 Developer ID 签名、公证、自动更新或已发布版本的兼容性保证。
 
 ## 技术摘要
 

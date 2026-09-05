@@ -62,8 +62,9 @@ jobs:
             swift --version
           } 2>&1 | tee "$RUNNER_TEMP/ci-logs/toolchain.log"
 
-          if [[ "$xcode_output" != *"Xcode $EXPECTED_XCODE_VERSION"* \
-            || "$xcode_output" != *"Build version $EXPECTED_XCODE_BUILD"* ]]; then
+          xcode_version="$(printf '%s\n' "$xcode_output" | sed -n '1p')"
+          xcode_build="$(printf '%s\n' "$xcode_output" | sed -n '2p')"
+          if [[ "$xcode_version" != "Xcode $EXPECTED_XCODE_VERSION" || "$xcode_build" != "Build version $EXPECTED_XCODE_BUILD" ]]; then
             echo "::error::unexpected Xcode toolchain; expected $EXPECTED_XCODE_VERSION ($EXPECTED_XCODE_BUILD)"
             exit 1
           fi

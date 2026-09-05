@@ -50,7 +50,7 @@ required_patterns = {
     "locked release notes": r"RELEASE_NOTES_FILE:\s*docs/releases/v\$\{\{ needs\.build-and-verify\.outputs\.version \}\}\.md[\s\S]*?\[\[ -s \"\$RELEASE_NOTES_FILE\" \]\][\s\S]*?--notes-file \"\$RELEASE_NOTES_FILE\"",
     "draft prerelease creation": r"gh release create[\s\S]*?--notes-file \"\$RELEASE_NOTES_FILE\"[\s\S]*?--draft[\s\S]*?--prerelease",
     "draft prerelease verification": r"release_state=.*releases\?per_page=100[\s\S]*?select\(\.tag_name == .*TAG_NAME.*\)[\s\S]*?\[\.draft, \.prerelease\]",
-    "post-job cleanup": r"if:\s*\$\{\{ always\(\) \}\}[\s\S]*?scripts/release-runner/cleanup\.sh",
+    "trusted publish cleanup": r"id:\s*publish_checkout[\s\S]*?if:\s*\$\{\{ always\(\) && steps\.publish_checkout\.outcome == 'success' \}\}[\s\S]*?scripts/release-runner/cleanup\.sh",
 }
 
 for description, pattern in required_patterns.items():
@@ -69,6 +69,8 @@ if first_master_check > text.find("source scripts/release/release-common.sh"):
     raise SystemExit("caller-selected repository code must not run before the target is proven to be remote master")
 if "always() && steps.validate-checkout.outcome == 'success'" not in text:
     raise SystemExit("build cleanup must not execute repository code for a rejected or incomplete checkout")
+if "always() && steps.publish_checkout.outcome == 'success'" not in text:
+    raise SystemExit("publish cleanup must not execute repository code for a rejected or incomplete checkout")
 
 if "runs-on: macos-26" not in ci_text:
     raise SystemExit("CI must use the arm64 macOS 26 image with the locked Xcode 26.6 toolchain")
@@ -79,6 +81,13 @@ for expected_toolchain_contract in (
 ):
     if expected_toolchain_contract not in ci_text:
         raise SystemExit(f"CI is missing locked toolchain contract: {expected_toolchain_contract}")
+if re.search(
+    r'xcode_version=.*sed -n ["\']1p["\'][\s\S]*?xcode_build=.*sed -n ["\']2p["\'][\s\S]*?'
+    r'\[\[ "\$xcode_version" != "Xcode \$EXPECTED_XCODE_VERSION" \|\| '
+    r'"\$xcode_build" != "Build version \$EXPECTED_XCODE_BUILD" \]\]',
+    ci_text,
+) is None:
+    raise SystemExit("CI must compare the two Xcode version lines exactly")
 if "bash scripts/tests/release-workflow-contract-tests.sh" not in ci_text:
     raise SystemExit("CI must run the release workflow contract tests")
 if "bash scripts/tests/xctest-runner-contract-tests.sh" not in ci_text:

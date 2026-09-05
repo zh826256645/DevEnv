@@ -355,6 +355,7 @@ jobs:
 
     steps:
       - name: Check out verified target without persisted credentials
+        id: publish_checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ needs.build-and-verify.outputs.target_sha }}
@@ -447,7 +448,7 @@ jobs:
           fi
 
       - name: Clean publication Runner artifacts
-        if: ${{ always() }}
+        if: ${{ always() && steps.publish_checkout.outcome == 'success' }}
         shell: bash
         run: |
           scripts/release-runner/cleanup.sh \

@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PREFLIGHT_SCRIPT="$REPOSITORY_ROOT/scripts/release-runner/preflight.sh"
+CLEANUP_SCRIPT="$REPOSITORY_ROOT/scripts/release-runner/cleanup.sh"
 WORKFLOW_FILE="$REPOSITORY_ROOT/.github/workflows/release-runner-validation.yml"
 
 fail() {
@@ -18,6 +19,17 @@ assert_contains() {
 
     if [[ "$output" != *"$expected"* ]]; then
         printf 'Expected output to contain: %s\nActual output:\n%s\n' "$expected" "$output" >&2
+        fail "$context"
+    fi
+}
+
+assert_not_contains() {
+    local output="$1"
+    local unexpected="$2"
+    local context="$3"
+
+    if [[ "$output" == *"$unexpected"* ]]; then
+        printf 'Expected output not to contain: %s\nActual output:\n%s\n' "$unexpected" "$output" >&2
         fail "$context"
     fi
 }
@@ -164,6 +176,84 @@ EOF
     assert_contains "$output" 'Residual release disk image or mounted volume detected' 'mount residue should explain the cleanup requirement'
 }
 
+test_cleanup_detaches_only_controlled_temp_images() {
+    local fixture_root="$TEST_ROOT/cleanup-ownership"
+    local workspace="$fixture_root/workspace"
+    local temp_root="$fixture_root/temp"
+    local owned_image="$temp_root/devenv-release-build.fixture/DevEnv-0.1.0-arm64.dmg"
+    local invalid_image="$temp_root/devenv-release-build.invalid/DevEnv-not-a-semver-arm64.dmg"
+    local unrelated_image="$fixture_root/downloads/DevEnv-0.1.0-arm64.dmg"
+
+    mkdir -p \
+        "$fixture_root/bin" \
+        "$workspace" \
+        "$(dirname "$owned_image")" \
+        "$(dirname "$invalid_image")" \
+        "$(dirname "$unrelated_image")"
+    fixture_root="$(cd "$fixture_root" && pwd -P)"
+    workspace="$fixture_root/workspace"
+    temp_root="$fixture_root/temp"
+    owned_image="$temp_root/devenv-release-build.fixture/DevEnv-0.1.0-arm64.dmg"
+    invalid_image="$temp_root/devenv-release-build.invalid/DevEnv-not-a-semver-arm64.dmg"
+    unrelated_image="$fixture_root/downloads/DevEnv-0.1.0-arm64.dmg"
+
+    git -C "$workspace" init -q
+    git -C "$workspace" config user.name 'Release Runner Test'
+    git -C "$workspace" config user.email 'release-runner-test@example.invalid'
+    printf 'fixture\n' > "$workspace/tracked.txt"
+    git -C "$workspace" add tracked.txt
+    git -C "$workspace" commit -qm 'Create cleanup fixture'
+    : > "$owned_image"
+    : > "$invalid_image"
+    : > "$unrelated_image"
+
+    {
+        printf '%s\n' 'framework       : 700.100.2'
+        printf '%s\n' '================================================'
+        printf 'image-path      : %s\n' "$owned_image"
+        printf '/dev/disk9\tGUID_partition_scheme\n'
+        printf '/dev/disk9s1\tApple_HFS\t/Volumes/DevEnv Owned\n'
+        printf '%s\n' '================================================'
+        printf 'image-path      : %s\n' "$invalid_image"
+        printf '/dev/disk10\tGUID_partition_scheme\n'
+        printf '/dev/disk10s1\tApple_HFS\t/Volumes/DevEnv Invalid\n'
+        printf '%s\n' '================================================'
+        printf 'image-path      : %s\n' "$unrelated_image"
+        printf '/dev/disk11\tGUID_partition_scheme\n'
+        printf '/dev/disk11s1\tApple_HFS\t/Volumes/DevEnv Unrelated\n'
+    } > "$fixture_root/hdiutil-info"
+
+    cat > "$fixture_root/bin/hdiutil" <<'EOF'
+#!/bin/bash
+fixture_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+case "${1:-}" in
+    info)
+        cat "$fixture_root/hdiutil-info"
+        ;;
+    detach)
+        printf '%s\n' "$2" >> "$fixture_root/detach-log"
+        ;;
+    *)
+        exit 2
+        ;;
+esac
+EOF
+    chmod +x "$fixture_root/bin/hdiutil"
+
+    local output
+    output="$(PATH="$fixture_root/bin:/usr/bin:/bin" \
+        "$CLEANUP_SCRIPT" \
+        --workspace "$workspace" \
+        --temp-root "$temp_root" 2>&1)"
+
+    local detached
+    detached="$(cat "$fixture_root/detach-log")"
+    assert_contains "$detached" '/Volumes/DevEnv Owned' 'cleanup should detach a DMG originating under the controlled temp root'
+    assert_not_contains "$detached" '/Volumes/DevEnv Invalid' 'cleanup must reject a non-SemVer DMG name inside the controlled temp root'
+    assert_not_contains "$detached" '/Volumes/DevEnv Unrelated' 'cleanup must not detach a similarly named volume from an unrelated image'
+    assert_contains "$output" 'Release Runner cleanup completed.' 'controlled cleanup should complete'
+}
+
 test_workflow_exposes_controlled_release_runner_contract() {
     python3 - "$WORKFLOW_FILE" <<'PY'
 from pathlib import Path
@@ -181,7 +271,7 @@ required_patterns = {
     "preflight invocation": r"scripts/release-runner/preflight\.sh",
     "arm64 XCTest": r"scripts/test/run-xctest-suite\.sh[\s\S]*?--destination [\"']platform=macOS,arch=arm64[\"'][\s\S]*?--test-log",
     "Release build": r"xcodebuild build[\s\S]*?-configuration Release[\s\S]*?ARCHS=arm64",
-    "post-job cleanup": r"if:\s*\$\{\{ always\(\) \}\}[\s\S]*?scripts/release-runner/cleanup\.sh",
+    "trusted post-job cleanup": r"id:\s*checkout[\s\S]*?if:\s*\$\{\{ always\(\) && steps\.checkout\.outcome == 'success' \}\}[\s\S]*?scripts/release-runner/cleanup\.sh",
 }
 
 for description, pattern in required_patterns.items():
@@ -207,6 +297,7 @@ test_preflight_accepts_expected_release_host
 test_preflight_rejects_xcode_mismatch
 test_preflight_rejects_non_arm64_host
 test_preflight_rejects_release_mount_residue
+test_cleanup_detaches_only_controlled_temp_images
 test_workflow_exposes_controlled_release_runner_contract
 
 printf 'Release Runner contract tests passed.\n'
