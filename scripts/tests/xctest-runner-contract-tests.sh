@@ -60,7 +60,7 @@ EOF
 run_fixture() {
     local root="$1"
     local mode="$2"
-    PATH="$root/bin:/usr/bin:/bin" \
+    PATH="$root/bin:$PATH" \
     XCTEST_FIXTURE_MODE="$mode" \
         "$RUNNER" \
         --project DevEnv.xcodeproj \
