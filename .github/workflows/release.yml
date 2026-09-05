@@ -439,8 +439,8 @@ jobs:
             exit 1
           fi
 
-          release_state="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" \
-            --jq '[.draft, .prerelease] | @tsv')"
+          release_state="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$TAG_NAME\") | [.draft, .prerelease] | @tsv" | head -n 1)"
           if [[ "$release_state" != $'true\ttrue' ]]; then
             echo "::error::Created Release is not both Draft and Prerelease"
             exit 1

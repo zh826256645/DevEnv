@@ -49,6 +49,7 @@ required_patterns = {
     "annotated tag creation": r"repos/\$GITHUB_REPOSITORY/git/tags[\s\S]*?repos/\$GITHUB_REPOSITORY/git/refs",
     "locked release notes": r"RELEASE_NOTES_FILE:\s*docs/releases/v\$\{\{ needs\.build-and-verify\.outputs\.version \}\}\.md[\s\S]*?\[\[ -s \"\$RELEASE_NOTES_FILE\" \]\][\s\S]*?--notes-file \"\$RELEASE_NOTES_FILE\"",
     "draft prerelease creation": r"gh release create[\s\S]*?--notes-file \"\$RELEASE_NOTES_FILE\"[\s\S]*?--draft[\s\S]*?--prerelease",
+    "draft prerelease verification": r"release_state=.*releases\?per_page=100[\s\S]*?select\(\.tag_name == .*TAG_NAME.*\)[\s\S]*?\[\.draft, \.prerelease\]",
     "post-job cleanup": r"if:\s*\$\{\{ always\(\) \}\}[\s\S]*?scripts/release-runner/cleanup\.sh",
 }
 
