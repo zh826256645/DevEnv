@@ -1,0 +1,455 @@
+name: Controlled Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Run all gates without publishing, or create a Draft Prerelease
+        required: true
+        type: choice
+        options:
+          - dry-run
+          - release
+      version:
+        description: Semantic version without the v prefix, for example 0.1.0
+        required: true
+        type: string
+      target_sha:
+        description: Full Commit SHA currently at the head of remote master
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build-and-verify:
+    name: Build and Verify Release Candidate
+    permissions:
+      contents: read
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - release
+    timeout-minutes: 90
+    outputs:
+      artifact_name: ${{ steps.release-metadata.outputs.artifact_name }}
+      build: ${{ steps.release-metadata.outputs.build }}
+      checksum_name: ${{ steps.release-metadata.outputs.checksum_name }}
+      dmg_name: ${{ steps.release-metadata.outputs.dmg_name }}
+      tag_name: ${{ steps.release-metadata.outputs.tag_name }}
+      target_sha: ${{ steps.release-metadata.outputs.target_sha }}
+      version: ${{ steps.release-metadata.outputs.version }}
+    env:
+      EXPECTED_RELEASE_VERSION: 0.1.0
+      EXPECTED_RELEASE_BUILD: "1"
+      PROJECT_PATH: DevEnv.xcodeproj
+      SCHEME: DevEnv
+      RESOLVED_FILE: DevEnv.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+      RELEASE_MODE: ${{ inputs.mode }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      TARGET_SHA: ${{ inputs.target_sha }}
+
+    steps:
+      - name: Inspect existing Runner workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "$GITHUB_WORKSPACE/.git" ]]; then
+            residue="$(git -C "$GITHUB_WORKSPACE" status --porcelain=v1 --untracked-files=all)"
+            if [[ -n "$residue" ]]; then
+              echo "::error::Release Runner workspace contains changes from an earlier job"
+              printf '%s\n' "$residue"
+              exit 1
+            fi
+          elif [[ -n "$(find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+            echo "::error::Release Runner workspace contains non-Git residue"
+            exit 1
+          fi
+
+      - name: Validate requested target before checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$RELEASE_MODE" in
+            dry-run|release) ;;
+            *)
+              echo "::error::Unsupported release mode: $RELEASE_MODE"
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::target_sha must be a full 40-character Commit SHA"
+            exit 1
+          fi
+
+          remote_master_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" --jq .object.sha)"
+          normalized_target_sha="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$normalized_target_sha" != "$remote_master_sha" ]]; then
+            echo "::error::target_sha must equal the current remote master HEAD ($remote_master_sha)"
+            exit 1
+          fi
+
+          printf 'VERIFIED_TARGET_SHA=%s\n' "$remote_master_sha" >> "$GITHUB_ENV"
+
+      - name: Check out verified target Commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+
+      - name: Validate trusted checkout and version
+        id: validate-checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          checked_out_sha="$(git rev-parse HEAD)"
+          current_master_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" --jq .object.sha)"
+          if [[ "$checked_out_sha" != "$VERIFIED_TARGET_SHA" ]]; then
+            echo "::error::Workspace HEAD $checked_out_sha does not match verified target $VERIFIED_TARGET_SHA"
+            exit 1
+          fi
+          if [[ "$current_master_sha" != "$VERIFIED_TARGET_SHA" ]]; then
+            echo "::error::remote master moved to $current_master_sha before checkout validation"
+            exit 1
+          fi
+
+          source scripts/release/release-common.sh
+          if ! release_is_semantic_version "$RELEASE_VERSION"; then
+            echo "::error::Invalid semantic version: $RELEASE_VERSION"
+            exit 1
+          fi
+          if [[ "$RELEASE_VERSION" != "$EXPECTED_RELEASE_VERSION" ]]; then
+            echo "::error::This release workflow is locked to version $EXPECTED_RELEASE_VERSION"
+            exit 1
+          fi
+
+      - name: Preflight dedicated Release Runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_root="$(cd "$RUNNER_TEMP/../.." && pwd -P)"
+          scripts/release-runner/preflight.sh \
+            --workspace "$GITHUB_WORKSPACE" \
+            --runner-root "$runner_root" \
+            --minimum-free-gb 50
+
+      - name: Prepare controlled output directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            "$RUNNER_TEMP/release-runner-logs" \
+            "$RUNNER_TEMP/release-artifacts" \
+            "$RUNNER_TEMP/SourcePackages"
+          {
+            xcodebuild -version
+            swift --version
+            git rev-parse HEAD
+          } 2>&1 | tee "$RUNNER_TEMP/release-runner-logs/toolchain-and-commit.log"
+
+      - name: Resolve locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            2>&1 | tee "$RUNNER_TEMP/release-runner-logs/dependencies.log"
+
+          if ! git diff --quiet -- "$RESOLVED_FILE"; then
+            echo "::error file=$RESOLVED_FILE::Dependency resolution modified the committed Package.resolved"
+            git diff -- "$RESOLVED_FILE" | tee -a "$RUNNER_TEMP/release-runner-logs/dependencies.log"
+            exit 1
+          fi
+
+          residue="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$residue" ]]; then
+            echo "::error::Dependency resolution left the repository workspace dirty"
+            printf '%s\n' "$residue" | tee -a "$RUNNER_TEMP/release-runner-logs/dependencies.log"
+            exit 1
+          fi
+
+      - name: Validate project version and Build
+        id: release-metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for configuration in Debug Release; do
+            normalized_configuration="$(printf '%s' "$configuration" | tr '[:upper:]' '[:lower:]')"
+            xcodebuild -showBuildSettings -json \
+              -project "$PROJECT_PATH" \
+              -scheme "$SCHEME" \
+              -configuration "$configuration" \
+              -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+              -disableAutomaticPackageResolution \
+              -onlyUsePackageVersionsFromResolvedFile \
+              > "$RUNNER_TEMP/release-runner-logs/build-settings-${normalized_configuration}.json" \
+              2> "$RUNNER_TEMP/release-runner-logs/build-settings-${normalized_configuration}.stderr.log"
+          done
+
+          python3 - \
+            "$RUNNER_TEMP/release-runner-logs/build-settings-debug.json" \
+            "$RUNNER_TEMP/release-runner-logs/build-settings-release.json" \
+            "$EXPECTED_RELEASE_VERSION" \
+            "$EXPECTED_RELEASE_BUILD" \
+            "$GITHUB_OUTPUT" \
+            "$VERIFIED_TARGET_SHA" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          debug_path, release_path, expected_version, expected_build, output_path, target_sha = sys.argv[1:]
+
+          def app_settings(path):
+              entries = json.loads(Path(path).read_text())
+              matches = [entry.get("buildSettings", {}) for entry in entries if entry.get("target") == "DevEnv"]
+              if len(matches) != 1:
+                  raise SystemExit(f"expected one DevEnv target in {path}, found {len(matches)}")
+              return matches[0]
+
+          debug = app_settings(debug_path)
+          release = app_settings(release_path)
+          versions = {debug.get("MARKETING_VERSION"), release.get("MARKETING_VERSION")}
+          builds = {debug.get("CURRENT_PROJECT_VERSION"), release.get("CURRENT_PROJECT_VERSION")}
+          if versions != {expected_version}:
+              raise SystemExit(f"project version mismatch: expected {expected_version}, found {sorted(str(value) for value in versions)}")
+          if builds != {expected_build}:
+              raise SystemExit(f"project Build mismatch: expected {expected_build}, found {sorted(str(value) for value in builds)}")
+          build = expected_build
+          if re.fullmatch(r"[0-9]+", build) is None:
+              raise SystemExit(f"invalid expected CURRENT_PROJECT_VERSION: {build}")
+
+          tag_name = f"v{expected_version}"
+          dmg_name = f"DevEnv-{expected_version}-arm64.dmg"
+          values = {
+              "artifact_name": f"devenv-{expected_version}-{target_sha[:12]}",
+              "build": build,
+              "checksum_name": f"{dmg_name}.sha256",
+              "dmg_name": dmg_name,
+              "tag_name": tag_name,
+              "target_sha": target_sha,
+              "version": expected_version,
+          }
+          with Path(output_path).open("a") as output:
+              for key, value in values.items():
+                  print(f"{key}={value}", file=output)
+          PY
+
+      - name: Refuse existing Tag or Release
+        if: ${{ inputs.mode == 'release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release-metadata.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          existing_tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG_NAME" \
+            --jq ".[] | select(.ref == \"refs/tags/$TAG_NAME\") | .ref" | head -n 1)"
+          if [[ -n "$existing_tag_ref" ]]; then
+            echo "::error::refusing to overwrite existing tag $TAG_NAME"
+            exit 1
+          fi
+
+          existing_release_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$TAG_NAME\") | .id" | head -n 1)"
+          if [[ -n "$existing_release_id" ]]; then
+            echo "::error::refusing to overwrite existing release $TAG_NAME"
+            exit 1
+          fi
+
+      - name: Run all XCTest on arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/test/run-xctest-suite.sh \
+            --project "$PROJECT_PATH" \
+            --scheme "$SCHEME" \
+            --destination "platform=macOS,arch=arm64" \
+            --derived-data "$RUNNER_TEMP/ReleaseRunnerDerivedData" \
+            --source-packages "$RUNNER_TEMP/SourcePackages" \
+            --test-log "$RUNNER_TEMP/release-runner-logs/DevEnvTests.log"
+
+      - name: Build, sign, package, and verify arm64 artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          scripts/release/build-release-artifacts.sh \
+            --version "${{ steps.release-metadata.outputs.version }}" \
+            --build "${{ steps.release-metadata.outputs.build }}" \
+            --output-dir "$RUNNER_TEMP/release-artifacts" \
+            --derived-data "$RUNNER_TEMP/ReleaseRunnerDerivedData" \
+            --source-packages "$RUNNER_TEMP/SourcePackages" \
+            2>&1 | tee "$RUNNER_TEMP/release-runner-logs/release-artifacts.log"
+
+      - name: Upload temporary distribution artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.release-metadata.outputs.artifact_name }}
+          path: |
+            ${{ runner.temp }}/release-artifacts/DevEnv-${{ steps.release-metadata.outputs.version }}-arm64.dmg
+            ${{ runner.temp }}/release-artifacts/DevEnv-${{ steps.release-metadata.outputs.version }}-arm64.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload restricted Release diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/release-runner-logs
+            ${{ runner.temp }}/release-artifacts/DevEnv.app.dSYM
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Clean unpublished Runner artifacts
+        if: ${{ always() && steps.validate-checkout.outcome == 'success' }}
+        shell: bash
+        run: |
+          scripts/release-runner/cleanup.sh \
+            --workspace "$GITHUB_WORKSPACE" \
+            --temp-root "$RUNNER_TEMP"
+
+  publish-release:
+    name: Create Annotated Tag and Draft Prerelease
+    if: ${{ needs.build-and-verify.result == 'success' && inputs.mode == 'release' }}
+    needs: build-and-verify
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - release
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHECKSUM_NAME: ${{ needs.build-and-verify.outputs.checksum_name }}
+      DMG_NAME: ${{ needs.build-and-verify.outputs.dmg_name }}
+      RELEASE_NOTES_FILE: docs/releases/v${{ needs.build-and-verify.outputs.version }}.md
+      TAG_NAME: ${{ needs.build-and-verify.outputs.tag_name }}
+      TARGET_SHA: ${{ needs.build-and-verify.outputs.target_sha }}
+
+    steps:
+      - name: Check out verified target without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.build-and-verify.outputs.target_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download verified distribution artifact
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: ${{ needs.build-and-verify.outputs.artifact_name }}
+          path: ${{ runner.temp }}/release-artifacts
+
+      - name: Recheck immutable publication boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          checked_out_sha="$(git rev-parse HEAD)"
+          normalized_target_sha="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          remote_master_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" --jq .object.sha)"
+          if [[ "$checked_out_sha" != "$normalized_target_sha" ]]; then
+            echo "::error::Publication checkout does not match the verified target SHA"
+            exit 1
+          fi
+          if [[ "$remote_master_sha" != "$normalized_target_sha" ]]; then
+            echo "::error::remote master moved to $remote_master_sha after build verification"
+            exit 1
+          fi
+
+          existing_tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG_NAME" \
+            --jq ".[] | select(.ref == \"refs/tags/$TAG_NAME\") | .ref" | head -n 1)"
+          if [[ -n "$existing_tag_ref" ]]; then
+            echo "::error::refusing to overwrite existing tag $TAG_NAME"
+            exit 1
+          fi
+
+          existing_release_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$TAG_NAME\") | .id" | head -n 1)"
+          if [[ -n "$existing_release_id" ]]; then
+            echo "::error::refusing to overwrite existing release $TAG_NAME"
+            exit 1
+          fi
+
+          dmg_path="$RUNNER_TEMP/release-artifacts/$DMG_NAME"
+          checksum_path="$RUNNER_TEMP/release-artifacts/$CHECKSUM_NAME"
+          [[ -f "$dmg_path" ]] || { echo "::error::Verified DMG is missing: $dmg_path"; exit 1; }
+          [[ -f "$checksum_path" ]] || { echo "::error::Verified checksum is missing: $checksum_path"; exit 1; }
+          [[ -s "$RELEASE_NOTES_FILE" ]] || { echo "::error::Locked Release Notes are missing: $RELEASE_NOTES_FILE"; exit 1; }
+
+      - name: Create immutable annotated Tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_object_sha="$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+            -f tag="$TAG_NAME" \
+            -f message="DevEnv $TAG_NAME Private Preview" \
+            -f object="$TARGET_SHA" \
+            -f type=commit \
+            --jq .sha)"
+
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$TAG_NAME" \
+            -f sha="$tag_object_sha" \
+            --silent
+
+      - name: Create Draft Prerelease with verified assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! gh release create "$TAG_NAME" \
+            "$RUNNER_TEMP/release-artifacts/$DMG_NAME" \
+            "$RUNNER_TEMP/release-artifacts/$CHECKSUM_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "DevEnv $TAG_NAME Private Preview" \
+            --notes-file "$RELEASE_NOTES_FILE" \
+            --draft \
+            --prerelease; then
+            echo "::error::Draft Prerelease creation failed after the immutable annotated Tag was created. Do not move or recreate the Tag; use a new patch version."
+            exit 1
+          fi
+
+          release_state="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG_NAME" \
+            --jq '[.draft, .prerelease] | @tsv')"
+          if [[ "$release_state" != $'true\ttrue' ]]; then
+            echo "::error::Created Release is not both Draft and Prerelease"
+            exit 1
+          fi
+
+      - name: Clean publication Runner artifacts
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          scripts/release-runner/cleanup.sh \
+            --workspace "$GITHUB_WORKSPACE" \
+            --temp-root "$RUNNER_TEMP"

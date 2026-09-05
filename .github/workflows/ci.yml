@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - master
+  push:
+    branches:
+      - develop
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test and Release Build
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      PROJECT_PATH: DevEnv.xcodeproj
+      SCHEME: DevEnv
+      RESOLVED_FILE: DevEnv.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+      EXPECTED_XCODE_VERSION: "26.6"
+      EXPECTED_XCODE_BUILD: "17F113"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Validate Release Runner contracts
+        shell: bash
+        run: bash scripts/tests/release-runner-contract-tests.sh
+
+      - name: Validate Release artifact contracts
+        shell: bash
+        run: bash scripts/tests/release-artifact-contract-tests.sh
+
+      - name: Validate controlled Release workflow contracts
+        shell: bash
+        run: bash scripts/tests/release-workflow-contract-tests.sh
+
+      - name: Validate direct XCTest runner contracts
+        shell: bash
+        run: bash scripts/tests/xctest-runner-contract-tests.sh
+
+      - name: Verify Xcode and record toolchain versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-logs"
+          xcode_output="$(xcodebuild -version)"
+          {
+            printf '%s\n' "$xcode_output"
+            swift --version
+          } 2>&1 | tee "$RUNNER_TEMP/ci-logs/toolchain.log"
+
+          if [[ "$xcode_output" != *"Xcode $EXPECTED_XCODE_VERSION"* \
+            || "$xcode_output" != *"Build version $EXPECTED_XCODE_BUILD"* ]]; then
+            echo "::error::unexpected Xcode toolchain; expected $EXPECTED_XCODE_VERSION ($EXPECTED_XCODE_BUILD)"
+            exit 1
+          fi
+
+      - name: Resolve locked dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            2>&1 | tee "$RUNNER_TEMP/ci-logs/dependencies.log"
+
+          if ! git diff --quiet -- "$RESOLVED_FILE"; then
+            echo "::error file=$RESOLVED_FILE::Dependency resolution modified the committed Package.resolved"
+            git diff -- "$RESOLVED_FILE" | tee -a "$RUNNER_TEMP/ci-logs/dependencies.log"
+            exit 1
+          fi
+
+      - name: Run all XCTest tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/test/run-xctest-suite.sh \
+            --project "$PROJECT_PATH" \
+            --scheme "$SCHEME" \
+            --destination "platform=macOS,arch=$(uname -m)" \
+            --derived-data "$RUNNER_TEMP/DerivedData" \
+            --source-packages "$RUNNER_TEMP/SourcePackages" \
+            --test-log "$RUNNER_TEMP/ci-logs/DevEnvTests.log"
+
+      - name: Build Release configuration
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$RUNNER_TEMP/ci-logs/release-build.log"
+
+      - name: Upload failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-failure-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-logs
+          if-no-files-found: warn
+          retention-days: 7

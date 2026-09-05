@@ -156,7 +156,7 @@ DevEnv 当前使用本地开发签名，不提供正式安装包、自动更新�
 
 DevEnv 仍在早期开发阶段。Bug、功能需求和设计讨论请提交到 [GitHub Issues](https://github.com/zh826256645/DevEnv/issues)，代码变更可通过 [Pull Requests](https://github.com/zh826256645/DevEnv/pulls) 提交。
 
-版本历史和后续计划以 Git 提交与 GitHub Issues 为准，不在 README 中维护重复路线图。
+版本历史和后续计划以 Git 提交与 GitHub Issues 为准，不在 README 中维护重复路线图。Private Preview 的版本冻结、构建、DMG 校验和 GitHub Release 流程见 [发版流程](docs/releasing.md)。
 
 ## License
 

@@ -4,6 +4,10 @@ DevEnv 帮助 macOS 开发者理解本机的开发工具状态，并将其与项
 
 ## Language
 
+**Private Preview**:
+DevEnv 仅面向受邀测试者的非稳定发布定位；它可以尚未具备正式分发信任链或兼容性承诺，但必须明确安装限制与已知边界。
+_Avoid_: Stable Release, Internal Build, Private Prerelease
+
 **Machine Environment**:
 当前 App 运行用户在一台 Mac 上可观察、可调用的开发工具、运行时和服务的实际状态。
 _Avoid_: Environment, Development Environment
