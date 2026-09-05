@@ -1,6 +1,6 @@
 # DevEnv 发版流程
 
-状态：发版自动化已实现；首次 Private Preview 尚未执行。
+状态：发版自动化已实现；`v0.1.0` Private Preview 已发布。
 
 本文定义 DevEnv 从 `develop` 晋级到 `master`、生成安装产物并发布 GitHub Release 的可复用流程。首个适用版本是 `v0.1.0` Private Preview。
 
@@ -8,7 +8,7 @@
 
 - [v0.1.0 Milestone](https://github.com/zh826256645/DevEnv/milestone/1)
 - [发布 v0.1.0 Private Preview（#68）](https://github.com/zh826256645/DevEnv/issues/68)
-- [v0.1.0 中文 Release Notes 草稿](releases/v0.1.0.md)
+- [v0.1.0 中文 Release Notes](releases/v0.1.0.md)
 - [后续接入 Developer ID、公证与 Stapling（#77）](https://github.com/zh826256645/DevEnv/issues/77)
 
 ## 1. 版本定位

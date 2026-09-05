@@ -42,6 +42,7 @@ jobs:
           fi
 
       - name: Check out selected commit
+        id: checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
@@ -140,7 +141,7 @@ jobs:
           retention-days: 7
 
       - name: Clean unpublished artifacts
-        if: ${{ always() }}
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         shell: bash
         run: |
           scripts/release-runner/cleanup.sh \

@@ -106,12 +106,12 @@ Runner 安装、服务管理和标签行为以 GitHub 官方文档为准：
 
 ## 4. 发版后停止与清理
 
-`.github/workflows/release-runner-validation.yml` 的最后一步会调用 `scripts/release-runner/cleanup.sh`，卸载 `DevEnv` 发版卷，删除 `$RUNNER_TEMP` 下的 DerivedData、依赖缓存、测试结果、日志和未发布产物，并重置 Checkout。
+`.github/workflows/release-runner-validation.yml` 的最后一步只在可信 Checkout 成功后调用 `scripts/release-runner/cleanup.sh`。脚本仅卸载镜像路径位于本次 `$RUNNER_TEMP` 且文件名符合 DevEnv 发版契约的卷，删除该临时目录下的 DerivedData、依赖缓存、测试结果、日志和未发布产物，并重置 Checkout；它不会仅凭卷名卸载其他磁盘镜像。
 
 工作流结束后仍必须人工完成以下步骤：
 
 1. 确认没有运行中或排队等待该 Runner 的 Job。
-2. 如工作流被强制取消、宿主机断电或清理步骤未执行，在最近一次 Checkout 中手工运行：
+2. 如工作流被强制取消、宿主机断电或清理步骤未执行，先确认最近一次 Checkout 来自已核验的仓库提交且没有需要保留的改动，再手工运行：
 
    ```bash
    cd ~/actions-runner-devenv-release/_work/DevEnv/DevEnv

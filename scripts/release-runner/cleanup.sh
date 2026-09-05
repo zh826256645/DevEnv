@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../release/release-common.sh
+source "$SCRIPT_DIR/../release/release-common.sh"
+
 usage() {
     cat <<'USAGE'
 Usage: cleanup.sh --workspace PATH --temp-root PATH
@@ -53,13 +57,31 @@ if ! git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 mount_info="$(hdiutil info 2>&1)" || fail "unable to inspect mounted disk images: $mount_info"
-printf '%s\n' "$mount_info" \
-    | awk -F '\t' '/\/Volumes\/DevEnv([^[:alnum:]_]|$)/ { print $NF }' \
-    | while IFS= read -r volume; do
-        [[ -n "$volume" ]] || continue
-        printf 'Detaching release volume: %s\n' "$volume"
-        hdiutil detach "$volume"
-    done
+controlled_mounts="$(printf '%s\n' "$mount_info" | awk -v controlled_prefix="$temp_root/" '
+    /^image-path[[:space:]]*:/ {
+        image_path = $0
+        sub(/^[^:]*:[[:space:]]*/, "", image_path)
+        image_name = image_path
+        sub(/^.*\//, "", image_name)
+        controlled = index(image_path, controlled_prefix) == 1
+        next
+    }
+    /^\/dev\// && controlled {
+        mount_point = $0
+        if (sub(/^.*\t/, "", mount_point) && mount_point ~ /^\//) {
+            print image_name "\t" mount_point
+        }
+    }
+')"
+while IFS=$'\t' read -r image_name volume; do
+    [[ -n "$image_name" && -n "$volume" ]] || continue
+    version="${image_name#DevEnv-}"
+    version="${version%-arm64.dmg}"
+    [[ "$image_name" == "DevEnv-${version}-arm64.dmg" ]] || continue
+    release_is_semantic_version "$version" || continue
+    printf 'Detaching controlled release volume: %s\n' "$volume"
+    hdiutil detach "$volume"
+done <<< "$controlled_mounts"
 
 for artifact in \
     "$temp_root/ReleaseRunnerDerivedData" \
