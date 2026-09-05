@@ -1,6 +1,6 @@
 # DevEnv 发版流程
 
-状态：已确认的规划；自动化尚未实现。
+状态：发版自动化已实现；首次 Private Preview 尚未执行。
 
 本文定义 DevEnv 从 `develop` 晋级到 `master`、生成安装产物并发布 GitHub Release 的可复用流程。首个适用版本是 `v0.1.0` Private Preview。
 
