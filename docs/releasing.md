@@ -159,7 +159,7 @@ Runner 的首次注册、启动、停止、更新、发版前检查、发版后�
 6. 执行 Release 编译检查；
 7. 保存失败时需要的测试结果和构建日志。
 
-三个工作流统一调用 `scripts/test/run-xctest-suite.sh`：先通过 `xcodebuild build-for-testing` 编译测试宿主，再使用 Xcode 自带的 `xctest` 直接加载测试 Bundle，并把完整结果写入 `DevEnvTests.log`。这样保留全部 XCTest 覆盖，同时避免无交互 Runner 在 LaunchServices 启动 App 测试宿主时无限等待。
+三个工作流统一调用 `scripts/test/run-xctest-suite.sh`：先通过 `xcodebuild build-for-testing` 编译测试宿主，再使用 Xcode 自带的 `xctest` 直接加载测试 Bundle，并把完整结果写入 `DevEnvTests.log`。这样保留全部 XCTest 覆盖，同时避免无交互 Runner 在 LaunchServices 启动 App 测试宿主时无限等待；测试进程启动后会清除仅用于加载宿主动态库的 `DYLD_*` 环境，防止这些变量污染测试创建的 Shell 和工具子进程。
 
 CI 专属权限约束：
 

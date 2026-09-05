@@ -46,6 +46,10 @@ EOF
 #include <string.h>
 
 int main(void) {
+    if (getenv("DYLD_INSERT_LIBRARIES") != NULL || getenv("DYLD_FRAMEWORK_PATH") != NULL) {
+        fputs("dynamic loader environment leaked into XCTest\n", stderr);
+        return 2;
+    }
     const char *mode = getenv("XCTEST_FIXTURE_MODE");
     if (mode != NULL && strcmp(mode, "zero") == 0) {
         puts("Test Suite 'All tests' passed.");

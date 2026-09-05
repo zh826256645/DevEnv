@@ -86,20 +86,35 @@ APP_LIBRARY="$APP_BUNDLE/Contents/MacOS/DevEnv.debug.dylib"
 TEST_BUNDLE="$APP_BUNDLE/Contents/PlugIns/DevEnvTests.xctest"
 DEVELOPER_DIR_PATH="$(xcode-select -p)"
 XCTEST_EXECUTABLE="$DEVELOPER_DIR_PATH/usr/bin/xctest"
+XCRUN_EXECUTABLE=/usr/bin/xcrun
 PLATFORM_FRAMEWORKS="$DEVELOPER_DIR_PATH/Platforms/MacOSX.platform/Developer/Library/Frameworks"
 PROFILE_PATH="$DERIVED_DATA/DevEnvTests-%p.profraw"
+SANITIZER_SOURCE="$DERIVED_DATA/xctest-environment-sanitizer.c"
+SANITIZER_LIBRARY="$DERIVED_DATA/xctest-environment-sanitizer.dylib"
 
 [[ -d "$APP_BUNDLE" ]] || { printf 'Missing test host app: %s\n' "$APP_BUNDLE" >&2; exit 1; }
 [[ -f "$APP_LIBRARY" ]] || { printf 'Missing test host library: %s\n' "$APP_LIBRARY" >&2; exit 1; }
 [[ -d "$TEST_BUNDLE" ]] || { printf 'Missing XCTest bundle: %s\n' "$TEST_BUNDLE" >&2; exit 1; }
 [[ -x "$XCTEST_EXECUTABLE" ]] || { printf 'Missing XCTest executable: %s\n' "$XCTEST_EXECUTABLE" >&2; exit 1; }
+[[ -x "$XCRUN_EXECUTABLE" ]] || { printf 'Missing xcrun executable: %s\n' "$XCRUN_EXECUTABLE" >&2; exit 1; }
+
+cat > "$SANITIZER_SOURCE" <<'C'
+extern int unsetenv(const char *);
+
+__attribute__((constructor))
+static void sanitize_xctest_environment(void) {
+    unsetenv("DYLD_INSERT_LIBRARIES");
+    unsetenv("DYLD_FRAMEWORK_PATH");
+}
+C
+"$XCRUN_EXECUTABLE" --sdk macosx clang -dynamiclib "$SANITIZER_SOURCE" -o "$SANITIZER_LIBRARY"
 
 framework_path="$APP_BUNDLE/Contents/Frameworks:$PLATFORM_FRAMEWORKS"
 if [[ -n "${DYLD_FRAMEWORK_PATH:-}" ]]; then
     framework_path="$framework_path:$DYLD_FRAMEWORK_PATH"
 fi
 
-DYLD_INSERT_LIBRARIES="$APP_LIBRARY" \
+DYLD_INSERT_LIBRARIES="$APP_LIBRARY:$SANITIZER_LIBRARY" \
 DYLD_FRAMEWORK_PATH="$framework_path" \
 LLVM_PROFILE_FILE="$PROFILE_PATH" \
 NSUnbufferedIO=YES \
