@@ -82,7 +82,7 @@ fi
 
 runner_service="$runner_root/svc.sh"
 [[ -x "$runner_service" ]] || fail "Runner service control script is missing or not executable: $runner_service"
-service_status="$($runner_service status 2>&1)" || fail "Runner service status check failed: $service_status"
+service_status="$(cd "$runner_root" && ./svc.sh status 2>&1)" || fail "Runner service status check failed: $service_status"
 if ! printf '%s\n' "$service_status" | grep -Eiq 'started|running'; then
     fail "Runner service is not running: $service_status"
 fi
