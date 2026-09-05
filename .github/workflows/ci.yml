@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - master
+  push:
+    branches:
+      - develop
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test and Release Build
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      PROJECT_PATH: DevEnv.xcodeproj
+      SCHEME: DevEnv
+      RESOLVED_FILE: DevEnv.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Record Xcode and Swift versions
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/ci-logs"
+          {
+            xcodebuild -version
+            swift --version
+          } 2>&1 | tee "$RUNNER_TEMP/ci-logs/toolchain.log"
+
+      - name: Resolve locked dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            2>&1 | tee "$RUNNER_TEMP/ci-logs/dependencies.log"
+
+          if ! git diff --quiet -- "$RESOLVED_FILE"; then
+            echo "::error file=$RESOLVED_FILE::Dependency resolution modified the committed Package.resolved"
+            git diff -- "$RESOLVED_FILE" | tee -a "$RUNNER_TEMP/ci-logs/dependencies.log"
+            exit 1
+          fi
+
+      - name: Run all XCTest tests
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "platform=macOS,arch=$(uname -m)" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -resultBundlePath "$RUNNER_TEMP/DevEnvTests.xcresult" \
+            2>&1 | tee "$RUNNER_TEMP/ci-logs/tests.log"
+
+      - name: Build Release configuration
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$RUNNER_TEMP/ci-logs/release-build.log"
+
+      - name: Upload failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-failure-diagnostics-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ci-logs
+            ${{ runner.temp }}/DevEnvTests.xcresult
+          if-no-files-found: warn
+          retention-days: 7
