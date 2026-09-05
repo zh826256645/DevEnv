@@ -34,27 +34,37 @@ done
 [[ -n "$derived_data" ]]
 app="$derived_data/Build/Products/Debug/DevEnv.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/PlugIns/DevEnvTests.xctest"
-touch "$app/Contents/MacOS/DevEnv.debug.dylib"
+/usr/bin/clang -dynamiclib -x c -o "$app/Contents/MacOS/DevEnv.debug.dylib" - <<'C'
+void devenv_fixture_library(void) {}
+C
 printf '%s\n' '** TEST BUILD SUCCEEDED **'
 EOF
 
-    cat > "$root/developer/usr/bin/xctest" <<'EOF'
-#!/bin/bash
-case "${XCTEST_FIXTURE_MODE:-pass}" in
-pass)
-    printf "%s\n" "Test Suite 'All tests' passed." "Executed 2 tests, with 0 failures (0 unexpected) in 0.010 seconds"
-    ;;
-zero)
-    printf "%s\n" "Test Suite 'All tests' passed." "Executed 0 tests, with 0 failures (0 unexpected) in 0.000 seconds"
-    ;;
-fail)
-    printf "%s\n" "Test Suite 'All tests' failed." "Executed 2 tests, with 1 failure (0 unexpected) in 0.010 seconds"
-    exit 1
-    ;;
-esac
-EOF
+    cat > "$root/xctest-fixture.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-    chmod +x "$root/bin/xcode-select" "$root/bin/xcodebuild" "$root/developer/usr/bin/xctest"
+int main(void) {
+    const char *mode = getenv("XCTEST_FIXTURE_MODE");
+    if (mode != NULL && strcmp(mode, "zero") == 0) {
+        puts("Test Suite 'All tests' passed.");
+        puts("Executed 0 tests, with 0 failures (0 unexpected) in 0.000 seconds");
+        return 0;
+    }
+    if (mode != NULL && strcmp(mode, "fail") == 0) {
+        puts("Test Suite 'All tests' failed.");
+        puts("Executed 2 tests, with 1 failure (0 unexpected) in 0.010 seconds");
+        return 1;
+    }
+    puts("Test Suite 'All tests' passed.");
+    puts("Executed 2 tests, with 0 failures (0 unexpected) in 0.010 seconds");
+    return 0;
+}
+EOF
+    /usr/bin/clang "$root/xctest-fixture.c" -o "$root/developer/usr/bin/xctest"
+
+    chmod +x "$root/bin/xcode-select" "$root/bin/xcodebuild"
 }
 
 run_fixture() {
