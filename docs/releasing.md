@@ -8,6 +8,7 @@
 
 - [v0.1.0 Milestone](https://github.com/zh826256645/DevEnv/milestone/1)
 - [发布 v0.1.0 Private Preview（#68）](https://github.com/zh826256645/DevEnv/issues/68)
+- [v0.1.0 中文 Release Notes 草稿](releases/v0.1.0.md)
 - [后续接入 Developer ID、公证与 Stapling（#77）](https://github.com/zh826256645/DevEnv/issues/77)
 
 ## 1. 版本定位
