@@ -1179,8 +1179,9 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.run(restartFailed, projectRoot: projectRoot.path), .started)
         factory.engines[5].signalSucceeds = false
         coordinator.restart(restartFailed, projectRoot: projectRoot.path)
-        scheduler.runNext()
-        scheduler.runNext()
+        for _ in 0..<10 where coordinator.session(for: restartFailed.id)?.state == .restarting {
+            scheduler.runNext()
+        }
         XCTAssertEqual(
             coordinator.session(for: restartFailed.id)?.state,
             .restartFailed("上一次运行仍有进程未退出")
@@ -2297,9 +2298,11 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         engine.signalSucceeds = true
         engine.ownedProcessIDs = []
-        engine.finish(exitCode: 130)
+        // The shell exit notification may already have arrived before the timeout.
+        XCTAssertFalse(scheduler.actions.isEmpty, "停止失败后必须继续只读复查")
+        if !scheduler.actions.isEmpty { scheduler.runNext() }
 
-        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(130))
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(137))
         XCTAssertNil(coordinator.session(for: configuration.id)?.failureMessage)
     }
 
@@ -2727,6 +2730,33 @@ final class ProjectRunSessionsTests: XCTestCase {
         reopenedWindow.close()
         XCTAssertTrue(coordinator.sessions.isEmpty)
         XCTAssertTrue(processIDs.allSatisfy { Darwin.kill($0, 0) != 0 })
+    }
+
+    func testRealEngineDoesNotFinishBeforeChildExitsAndReapsIt() async throws {
+        let engine = SwiftTermProjectRunEngine()
+        var exits: [Int32?] = []
+        engine.onExit = { exits.append($0) }
+        try engine.start(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 1; exit 7"],
+            loginName: "sh",
+            workingDirectory: FileManager.default.temporaryDirectory.path
+        )
+        let pid = engine.terminal.process.shellPid
+        defer { _ = engine.signalProcessGroups(SIGKILL) }
+
+        engine.processTerminated(source: engine.terminal, exitCode: nil)
+        XCTAssertTrue(exits.isEmpty, "终端通知不等于子进程已经退出")
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(3))
+        while exits.isEmpty, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(exits.count, 1)
+        XCTAssertEqual(exits.first ?? nil, 7)
+        XCTAssertNotEqual(Darwin.kill(pid, 0), 0, "子进程必须回收，不能留下僵尸")
+        XCTAssertTrue(engine.signalProcessGroups(0))
+        XCTAssertEqual(engine.ownedProcessIDs, [])
     }
 
     func testRealEngineStopEscalationKillsBackgroundProcessGroupsAfterShellExit() async throws {

@@ -599,7 +599,6 @@ struct LiveMachineAccess: MachineAccess {
         if URL(fileURLWithPath: executable).lastPathComponent == "brew" {
             var environment = ProcessInfo.processInfo.environment
             environment["HOMEBREW_NO_AUTO_UPDATE"] = "1"
-            environment["HOMEBREW_NO_INSTALL_FROM_API"] = "1"
             process.environment = environment
         }
         let finished = DispatchSemaphore(value: 0)
