@@ -160,4 +160,6 @@ DevEnv 仍在早期开发阶段。Bug、功能需求和设计讨论请提交到 
 
 ## License
 
-本项目尚未设置开源许可证。
+本项目采用 [MIT License](LICENSE)，Copyright (c) 2026 西瓜树。
+
+第三方依赖和 Logo 仍遵循各自的许可证及品牌使用条款。
