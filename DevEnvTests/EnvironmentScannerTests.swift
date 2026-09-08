@@ -2171,6 +2171,40 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(saved.localServices.first?.attribution?.path, "/projects/web")
     }
 
+    func testNativeAppsKeepApplicationAttributionInsteadOfInheritedProjectDirectory() {
+        for name in ["WeChat", "企业微信"] {
+            let snapshot = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin"],
+                commandOutputs: ["/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\nc\(name)\nf6\ntIPv4\nn*:9882\n"],
+                existingFiles: ["/Users/test/package.json", "/Users/test/project/package.json"],
+                processExecutablePaths: [42: "/Applications/\(name).app/Contents/MacOS/\(name)"],
+                processWorkingDirectoryPaths: [42: "/Users/test/project"]
+            )).scan().snapshot
+            XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .application)
+            XCTAssertEqual(snapshot.localServices.first?.attribution?.name, name)
+            XCTAssertEqual(groupLocalServicesForDisplay(snapshot.localServices).first?.displayName, name)
+        }
+    }
+
+    func testHomeManifestAndHomebrewGitDoNotAttributeInstalledServicesToProjects() {
+        for (name, executable, cwd) in [
+            ("worker", "/tmp/worker", "/Users/test/Library/Containers/example/Data"),
+            ("node", "/bin/node", "/Users/test/Library/Containers/example/Data"),
+            ("postgres", "/opt/homebrew/Cellar/postgresql/17/bin/postgres", "/opt/homebrew/var/postgresql"),
+            ("redis-server", "/opt/homebrew/Cellar/redis/8/bin/redis-server", "/opt/homebrew"),
+            ("mongod", "/opt/homebrew/Cellar/mongodb/8/bin/mongod", "/Users/test"),
+        ] {
+            let snapshot = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin"],
+                commandOutputs: ["/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\nc\(name)\nf6\ntIPv4\nn*:9882\n"],
+                existingFiles: ["/Users/test/package.json", "/opt/homebrew/.git"],
+                processExecutablePaths: [42: executable],
+                processWorkingDirectoryPaths: [42: cwd]
+            )).scan().snapshot
+            XCTAssertNil(snapshot.localServices.first?.attribution, name)
+        }
+    }
+
     func testAttributesPythonListenerToContainingApplication() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],

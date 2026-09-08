@@ -728,13 +728,6 @@ struct ContentView: View {
         .tint(AppTheme.accent)
         .containerBackground(AppTheme.canvas, for: .window)
         .overlay(alignment: .topTrailing) { topActionButtons }
-        .overlay(alignment: .topLeading) {
-            if columnVisibility == .detailOnly {
-                sidebarToggleButton
-                    .padding(.leading, 72)
-                    .padding(.top, 14)
-            }
-        }
         .task(id: autoRefreshSchedule) {
             let schedule = autoRefreshSchedule
             guard schedule.isEnabled else { return }
@@ -1112,19 +1105,6 @@ struct ContentView: View {
         } else {
             model.scan()
         }
-    }
-
-    private var sidebarToggleButton: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
-            }
-        } label: {
-            Image(systemName: "sidebar.left")
-        }
-        .buttonStyle(.borderless)
-        .accessibilityLabel(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
-        .help(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
     }
 
     @ViewBuilder

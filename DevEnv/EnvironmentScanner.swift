@@ -1403,6 +1403,17 @@ struct EnvironmentScanner: Sendable {
     ) -> LocalServiceSnapshot {
         var runtime = executablePath.flatMap { LocalServiceRuntime(processName: URL(fileURLWithPath: $0).lastPathComponent) }
             ?? LocalServiceRuntime(processName: service.processName)
+        let application = executablePath.flatMap(containingApplicationPath).map { path in
+            LocalServiceAttribution(
+                kind: .application, name: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent, path: path
+            )
+        }
+        if runtime == nil, let application {
+            return LocalServiceSnapshot(
+                processName: service.processName, pid: service.pid, bindings: service.bindings,
+                attribution: application, artifactPath: executablePath
+            )
+        }
         let workingDirectory = try? machine.workingDirectoryPath(forPID: service.pid)
         var artifactPath = executablePath
         var roots: (nameRoot: String, serviceRoot: String)?
@@ -1440,12 +1451,8 @@ struct EnvironmentScanner: Sendable {
                 name: URL(fileURLWithPath: roots.nameRoot).lastPathComponent,
                 path: roots.serviceRoot
             )
-        } else if let executablePath, let applicationPath = containingApplicationPath(for: executablePath) {
-            attribution = LocalServiceAttribution(
-                kind: .application,
-                name: URL(fileURLWithPath: applicationPath).deletingPathExtension().lastPathComponent,
-                path: applicationPath
-            )
+        } else {
+            attribution = application
         }
         return LocalServiceSnapshot(
             processName: service.processName, pid: service.pid, bindings: service.bindings,
@@ -1518,13 +1525,17 @@ struct EnvironmentScanner: Sendable {
     private func projectRoots(startingAt path: String, runtime: LocalServiceRuntime?) -> (nameRoot: String, serviceRoot: String)? {
         var directory = standardizedPath(path)
         var nearestRoot: String?
+        let homeDirectory = machine.userHomeDirectoryPath.map(standardizedPath)
         let manifests = runtime?.manifests ?? LocalServiceRuntime.allCases.flatMap(\.manifests)
-        while directory != "/" {
+        while directory != "/", directory != homeDirectory {
             let hasGitRoot = machine.fileExists(atPath: directory + "/.git")
             if manifests.contains(where: { machine.fileExists(atPath: directory + "/" + $0) }) {
                 nearestRoot = nearestRoot ?? directory
             }
-            if hasGitRoot { return (directory, nearestRoot ?? directory) }
+            if hasGitRoot {
+                guard runtime != nil || nearestRoot != nil else { return nil }
+                return (directory, nearestRoot ?? directory)
+            }
             let parent = URL(fileURLWithPath: directory).deletingLastPathComponent().path
             guard parent != directory else { return nearestRoot.map { ($0, $0) } }
             directory = parent
