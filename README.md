@@ -8,19 +8,19 @@ DevEnv 是一个原生 macOS App，用来保存本地项目的运行方式，在
 
 DevEnv 不负责替代终端、包管理器或版本管理器。它调用项目本来就在使用的 Shell 和工具，并用 Machine Environment 扫描结果解释当前 Mac 是否具备项目声明的运行条件。
 
-> 当前项目仍处于早期开发阶段；最新可下载版本是面向受邀测试者的 [`v0.1.1` Private Preview（Build 2）](https://github.com/zh826256645/DevEnv/releases/tag/v0.1.1)，不属于稳定正式版。
+> 当前项目仍处于早期开发阶段；最新可下载版本是面向受邀测试者的 [`v0.1.2` Private Preview（Build 3）](https://github.com/zh826256645/DevEnv/releases/tag/v0.1.2)，不属于稳定正式版。
 
 ## 下载与安装
 
 发布版支持 **macOS 15.0 及以上、Apple Silicon（arm64）**，不包含 Intel 构建。
 
-1. 从 [v0.1.1 Release](https://github.com/zh826256645/DevEnv/releases/tag/v0.1.1) 下载 `DevEnv-0.1.1-arm64.dmg` 和同名 `.sha256` 文件。
-2. 将两个文件放在同一目录，在该目录执行 `shasum -a 256 -c DevEnv-0.1.1-arm64.dmg.sha256`，确认输出 `OK` 后再安装。
+1. 从 [v0.1.2 Release](https://github.com/zh826256645/DevEnv/releases/tag/v0.1.2) 下载 `DevEnv-0.1.2-arm64.dmg` 和同名 `.sha256` 文件。
+2. 将两个文件放在同一目录，在该目录执行 `shasum -a 256 -c DevEnv-0.1.2-arm64.dmg.sha256`，确认输出 `OK` 后再安装。
 3. 完全退出旧版 DevEnv，打开 DMG，将 `DevEnv.app` 拖入 `Applications`，然后启动新版。
 
 发布版使用 ad-hoc 签名，未使用 Developer ID 签名，也未经 Apple 公证。首次打开若被 Gatekeeper 阻止，请先尝试打开，再到“系统设置 → 隐私与安全性”确认打开；不要全局关闭 Gatekeeper 或递归移除隔离属性。
 
-本版本不提供自动更新。升级保留项目记录、运行配置和信任记录，但运行会话不会跨 App 进程迁移。v0.1.1 修复了 Homebrew 服务漏显示，并改进进程退出回收与停止失败后的自动状态收尾；无法可靠确认进程归属或退出时仍可能停止失败。完整变更与限制见 [Release Notes](docs/releases/v0.1.1.md)。
+本版本不提供自动更新。升级保留项目记录、运行配置和信任记录，但运行会话不会跨 App 进程迁移。v0.1.2 扩展了 Node.js、Bun、Go、Rust、Java 监听服务的运行时与项目识别，修复了原生 App 服务名称及主目录、Homebrew 目录的误归属，并移除了重复侧栏按钮。证据不足或冲突时仍保留未知归属。完整变更与限制见 [Release Notes](docs/releases/v0.1.2.md)。
 
 ## 核心工作流
 
@@ -110,6 +110,8 @@ Environment Scan 以当前 App 用户的可见范围观察本机状态，并保�
 
 Local Service 与 Homebrew Service 是两类不同事实：前者来自 TCP Listener Binding，后者来自 Homebrew 的服务声明。对于当前用户可管理的 Homebrew Service，DevEnv 支持在展示具体命令并确认后执行启动、停止和重启。
 
+Local Service 支持识别 Python、Node.js、Bun、Go、Rust、Java 运行时，并根据工作目录、项目清单及 Java 启动路径等证据判断项目归属。项目名称取最近 Git 根目录名（无 Git 时取清单目录名），服务路径取对应清单目录；原生 App 服务保留应用名称。独立二进制或 JAR 不一定能对应源码项目，证据不足或冲突时不会猜测归属。
+
 ## 安全边界
 
 DevEnv 需要观察本机工具并运行用户选择的项目命令，因此当前不启用 App Sandbox。使用源码版本前，应理解以下边界：
@@ -144,7 +146,7 @@ open DevEnv.xcodeproj
 
 在 Xcode 中等待 Swift Package Manager 解析固定版本的 SwiftTerm，选择 `DevEnv` scheme 和 `My Mac`，然后运行项目。
 
-源码构建使用本地开发签名；已发布的 `v0.1.1` Private Preview 使用完整 ad-hoc Bundle 签名，但不提供 Developer ID 签名、公证、自动更新或已发布版本的兼容性保证。
+源码构建使用本地开发签名；已发布的 `v0.1.2` Private Preview 使用完整 ad-hoc Bundle 签名，但不提供 Developer ID 签名、公证、自动更新或已发布版本的兼容性保证。
 
 ## 技术摘要
 
