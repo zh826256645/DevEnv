@@ -2,6 +2,38 @@
 
 状态：发版自动化已实现；`v0.1.0` Private Preview 已发布。
 
+## 本地发布通道（自 v0.1.1 起）
+
+经仓库所有者明确授权，可使用本地 Apple Silicon Mac 完成发布。此通道优先于下文要求专用 Runner、PR Hosted CI 全绿及 Actions Dry Run 的条款；其他版本、分支、签名、产物和不可移动 Tag 约束不变。GitHub Actions 通道仍可选用，不能把未执行的 CI 记为通过。
+
+本地通道允许使用所有者批准的当前用户，不需要注册 Runner。必须满足 Xcode `26.6 (17F113)`、`arm64`、至少 50 GiB 可用空间和无本次发布残留挂载。不得使用现成 Debug App 或未经验证的旧产物。
+
+1. 在 `develop` 更新版本、Build、工作流锁定值和 Release Notes，提交并推送。
+2. 运行四组 `scripts/tests/*-contract-tests.sh` 发布契约测试及完整 XCTest，记录候选 SHA。只有已明确授权使用本地验证替代 Hosted CI，且本地验证通过时，才允许合并 `develop → master` Release PR；在 PR 记录替代原因和证据，不修改失败 CI 的结果。
+3. 取得远端 `master` 完整 SHA，在当前检出目录切换到该精确提交（可 detached HEAD），确认工作区干净。重新执行全部契约测试、XCTest 和下列 Release 构建；依赖锁文件不得改变。所有正式产物必须来自这个 SHA。
+4. 使用新的本次发布输出目录，运行现有脚本（以下变量由操作人设置为本次实际值，`RELEASE_ROOT` 应由 `mktemp -d` 创建）：
+
+   ```bash
+   bash scripts/test/run-xctest-suite.sh \
+     --project DevEnv.xcodeproj --scheme DevEnv \
+     --destination 'platform=macOS,arch=arm64' \
+     --derived-data "$RELEASE_ROOT/TestDerivedData" \
+     --source-packages "$RELEASE_ROOT/SourcePackages" \
+     --test-log "$RELEASE_ROOT/DevEnvTests.log"
+   bash scripts/release/build-release-artifacts.sh \
+     --version "$VERSION" --build "$BUILD" \
+     --output-dir "$RELEASE_ROOT/artifacts" \
+     --derived-data "$RELEASE_ROOT/ReleaseDerivedData" \
+     --source-packages "$RELEASE_ROOT/SourcePackages"
+   ```
+
+5. 构建脚本必须完成 ad-hoc 严格签名、dSYM UUID、版本与 Build、arm64 架构、最终 DMG 只读挂载/卸载、内容和 SHA-256 校验；这是本地通道的 Dry Run 验证。失败时不得创建 Tag。
+6. 发布前再次确认 `HEAD` 和远端 `master` 均等于已验证 SHA、工作区和依赖锁未变，且同名 Tag/Release 不存在。创建指向该 SHA 的 annotated Tag 并推送，不允许覆盖或移动。
+7. 通过 `gh release create --verify-tag --draft --prerelease` 创建 Draft，使用对应中文 Release Notes，上传已验证的 DMG 和 SHA-256 文件，不重新打包。下载 Draft 附件，再复核摘要与 DMG 内容；在 PR 留下目标 SHA、工具链、测试结果和摘要证据。
+8. 仓库所有者最终核对并发布 Draft。保留本次日志、dSYM 和证据至少 90 天；核对无残留挂载，恢复开发分支。只有 Draft 实际发布后才更新当前已发布版本状态。
+
+本地验证后若代码、依赖、版本或目标 SHA 改变，必须重新执行完整验证；若 Tag 已创建则不得重打同名版本。此通道不依赖 GitHub Actions 账单或 Runner 服务，但仍需要 GitHub 仓库发布权限。
+
 本文定义 DevEnv 从 `develop` 晋级到 `master`、生成安装产物并发布 GitHub Release 的可复用流程。首个适用版本是 `v0.1.0` Private Preview。
 
 执行规划由 GitHub 原生父子任务和依赖关系跟踪：
