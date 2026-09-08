@@ -92,6 +92,31 @@ struct LocalServiceAttribution: Codable, Hashable, Sendable {
     let path: String
 }
 
+enum LocalServiceRuntime: String, Codable, CaseIterable, Sendable {
+    case python, node, bun, go, rust, java
+
+    init?(processName: String) {
+        let name = processName.lowercased()
+        if name.hasPrefix("python") { self = .python; return }
+        switch name {
+        case "node", "nodejs": self = .node
+        case "bun", "bun.exe": self = .bun
+        case "java": self = .java
+        default: return nil
+        }
+    }
+
+    var manifests: [String] {
+        switch self {
+        case .python: ["pyproject.toml"]
+        case .node, .bun: ["package.json"]
+        case .go: ["go.mod"]
+        case .rust: ["Cargo.toml"]
+        case .java: ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]
+        }
+    }
+}
+
 struct LocalServiceSnapshot: Codable, Identifiable, Sendable {
     var id: Int32 { pid }
 
@@ -99,17 +124,23 @@ struct LocalServiceSnapshot: Codable, Identifiable, Sendable {
     let pid: Int32
     let bindings: [ListenerBinding]
     let attribution: LocalServiceAttribution?
+    let runtime: LocalServiceRuntime?
+    let artifactPath: String?
 
     init(
         processName: String,
         pid: Int32,
         bindings: [ListenerBinding],
-        attribution: LocalServiceAttribution? = nil
+        attribution: LocalServiceAttribution? = nil,
+        runtime: LocalServiceRuntime? = nil,
+        artifactPath: String? = nil
     ) {
         self.processName = processName
         self.pid = pid
         self.bindings = bindings
         self.attribution = attribution
+        self.runtime = runtime
+        self.artifactPath = artifactPath
     }
 }
 
@@ -406,6 +437,7 @@ protocol MachineAccess: Sendable {
     func resolvingSymlinksInPath(_ path: String) -> String
     func executablePath(forPID pid: Int32) throws -> String
     func workingDirectoryPath(forPID pid: Int32) throws -> String
+    func processArguments(forPID pid: Int32) throws -> [String]
     func application(bundleIdentifier: String) -> InstalledApplication?
     func captureMachineToolSearchPath(
         usingLoginShell executable: String,
@@ -492,6 +524,36 @@ struct LiveMachineAccess: MachineAccess {
         return withUnsafePointer(to: &info.pvi_cdir.vip_path) {
             $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
         }
+    }
+
+    func processArguments(forPID pid: Int32) throws -> [String] {
+        var capacity: Int32 = 0
+        var capacitySize = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.argmax", &capacity, &capacitySize, nil, 0) == 0,
+              capacity > 0, capacity <= 1_048_576 else { throw POSIXError(.EIO) }
+        var bytes = [UInt8](repeating: 0, count: Int(capacity))
+        var size = bytes.count
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        guard sysctl(&mib, u_int(mib.count), &bytes, &size, nil, 0) == 0,
+              size > MemoryLayout<Int32>.size else { throw POSIXError(.EIO) }
+        let count = bytes.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
+        guard count > 0, count <= 16_384,
+              let executableEnd = bytes[MemoryLayout<Int32>.size..<size].firstIndex(of: 0) else {
+            throw POSIXError(.EINVAL)
+        }
+        var offset = executableEnd
+        while offset < size, bytes[offset] == 0 { offset += 1 }
+        var arguments: [String] = []
+        for _ in 0..<count {
+            guard offset < size, let end = bytes[offset..<size].firstIndex(of: 0),
+                  let value = String(bytes: bytes[offset..<end], encoding: .utf8) else {
+                throw POSIXError(.EINVAL)
+            }
+            arguments.append(value)
+            offset = end + 1
+        }
+        // Stop at argc: the remaining buffer can contain environment secrets.
+        return arguments
     }
 
     func application(bundleIdentifier: String) -> InstalledApplication? {
@@ -1315,15 +1377,7 @@ struct EnvironmentScanner: Sendable {
             }
         }
         snapshots = snapshots.map { service in
-            LocalServiceSnapshot(
-                processName: service.processName,
-                pid: service.pid,
-                bindings: service.bindings,
-                attribution: localServiceAttribution(
-                    for: service,
-                    executablePath: executablePaths[service.pid]
-                )
-            )
+            attributedLocalService(service, executablePath: executablePaths[service.pid])
         }
         return LocalServiceScan(
             services: snapshots,
@@ -1343,26 +1397,120 @@ struct EnvironmentScanner: Sendable {
         return ListenerBinding(address: address, port: port, family: family)
     }
 
-    private func localServiceAttribution(
-        for service: LocalServiceSnapshot,
+    private func attributedLocalService(
+        _ service: LocalServiceSnapshot,
         executablePath: String?
-    ) -> LocalServiceAttribution? {
-        let processName = service.processName.lowercased()
-        guard processName.hasPrefix("python") || processName == "node" || processName == "nodejs" else { return nil }
-        if let workingDirectory = try? machine.workingDirectoryPath(forPID: service.pid),
-           let projectRoots = projectRoots(startingAt: workingDirectory, processName: processName) {
-            return LocalServiceAttribution(
-                kind: .project,
-                name: projectName(at: projectRoots.nameRoot, processName: processName),
-                path: projectRoots.serviceRoot
+    ) -> LocalServiceSnapshot {
+        var runtime = executablePath.flatMap { LocalServiceRuntime(processName: URL(fileURLWithPath: $0).lastPathComponent) }
+            ?? LocalServiceRuntime(processName: service.processName)
+        let application = executablePath.flatMap(containingApplicationPath).map { path in
+            LocalServiceAttribution(
+                kind: .application, name: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent, path: path
             )
         }
-        guard let executablePath, let applicationPath = containingApplicationPath(for: executablePath) else { return nil }
-        return LocalServiceAttribution(
-            kind: .application,
-            name: URL(fileURLWithPath: applicationPath).deletingPathExtension().lastPathComponent,
-            path: applicationPath
+        if runtime == nil, let application {
+            return LocalServiceSnapshot(
+                processName: service.processName, pid: service.pid, bindings: service.bindings,
+                attribution: application, artifactPath: executablePath
+            )
+        }
+        let workingDirectory = try? machine.workingDirectoryPath(forPID: service.pid)
+        var artifactPath = executablePath
+        var roots: (nameRoot: String, serviceRoot: String)?
+        if runtime == .java,
+           let arguments = try? machine.processArguments(forPID: service.pid),
+           let launch = javaLaunchPaths(arguments, workingDirectory: workingDirectory) {
+            artifactPath = launch.jar ?? executablePath
+            let candidates = launch.paths.compactMap { path in
+                projectRoots(startingAt: path, runtime: .java)
+            }
+            if Set(candidates.map(\.serviceRoot)).count == 1 { roots = candidates.first }
+        } else if runtime == nil, let executablePath {
+            roots = projectRoots(startingAt: URL(fileURLWithPath: executablePath).deletingLastPathComponent().path, runtime: nil)
+            if let roots {
+                // ponytail: adjacent-manifest inference; use binary build metadata if external builds need language attribution.
+                let candidates = LocalServiceRuntime.allCases.filter { candidate in
+                    candidate != .bun && candidate.manifests.contains {
+                        machine.fileExists(atPath: roots.serviceRoot + "/" + $0)
+                    }
+                }
+                if candidates.count == 1, let candidate = candidates.first, candidate == .go || candidate == .rust {
+                    runtime = candidate
+                }
+            }
+        } else if let workingDirectory {
+            roots = projectRoots(startingAt: workingDirectory, runtime: runtime)
+        }
+        if roots == nil, runtime == nil, let workingDirectory {
+            roots = projectRoots(startingAt: workingDirectory, runtime: nil)
+        }
+        var attribution: LocalServiceAttribution?
+        if let roots {
+            attribution = LocalServiceAttribution(
+                kind: .project,
+                name: URL(fileURLWithPath: roots.nameRoot).lastPathComponent,
+                path: roots.serviceRoot
+            )
+        } else {
+            attribution = application
+        }
+        return LocalServiceSnapshot(
+            processName: service.processName, pid: service.pid, bindings: service.bindings,
+            attribution: attribution, runtime: runtime, artifactPath: artifactPath
         )
+    }
+
+    private func serviceArgumentPath(_ value: String, workingDirectory: String?) -> String? {
+        guard !value.isEmpty, value.utf8.count < Int(MAXPATHLEN),
+              value.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value != 127 }),
+              value.hasPrefix("/") || workingDirectory != nil else { return nil }
+        let absolute = value.hasPrefix("/") ? value : workingDirectory! + "/" + value
+        let path = standardizedPath(machine.resolvingSymlinksInPath(absolute))
+        return machine.fileExists(atPath: path) ? path : nil
+    }
+
+    private func javaLaunchPaths(_ arguments: [String], workingDirectory: String?) -> (paths: [String], jar: String?)? {
+        var classPaths: [String]?
+        var modulePaths: [String]?
+        var index = 1
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument == "-jar" {
+                let jar = arguments.indices.contains(index + 1)
+                    ? serviceArgumentPath(arguments[index + 1], workingDirectory: workingDirectory) : nil
+                return (jar.map { [URL(fileURLWithPath: $0).deletingLastPathComponent().path] } ?? [], jar)
+            }
+            let pathOptions = ["-cp", "-classpath", "--class-path", "-p", "--module-path"]
+            let parts = argument.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            if pathOptions.contains(String(parts[0])) {
+                let value: String
+                if parts.count == 2 {
+                    value = String(parts[1])
+                } else {
+                    index += 1
+                    guard index < arguments.count else { return ([], nil) }
+                    value = arguments[index]
+                }
+                let paths = value.split(separator: ":", omittingEmptySubsequences: false).compactMap { entry -> String? in
+                    let path = entry.isEmpty ? "." : String(entry)
+                    let candidate = path.hasSuffix("/*") ? String(path.dropLast(2)) : path
+                    guard let resolved = serviceArgumentPath(candidate, workingDirectory: workingDirectory) else { return nil }
+                    return resolved.hasSuffix(".jar") ? URL(fileURLWithPath: resolved).deletingLastPathComponent().path : resolved
+                }
+                if ["-p", "--module-path"].contains(String(parts[0])) {
+                    modulePaths = paths
+                } else {
+                    classPaths = paths
+                }
+            } else if ["--add-opens", "--add-exports", "--add-reads", "--add-modules", "--limit-modules", "--patch-module"].contains(argument) {
+                index += 1
+            } else if !argument.hasPrefix("-") || argument == "-m" || argument == "--module" || argument.hasPrefix("--module=") {
+                break // Anything after the main class/module belongs to the application, not the JVM.
+            }
+            index += 1
+        }
+        guard classPaths != nil || modulePaths != nil else { return nil }
+        return ((classPaths ?? []) + (modulePaths ?? []), nil)
     }
 
     private func containingApplicationPath(for executablePath: String) -> String? {
@@ -1374,68 +1522,25 @@ struct EnvironmentScanner: Sendable {
         return nil
     }
 
-    private func projectRoots(startingAt path: String, processName: String) -> (nameRoot: String, serviceRoot: String)? {
+    private func projectRoots(startingAt path: String, runtime: LocalServiceRuntime?) -> (nameRoot: String, serviceRoot: String)? {
         var directory = standardizedPath(path)
         var nearestRoot: String?
-        let prefersGitRoot = processName == "node" || processName == "nodejs"
-        while directory != "/" {
+        let homeDirectory = machine.userHomeDirectoryPath.map(standardizedPath)
+        let manifests = runtime?.manifests ?? LocalServiceRuntime.allCases.flatMap(\.manifests)
+        while directory != "/", directory != homeDirectory {
             let hasGitRoot = machine.fileExists(atPath: directory + "/.git")
-            let hasPackageRoot = machine.fileExists(atPath: directory + "/package.json")
-            if prefersGitRoot {
-                if hasPackageRoot { nearestRoot = nearestRoot ?? directory }
-                if hasGitRoot { return (directory, nearestRoot ?? directory) }
-            } else if hasGitRoot
-                || machine.fileExists(atPath: directory + "/pyproject.toml")
-                || hasPackageRoot {
-                return (directory, directory)
+            if manifests.contains(where: { machine.fileExists(atPath: directory + "/" + $0) }) {
+                nearestRoot = nearestRoot ?? directory
+            }
+            if hasGitRoot {
+                guard runtime != nil || nearestRoot != nil else { return nil }
+                return (directory, nearestRoot ?? directory)
             }
             let parent = URL(fileURLWithPath: directory).deletingLastPathComponent().path
             guard parent != directory else { return nearestRoot.map { ($0, $0) } }
             directory = parent
         }
         return nearestRoot.map { ($0, $0) }
-    }
-
-    private func projectName(at root: String, processName: String) -> String {
-        if !processName.hasPrefix("python"), machine.fileExists(atPath: root + "/.git") {
-            return URL(fileURLWithPath: root).lastPathComponent
-        }
-        let manifest = processName.hasPrefix("python") ? root + "/pyproject.toml" : root + "/package.json"
-        if let data = try? machine.fileData(atPath: manifest) {
-            if processName.hasPrefix("python"), let name = pep621ProjectName(from: data) { return name }
-            if !processName.hasPrefix("python"),
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let name = object["name"] as? String,
-               !name.isEmpty {
-                return name
-            }
-        }
-        return URL(fileURLWithPath: root).lastPathComponent
-    }
-
-    private func pep621ProjectName(from data: Data) -> String? {
-        guard let contents = String(data: data, encoding: .utf8) else { return nil }
-        var isTopLevel = true
-        var isProjectSection = false
-        for rawLine in contents.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            let header = line.split(separator: "#", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces) ?? ""
-            if header.hasPrefix("["), header.hasSuffix("]") {
-                isTopLevel = false
-                isProjectSection = header == "[project]"
-                continue
-            }
-            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2 else { continue }
-            let key = parts[0].filter { !$0.isWhitespace }
-            guard (isProjectSection && key == "name") || (isTopLevel && key == "project.name") else { continue }
-            let value = parts[1].trimmingCharacters(in: .whitespaces)
-            guard let quote = value.first, quote == "\"" || quote == "'",
-                  let end = value.dropFirst().firstIndex(of: quote) else { return nil }
-            let name = String(value[value.index(after: value.startIndex)..<end])
-            return name.isEmpty ? nil : name
-        }
-        return nil
     }
 
     private func scanPostgreSQL(

@@ -199,12 +199,16 @@ private extension View {
 
 struct LocalServiceDisplayGroup: Identifiable {
     var id: Int32 { pids[0] }
-    var displayName: String { attribution?.name ?? localServiceDescriptor(for: processName).displayName }
+    var effectiveRuntime: LocalServiceRuntime? { runtime ?? LocalServiceRuntime(processName: processName) }
+    var descriptor: ServiceDisplayDescriptor { localServiceDescriptor(for: processName, runtime: effectiveRuntime) }
+    var displayName: String { attribution?.name ?? descriptor.displayName }
 
     let processName: String
     var pids: [Int32]
     let bindings: [ListenerBinding]
     let attribution: LocalServiceAttribution?
+    let runtime: LocalServiceRuntime?
+    let artifactPath: String?
 }
 
 struct ServiceDisplayDescriptor {
@@ -215,8 +219,8 @@ struct ServiceDisplayDescriptor {
     let assetName: String?
 }
 
-func localServiceDescriptor(for processName: String) -> ServiceDisplayDescriptor {
-    let name = processName.lowercased()
+func localServiceDescriptor(for processName: String, runtime: LocalServiceRuntime? = nil) -> ServiceDisplayDescriptor {
+    let name = runtime?.rawValue ?? processName.lowercased()
     func descriptor(
         _ displayName: String,
         _ explanation: String,
@@ -243,6 +247,14 @@ func localServiceDescriptor(for processName: String) -> ServiceDisplayDescriptor
     switch name {
     case "node", "nodejs":
         return descriptor("Node.js", "JavaScript 运行时启动的本地服务", "hexagon.fill", .green, "RuntimeNodeLogo")
+    case "bun", "bun.exe":
+        return descriptor("Bun", "Bun 运行时启动的本地服务", "hexagon.fill", .primary, "PackageManagerBunLogo")
+    case "go" where runtime == .go:
+        return descriptor("Go", "Go 项目中的本地服务", "server.rack", Color(red: 0, green: 0.68, blue: 0.85), "RuntimeGoLogo")
+    case "rust" where runtime == .rust:
+        return descriptor("Rust", "Rust 项目中的本地服务", "server.rack", .primary, "RuntimeRustLogo")
+    case "java":
+        return descriptor("Java", "Java 虚拟机启动的本地服务", "server.rack", Color(red: 0.26, green: 0.45, blue: 0.57), "RuntimeJavaLogo")
     case "postgres", "postmaster":
         return descriptor("PostgreSQL", "PostgreSQL 关系型数据库", "cylinder.fill", .blue, "ServicePostgreSQLLogo")
     case "mongod", "mongos":
@@ -315,6 +327,8 @@ func groupLocalServicesForDisplay(
             $0.processName == service.processName
                 && $0.bindings == service.bindings
                 && $0.attribution == service.attribution
+                && $0.runtime == service.runtime
+                && $0.artifactPath == service.artifactPath
         }) {
             groups[index].pids.append(service.pid)
             groups[index].pids.sort()
@@ -323,7 +337,9 @@ func groupLocalServicesForDisplay(
                 processName: service.processName,
                 pids: [service.pid],
                 bindings: service.bindings,
-                attribution: service.attribution
+                attribution: service.attribution,
+                runtime: service.runtime,
+                artifactPath: service.artifactPath
             ))
         }
     }
@@ -712,13 +728,6 @@ struct ContentView: View {
         .tint(AppTheme.accent)
         .containerBackground(AppTheme.canvas, for: .window)
         .overlay(alignment: .topTrailing) { topActionButtons }
-        .overlay(alignment: .topLeading) {
-            if columnVisibility == .detailOnly {
-                sidebarToggleButton
-                    .padding(.leading, 72)
-                    .padding(.top, 14)
-            }
-        }
         .task(id: autoRefreshSchedule) {
             let schedule = autoRefreshSchedule
             guard schedule.isEnabled else { return }
@@ -1096,19 +1105,6 @@ struct ContentView: View {
         } else {
             model.scan()
         }
-    }
-
-    private var sidebarToggleButton: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
-            }
-        } label: {
-            Image(systemName: "sidebar.left")
-        }
-        .buttonStyle(.borderless)
-        .accessibilityLabel(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
-        .help(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
     }
 
     @ViewBuilder
@@ -5200,7 +5196,7 @@ struct ContentView: View {
     }
 
     private func localServiceRow(_ group: LocalServiceDisplayGroup) -> some View {
-        let descriptor = localServiceDescriptor(for: group.processName)
+        let descriptor = group.descriptor
         let applicationIcon: NSImage? = switch group.attribution?.kind {
         case .application:
             group.attribution.map { NSWorkspace.shared.icon(forFile: $0.path) }
@@ -5211,11 +5207,11 @@ struct ContentView: View {
         }
         let explanation = switch group.attribution?.kind {
         case .project:
-            "\(descriptor.displayName) 项目服务 · \(group.attribution.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "")"
+            "\(group.effectiveRuntime == nil ? "类型未知" : descriptor.displayName) 项目服务 · \(group.attribution.map { ($0.path as NSString).abbreviatingWithTildeInPath } ?? "")"
         case .application:
             "\(descriptor.displayName) 运行时服务"
         case nil:
-            descriptor.explanation
+            descriptor.explanation + (group.artifactPath.map { " · 文件：" + ($0 as NSString).abbreviatingWithTildeInPath } ?? "")
         }
         let pidText = group.pids.count == 1
             ? "PID \(group.pids[0].formatted())"
