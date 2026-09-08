@@ -645,7 +645,19 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
     }
 
     func processTerminated(source _: TerminalView, exitCode rawWaitStatus: Int32?) {
-        finish(pid: terminal.process.shellPid, rawWaitStatus: rawWaitStatus)
+        reapChild(fallbackWaitStatus: rawWaitStatus)
+    }
+
+    private func reapChild(fallbackWaitStatus: Int32? = nil) {
+        guard let pid = monitoredPID else { return }
+        var status: Int32 = 0
+        let result = waitpid(pid, &status, WNOHANG)
+        if result == pid {
+            finish(pid: pid, rawWaitStatus: status)
+        } else if result == -1, errno == ECHILD {
+            // SwiftTerm may have already reaped this child before notifying us.
+            finish(pid: pid, rawWaitStatus: fallbackWaitStatus)
+        }
     }
 
     func sizeChanged(source _: LocalProcessTerminalView, newCols _: Int, newRows _: Int) {}
@@ -657,9 +669,7 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
         monitoredPID = pid
         let monitor = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
         monitor.setEventHandler { [weak self] in
-            var status: Int32 = 0
-            guard waitpid(pid, &status, WNOHANG) == pid else { return }
-            self?.finish(pid: pid, rawWaitStatus: status)
+            self?.reapChild()
         }
         processMonitor = monitor
         monitor.activate()
@@ -683,6 +693,8 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
                       self.ownershipMonitorGeneration == generation,
                       self.ownershipToken?.terminalDevice == terminalDevice,
                       let snapshot else { return }
+                self.reapChild()
+                guard self.ownershipMonitorGeneration == generation else { return }
                 _ = self.applyOwnedProcessSnapshot(snapshot, terminalDevice: terminalDevice)
         })
         ownershipMonitor = monitor
@@ -1468,7 +1480,24 @@ final class ProjectRunCoordinator: ObservableObject {
         session.failureMessage = "停止失败：\(message)"
         session.failureAt = Date()
         session.state = .stopFailed(message)
+        recheckFailedStop(session)
         objectWillChange.send()
+    }
+
+    private func recheckFailedStop(_ session: ProjectRunSession) {
+        let failureAt = session.failureAt
+        scheduler.schedule(after: .seconds(1)) { [weak self, weak session] in
+            guard let self, let session,
+                  self.sessions[session.id] === session,
+                  session.failureAt == failureAt,
+                  case .stopFailed = session.state else { return }
+            if session.engine.signalProcessGroups(0), session.ownedProcessIDs?.isEmpty == true {
+                self.finishStopping(session)
+                self.objectWillChange.send()
+            } else {
+                self.recheckFailedStop(session)
+            }
+        }
     }
 
     func removeProjects(
