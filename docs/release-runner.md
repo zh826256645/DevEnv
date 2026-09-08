@@ -2,6 +2,8 @@
 
 本文是 DevEnv 专用 Apple Silicon Self-hosted Runner 的安装、启停、验证、更新、清理和故障恢复手册。该 Runner 只服务于受控 Dry Run 与正式发版窗口，不作为长期在线的通用开发执行器。
 
+自 v0.1.1 起，所有者可授权使用[本地发布通道](releasing.md#本地发布通道自-v011-起)，该通道不需要安装或注册 Runner。本文仅适用于选择 GitHub Actions 发布时。
+
 发版契约与分支、Tag、DMG 规则见 [发版流程](releasing.md)。GitHub Runner 的下载命令、短期注册 Token 和当前版本号必须始终从仓库 **Settings → Actions → Runners → New self-hosted runner** 页面取得；不要把 Token、`.credentials` 或 Runner 诊断包提交到仓库。
 
 ## 1. 固定配置
