@@ -229,7 +229,7 @@ _Avoid_: Installation Method, Runtime State
 _Avoid_: Daemon, Background Service
 
 **Local Service Attribution**:
-Environment Scan 对 Python 或 Node Local Service 所属开发项目或宿主 App 的识别结果；没有充分本机证据时为空。
+Environment Scan 对 Local Service 所属开发项目或宿主 App 的识别结果，与 Python、Node、Bun、Go、Rust、Java 类型独立判断；没有充分本机证据时为空。独立 JAR 或二进制文件的路径不等同于项目归属。识别边界见 [ADR-0006](docs/adr/0006-attribute-runtime-services-by-working-directory-and-app-path.md)。
 _Avoid_: API Name, Process Owner, Service Guess
 
 **Listener Binding**:

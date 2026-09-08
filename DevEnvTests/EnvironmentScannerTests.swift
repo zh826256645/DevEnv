@@ -1931,7 +1931,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Users/test/Projects/example-api")
     }
 
-    func testAttributesPythonListenerUsingDottedPEP621ProjectName() {
+    func testUsesDirectoryNameForPythonProjectWithoutGit() {
         let snapshot = EnvironmentScanner(machine: StubMachine(
             path: ["/bin"],
             commandOutputs: [
@@ -1943,7 +1943,7 @@ final class EnvironmentScannerTests: XCTestCase {
             processWorkingDirectoryPaths: [42: "/Users/test/Projects/backend/Sources"]
         )).scan().snapshot
 
-        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "example-api")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "backend")
     }
 
     func testAttributesNodeListenerToWorkingDirectoryProject() {
@@ -1960,7 +1960,7 @@ final class EnvironmentScannerTests: XCTestCase {
         )).scan().snapshot
 
         XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
-        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "web-console")
+        XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "web")
         XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Users/test/Projects/web")
     }
 
@@ -1980,6 +1980,195 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.localServices.first?.attribution?.kind, .project)
         XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "personal-os")
         XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/Users/test/Projects/personal-os/frontend")
+    }
+
+    func testAttributesBunListenerToContainingGitProject() {
+        for name in ["bun", "bun.exe"] {
+            let snapshot = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin"],
+                commandOutputs: [
+                    "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p14688\nc\(name)\nf6\ntIPv4\nn*:3041\n",
+                ],
+                existingFiles: ["/projects/coach/.git", "/projects/coach/admin/package.json"],
+                processExecutablePaths: [14688: "/tools/bun.exe"],
+                processWorkingDirectoryPaths: [14688: "/projects/coach/admin"]
+            )).scan().snapshot
+
+            XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "coach")
+            XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/projects/coach/admin")
+            XCTAssertEqual(localServiceDescriptor(for: name).displayName, "Bun")
+            XCTAssertEqual(localServiceDescriptor(for: name).assetName, "PackageManagerBunLogo")
+        }
+    }
+
+    func testAttributesListenersIndependentlyOfRuntimeInPolyglotProject() {
+        for (process, manifest) in [("api", "go.mod"), ("worker", "Cargo.toml"), ("java", "pom.xml"), ("java", "build.gradle.kts"), ("java", "build.gradle"), ("custom", "package.json")] {
+            let snapshot = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin"],
+                commandOutputs: [
+                    "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\nc\(process)\nf6\ntIPv4\nn*:8080\n",
+                ],
+                existingFiles: ["/projects/mono/.git", "/projects/mono/package.json", "/projects/mono/backend/\(manifest)"],
+                processWorkingDirectoryPaths: [42: "/projects/mono/backend/src"]
+            )).scan().snapshot
+
+            XCTAssertEqual(snapshot.localServices.first?.attribution?.name, "mono", manifest)
+            XCTAssertEqual(snapshot.localServices.first?.attribution?.path, "/projects/mono/backend", manifest)
+        }
+    }
+
+    func testIdentifiesNativeServiceFromExecutableProjectWithoutUsingItsName() throws {
+        for (manifest, binary, expectedRuntime) in [("go.mod", "bin/api", "go"), ("Cargo.toml", "target/debug/worker", "rust")] {
+            let snapshot = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin"],
+                commandOutputs: [
+                    "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncarbitrary-name\nf6\ntIPv4\nn*:8080\n",
+                ],
+                existingFiles: ["/projects/mono/.git", "/projects/mono/backend/\(manifest)"],
+                processExecutablePaths: [42: "/projects/mono/backend/\(binary)"],
+                processWorkingDirectoryPaths: [42: "/tmp"]
+            )).scan().snapshot
+
+            let service = try XCTUnwrap(snapshot.localServices.first)
+            let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(service)) as? [String: Any])
+            XCTAssertEqual(encoded["runtime"] as? String, expectedRuntime)
+            XCTAssertEqual(encoded["artifactPath"] as? String, "/projects/mono/backend/\(binary)")
+            XCTAssertEqual(service.attribution?.name, "mono")
+            XCTAssertEqual(service.attribution?.path, "/projects/mono/backend")
+        }
+    }
+
+    func testAttributesJavaJarByArgumentPathWithoutPersistingArguments() throws {
+        let jar = "/projects/my mono/backend/target/api server.jar"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [
+                "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncjava\nf6\ntIPv4\nn*:8080\n",
+            ],
+            existingFiles: ["/projects/my mono/.git", "/projects/my mono/backend/pom.xml", jar],
+            processExecutablePaths: [42: "/jdk/bin/java"],
+            processWorkingDirectoryPaths: [42: "/tmp"],
+            processArgumentValues: [42: ["java", "-Dpassword=secret-test-value", "-jar", jar, "--token", "secret-test-value"]]
+        )).scan().snapshot
+
+        let service = try XCTUnwrap(snapshot.localServices.first)
+        XCTAssertEqual(service.runtime, .java)
+        XCTAssertEqual(service.attribution?.name, "my mono")
+        XCTAssertEqual(service.attribution?.path, "/projects/my mono/backend")
+        XCTAssertEqual(service.artifactPath, jar)
+        let saved = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
+        XCTAssertFalse(saved.contains("secret-test-value"))
+        XCTAssertFalse(saved.contains("--token"))
+    }
+
+    func testJavaClasspathPathsAndApplicationArgumentsStaySeparate() throws {
+        for arguments in [
+            ["java", "-cp", "backend/build/classes/java/main:/deploy/dependency.jar", "Main", "-jar", "/unrelated/fake.jar"],
+            ["java", "--class-path=backend/build/classes/java/main", "Main"],
+            ["java", "--module-path=backend/build/classes/java/main", "--module=Main", "-jar", "/unrelated/fake.jar"],
+        ] {
+            let snapshot = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin"],
+                commandOutputs: [
+                    "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncjava\nf6\ntIPv4\nn*:8080\n",
+                ],
+                existingFiles: ["/projects/mono/.git", "/projects/mono/backend/build.gradle.kts", "/projects/mono/backend/build/classes/java/main", "/deploy/dependency.jar", "/unrelated/fake.jar"],
+                processExecutablePaths: [42: "/jdk/bin/java"],
+                processWorkingDirectoryPaths: [42: "/projects/mono"],
+                processArgumentValues: [42: arguments]
+            )).scan().snapshot
+
+            let service = try XCTUnwrap(snapshot.localServices.first)
+            XCTAssertEqual(service.attribution?.path, "/projects/mono/backend")
+            XCTAssertEqual(service.artifactPath, "/jdk/bin/java")
+        }
+    }
+
+    func testKeepsProjectEvidenceWhenUnknownBinaryIsBuiltOutsideProject() throws {
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: ["/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncapi\nf6\ntIPv4\nn*:8080\n"],
+            existingFiles: ["/projects/api/go.mod"],
+            processExecutablePaths: [42: "/tmp/build/api"],
+            processWorkingDirectoryPaths: [42: "/projects/api"]
+        )).scan().snapshot
+        let service = try XCTUnwrap(snapshot.localServices.first)
+        XCTAssertEqual(service.attribution?.path, "/projects/api")
+        XCTAssertNil(service.runtime)
+    }
+
+    func testUncertainServiceEvidenceDoesNotInventProjectsOrLanguages() throws {
+        let command = "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn"
+        let standalone = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [command: "p42\ncjava\nf6\ntIPv4\nn*:8080\np43\ncworker\nf7\ntIPv4\nn*:8081\n"],
+            existingFiles: ["/deploy/api.jar"],
+            processExecutablePaths: [42: "/jdk/bin/java", 43: "/deploy/worker"],
+            processWorkingDirectoryPaths: [42: "/deploy", 43: "/deploy"],
+            processArgumentValues: [42: ["java", "-jar", "api.jar"]]
+        )).scan().snapshot
+        XCTAssertTrue(standalone.localServices.allSatisfy { $0.attribution == nil })
+        XCTAssertEqual(standalone.localServices.map(\.artifactPath), ["/deploy/api.jar", "/deploy/worker"])
+        XCTAssertEqual(standalone.localServices.map(\.runtime), [.java, nil])
+
+        let ambiguous = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [command: "p42\ncworker\nf6\ntIPv4\nn*:8080\n"],
+            existingFiles: ["/projects/mixed/.git", "/projects/mixed/go.mod", "/projects/mixed/Cargo.toml"],
+            processExecutablePaths: [42: "/projects/mixed/bin/worker"]
+        )).scan().snapshot
+        XCTAssertEqual(ambiguous.localServices.first?.attribution?.path, "/projects/mixed")
+        XCTAssertNil(ambiguous.localServices.first?.runtime)
+    }
+
+    func testJavaConflictingClasspathAndUnreadableArgumentsUseConservativeEvidence() throws {
+        let command = "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn"
+        let snapshot = EnvironmentScanner(machine: StubMachine(
+            path: ["/bin"],
+            commandOutputs: [command: "p42\ncjava\nf6\ntIPv4\nn*:8080\np43\ncjava\nf7\ntIPv4\nn*:8081\n"],
+            existingFiles: ["/projects/a/pom.xml", "/projects/b/pom.xml", "/projects/a/classes", "/projects/b/classes"],
+            processWorkingDirectoryPaths: [42: "/projects/a", 43: "/projects/a"],
+            processArgumentValues: [42: ["java", "-cp", "/projects/a/classes:/projects/b/classes", "Main"]]
+        )).scan().snapshot
+        XCTAssertNil(snapshot.localServices[0].attribution)
+        XCTAssertEqual(snapshot.localServices[1].attribution?.path, "/projects/a")
+    }
+
+    func testJavaClasspathAndModulePathKeepIndependentEvidence() {
+        for (arguments, expectedPath) in [
+            (["java", "-cp", "/projects/a/classes", "--module-path", "/projects/b/classes", "Main"], nil),
+            (["java", "--module-path", "/projects/b/classes", "-cp", "/projects/a/classes", "Main"], nil),
+            (["java", "-cp", "/projects/b/classes", "-classpath", "/projects/a/classes", "Main"], "/projects/a"),
+        ] as [([String], String?)] {
+            let snapshot = EnvironmentScanner(machine: StubMachine(
+                path: ["/bin"],
+                commandOutputs: ["/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncjava\nf6\ntIPv4\nn*:8080\n"],
+                existingFiles: ["/projects/a/pom.xml", "/projects/b/pom.xml", "/projects/a/classes", "/projects/b/classes"],
+                processArgumentValues: [42: arguments]
+            )).scan().snapshot
+            XCTAssertEqual(snapshot.localServices.first?.attribution?.path, expectedPath)
+        }
+    }
+
+    func testServiceSnapshotReadsOldOptionalFieldsAndPreservesNewFieldsOnRefresh() throws {
+        let old = try JSONDecoder().decode(LocalServiceSnapshot.self, from: Data(#"{"processName":"node","pid":42,"bindings":[]}"#.utf8))
+        XCTAssertNil(old.runtime)
+        XCTAssertNil(old.artifactPath)
+        XCTAssertEqual(groupLocalServicesForDisplay([old]).first?.displayName, "Node.js")
+        let machine = StubMachine(
+            path: ["/bin"],
+            commandOutputs: ["/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpcftn": "p42\ncnode\nf6\ntIPv4\nn*:3041\n"],
+            existingFiles: ["/projects/web/package.json"],
+            processExecutablePaths: [42: "/tools/bun.exe"],
+            processWorkingDirectoryPaths: [42: "/projects/web"]
+        )
+        let scanner = EnvironmentScanner(machine: machine)
+        let snapshot = scanner.scan().snapshot
+        let refreshed = try scanner.refreshDynamicStatus(in: snapshot).get()
+        let saved = try JSONDecoder().decode(MachineSnapshot.self, from: JSONEncoder().encode(snapshot.applying(refreshed)))
+        XCTAssertEqual(saved.localServices.first?.runtime, .bun)
+        XCTAssertEqual(saved.localServices.first?.artifactPath, "/tools/bun.exe")
+        XCTAssertEqual(saved.localServices.first?.attribution?.path, "/projects/web")
     }
 
     func testAttributesPythonListenerToContainingApplication() {
@@ -2196,6 +2385,22 @@ final class EnvironmentScannerTests: XCTestCase {
         }
     }
 
+    func testDisplaysDetectedServiceRuntimeIndependentlyOfProcessName() {
+        let binding = ListenerBinding(address: "127.0.0.1", port: 8080, family: .ipv4)
+        for (runtime, name) in [(LocalServiceRuntime.go, "Go"), (.rust, "Rust"), (.java, "Java"), (.bun, "Bun")] {
+            let groups = groupLocalServicesForDisplay([
+                LocalServiceSnapshot(processName: "api", pid: 42, bindings: [binding], runtime: runtime, artifactPath: "/projects/api"),
+            ])
+            XCTAssertEqual(groups.first?.displayName, name)
+        }
+        XCTAssertEqual(localServiceDescriptor(for: "java").assetName, "RuntimeJavaLogo")
+        let separate = groupLocalServicesForDisplay([
+            LocalServiceSnapshot(processName: "api", pid: 42, bindings: [binding], runtime: .go, artifactPath: "/go/api"),
+            LocalServiceSnapshot(processName: "api", pid: 43, bindings: [binding], runtime: .rust, artifactPath: "/rust/api"),
+        ])
+        XCTAssertEqual(separate.count, 2)
+    }
+
     func testDescribesCommonHomebrewServiceFormulae() {
         let expectedDescriptors: [(String, String?)] = [
             ("postgresql@18", "ServicePostgreSQLLogo"),
@@ -2351,7 +2556,7 @@ final class EnvironmentScannerTests: XCTestCase {
         XCTAssertTrue(store.load()?.githubAuthenticationConfiguration.ghTokenExists == true)
         XCTAssertEqual(store.load()?.localServices.first?.bindings.first?.port, 3000)
         XCTAssertEqual(store.load()?.localServices.first?.attribution?.kind, .project)
-        XCTAssertEqual(store.load()?.localServices.first?.attribution?.name, "web-console")
+        XCTAssertEqual(store.load()?.localServices.first?.attribution?.name, "web")
         XCTAssertEqual(store.load()?.localServices.first?.attribution?.path, "/Users/test/Projects/web")
         XCTAssertEqual(store.load()?.runtimes.first { $0.id == "node" }?.installations.first?.sources, [.system])
         XCTAssertEqual(store.load()?.databaseInstallationOverviews.map(\.id), [
@@ -2680,6 +2885,7 @@ private struct StubMachine: MachineAccess {
     let processExecutableFailures: Set<Int32>
     let processWorkingDirectoryPaths: [Int32: String]
     let processWorkingDirectoryFailures: Set<Int32>
+    let processArgumentValues: [Int32: [String]]
     let applications: [String: InstalledApplication]
     let recorder: CommandRecorder?
 
@@ -2704,6 +2910,7 @@ private struct StubMachine: MachineAccess {
         processExecutableFailures: Set<Int32> = [],
         processWorkingDirectoryPaths: [Int32: String] = [:],
         processWorkingDirectoryFailures: Set<Int32> = [],
+        processArgumentValues: [Int32: [String]] = [:],
         applications: [String: InstalledApplication] = [:],
         recorder: CommandRecorder? = nil
     ) {
@@ -2732,6 +2939,7 @@ private struct StubMachine: MachineAccess {
         self.processExecutableFailures = processExecutableFailures
         self.processWorkingDirectoryPaths = processWorkingDirectoryPaths
         self.processWorkingDirectoryFailures = processWorkingDirectoryFailures
+        self.processArgumentValues = processArgumentValues
         self.applications = applications
         self.recorder = recorder
     }
@@ -2768,6 +2976,11 @@ private struct StubMachine: MachineAccess {
     }
 
     func application(bundleIdentifier: String) -> InstalledApplication? { applications[bundleIdentifier] }
+
+    func processArguments(forPID pid: Int32) throws -> [String] {
+        guard let arguments = processArgumentValues[pid] else { throw CocoaError(.fileReadNoPermission) }
+        return arguments
+    }
 
     func captureMachineToolSearchPath(
         usingLoginShell executable: String,
