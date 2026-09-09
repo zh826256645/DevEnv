@@ -865,10 +865,28 @@ struct ProjectRunWorkingDirectory {
     }
 }
 
+struct ProjectRunDeletionIntent {
+    let workspaceID: String?
+    let configurations: [ProjectRunConfiguration]
+    let executionIDs: [String: ProjectRunExecution.ID]
+    let title: String
+    let projectIDs: Set<String>
+
+    var configurationIDs: Set<String> { Set(configurations.map(\.id)) }
+    var message: String {
+        "将删除“\(title)”的 \(configurations.count) 个运行配置"
+            + (workspaceID == nil ? "" : "、\(projectIDs.count) 个项目记录及工作区管理数据")
+            + "，并先停止 \(executionIDs.count) 个相关活动运行。停止或保存失败将保留记录。不会修改磁盘项目目录及文件。"
+    }
+}
+
 @MainActor
 final class ProjectRunCoordinator: ObservableObject {
     @Published private(set) var sessions: [String: ProjectRunSession] = [:]
     @Published private(set) var pendingBatchStopIntent: ProjectRunBatchStopIntent?
+    @Published private(set) var pendingDeletion: ProjectRunDeletionIntent?
+    @Published private(set) var activeDeletion: ProjectRunDeletionIntent?
+    @Published var deletionError: String?
 
     private let projectsModel: ProjectsViewModel
     private let makeEngine: () -> any ProjectRunProcessEngine
@@ -981,12 +999,74 @@ final class ProjectRunCoordinator: ObservableObject {
         return true
     }
 
-    @discardableResult
-    func deleteRunConfiguration(_ configuration: ProjectRunConfiguration) -> Bool {
-        guard projectsModel.deleteRunConfiguration(configuration) else { return false }
-        commandDrafts.removeValue(forKey: configuration.id)
-        objectWillChange.send()
-        return true
+    func requestDeletion(configurationID: String? = nil, workspaceID: String? = nil) {
+        guard activeDeletion == nil, !projectsModel.mutationsArePaused else { return }
+        let configurations = projectsModel.runConfigurations().filter {
+            workspaceID == nil ? $0.id == configurationID : $0.workspaceID == workspaceID
+        }
+        let workspace = projectsModel.document.workspaces.first { $0.id == workspaceID }
+        guard workspace != nil || (workspaceID == nil && configurations.count == 1) else { return }
+        deletionError = nil
+        pendingDeletion = ProjectRunDeletionIntent(
+            workspaceID: workspaceID, configurations: configurations,
+            executionIDs: Dictionary(uniqueKeysWithValues: configurations.compactMap { configuration in
+                sessions[configuration.id]?.activeExecution.map { (configuration.id, $0.id) }
+            }),
+            title: workspace?.name ?? configurations[0].name,
+            projectIDs: Set(projectsModel.records.filter { $0.workspaceID == workspaceID }.map(\.id))
+        )
+    }
+
+    func cancelDeletion() { pendingDeletion = nil }
+
+    func confirmDeletion() {
+        guard let intent = pendingDeletion, activeDeletion == nil else { return }
+        pendingDeletion = nil
+        guard deletionContentsMatch(intent), intent.configurations.allSatisfy({
+            sessions[$0.id]?.activeExecution?.id == intent.executionIDs[$0.id]
+        }) else {
+            deletionError = "保存内容或运行已变化，请重新确认删除。"
+            return
+        }
+        activeDeletion = intent
+        for executionID in intent.executionIDs.values { stop(executionID: executionID) }
+        finishDeletionIfReady()
+    }
+
+    private func deletionContentsMatch(_ intent: ProjectRunDeletionIntent) -> Bool {
+        let configurations = projectsModel.runConfigurations().filter {
+            intent.workspaceID == nil ? intent.configurationIDs.contains($0.id) : $0.workspaceID == intent.workspaceID
+        }
+        return configurations == intent.configurations && (intent.workspaceID == nil || (
+            projectsModel.document.workspaces.contains { $0.id == intent.workspaceID }
+                && Set(projectsModel.records.filter { $0.workspaceID == intent.workspaceID }.map(\.id)) == intent.projectIDs
+        ))
+    }
+
+    private func finishDeletionIfReady() {
+        guard let intent = activeDeletion else { return }
+        for id in intent.configurationIDs {
+            if case .stopFailed = sessions[id]?.state {
+                activeDeletion = nil
+                deletionError = "删除未完成：相关运行停止失败，已保留全部记录，可重试。"
+                return
+            }
+        }
+        guard intent.configurationIDs.allSatisfy({ sessions[$0]?.activeExecution == nil }) else { return }
+        defer { activeDeletion = nil }
+        guard deletionContentsMatch(intent) else {
+            deletionError = "保存内容已变化，已保留记录，请重新确认删除。"
+            return
+        }
+        let saved = projectsModel.deleteSavedContent(configurationIDs: intent.configurationIDs, workspaceID: intent.workspaceID)
+        guard saved else {
+            deletionError = projectsModel.operationError ?? "删除未完成，已保留记录，请重试。"
+            return
+        }
+        for id in intent.configurationIDs {
+            sessions.removeValue(forKey: id)
+            commandDrafts.removeValue(forKey: id)
+        }
     }
 
     func refreshRequirements(machineSnapshot: MachineSnapshot?) {
@@ -1150,6 +1230,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func run(_ configuration: ProjectRunConfiguration, project: ProjectRecord? = nil) -> ProjectRunActionResult {
+        guard activeDeletion?.configurationIDs.contains(configuration.id) != true else { return .rejected("正在删除运行配置") }
         if let project, let message = availabilityMessage(project) {
             return rejectStartAttempt(configuration: configuration, projectRoot: project.path, workingDirectory: nil, message: message)
         }
@@ -1157,6 +1238,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func run(_ configuration: ProjectRunConfiguration, projectRoot: String?) -> ProjectRunActionResult {
+        guard activeDeletion?.configurationIDs.contains(configuration.id) != true else { return .rejected("正在删除运行配置") }
         guard isRunConfigurationEnabled(configuration) else { return .rejected("运行配置已禁用") }
         guard sessions[configuration.id]?.state.isLive != true else {
             return .rejected("该运行配置已有活动会话")
@@ -1208,6 +1290,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func restart(_ configuration: ProjectRunConfiguration, project: ProjectRecord? = nil) {
+        guard activeDeletion?.configurationIDs.contains(configuration.id) != true else { return }
         if let project, let message = availabilityMessage(project) {
             failRestartAttempt(configuration: configuration, projectRoot: project.path, workingDirectory: nil, message: message)
             return
@@ -1216,6 +1299,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func restart(_ configuration: ProjectRunConfiguration, projectRoot: String?) {
+        guard activeDeletion?.configurationIDs.contains(configuration.id) != true else { return }
         guard let session = sessions[configuration.id], session.state.canRestart else { return }
         do {
             guard isRunConfigurationEnabled(configuration) else { throw ProjectRunConfigurationError.configurationNotFound }
@@ -1249,6 +1333,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     private func beginStopping(_ session: ProjectRunSession, restarting: Bool) {
+        let executionID = session.currentExecution?.id
         let isRetry = session.state.isStopping
         session.state = restarting ? .restarting : .stopping
         if !isRetry {
@@ -1263,10 +1348,10 @@ final class ProjectRunCoordinator: ObservableObject {
         _ = session.engine.signalProcessGroups(SIGINT)
         objectWillChange.send()
         scheduler.schedule(after: .seconds(2)) { [weak self, weak session] in
-            guard let self, let session, session.state.isStopping else { return }
+            guard let self, let session, session.currentExecution?.id == executionID, session.state.isStopping else { return }
             _ = session.engine.signalProcessGroups(SIGTERM)
             self.scheduler.schedule(after: .seconds(2)) { [weak self, weak session] in
-                guard let self, let session, session.state.isStopping else { return }
+                guard let self, let session, session.currentExecution?.id == executionID, session.state.isStopping else { return }
                 if session.engine.signalProcessGroups(SIGKILL) {
                     self.finishStopping(session)
                 } else if session.state == .restarting {
@@ -1307,9 +1392,11 @@ final class ProjectRunCoordinator: ObservableObject {
             }
             session.state = request == nil && stoppedByUser ? .stopped(exitCode) : .exited(exitCode)
             if let request { _ = launch(request) }
+            finishDeletionIfReady()
         } else if checksRemaining > 0 {
+            let executionID = session.currentExecution?.id
             scheduler.schedule(after: .milliseconds(100)) { [weak self, weak session] in
-                guard let self, let session else { return }
+                guard let self, let session, session.currentExecution?.id == executionID else { return }
                 self.finishStoppingWhenProcessesExit(
                     session,
                     exitCode: exitCode,
@@ -1360,6 +1447,7 @@ final class ProjectRunCoordinator: ObservableObject {
         session.failureAt = Date()
         session.state = .stopFailed(message)
         recheckFailedStop(session)
+        finishDeletionIfReady()
         objectWillChange.send()
     }
 
@@ -1387,6 +1475,8 @@ final class ProjectRunCoordinator: ObservableObject {
                 .filter { $0.projectID.map(projectIDs.contains) == true }
                 .map(\.id)
         )
+        // Keep the in-flight safe-stop lifecycle owned by the deletion operation.
+        guard activeDeletion.map({ $0.configurationIDs.isDisjoint(with: configurationIDs) }) ?? true else { return nil }
         guard let summary = projectsModel.remove(projectIDs: projectIDs, afterPersist: {
             var succeeded = true
             for configurationID in configurationIDs {
@@ -1457,6 +1547,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     private func launch(_ request: ProjectRunFrozenStartRequest) -> ProjectRunActionResult {
+        guard activeDeletion?.configurationIDs.contains(request.configuration.id) != true else { return .rejected("正在删除运行配置") }
         do { try validateProjectContext(request.configuration, projectRoot: request.projectRoot) }
         catch { return rejectStartRequest(request, message: error.localizedDescription) }
         guard !request.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1621,6 +1712,7 @@ final class ProjectRunCoordinator: ObservableObject {
         execution: ProjectRunExecution,
         message: String
     ) -> ProjectRunActionResult {
+        guard projectsModel.runConfigurations().contains(where: { $0.id == configurationID }) else { return .rejected(message) }
         let session = sessions[configurationID] ?? makeSession(for: configurationID)
         let activeExecution = session.activeExecution
         session.failureExecution = execution

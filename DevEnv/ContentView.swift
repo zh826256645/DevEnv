@@ -710,7 +710,6 @@ struct ContentView: View {
     @State private var runConfigurationSaveAttempted = false
     @State private var runConfigurationSourceIdentity: String?
     @State private var runConfigurationSourceProjectID: String?
-    @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
     @State private var selectedRunConfigurationID: String?
     @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
     @State private var runSearchText = ""
@@ -724,7 +723,7 @@ struct ContentView: View {
         self.runCoordinator = runCoordinator
     }
 
-    var body: some View {
+    private var mainContent: some View {
         navigation(model.snapshot)
         .frame(minWidth: 1100, minHeight: 720)
         .sheet(isPresented: $isShowingWorkspaceEditor) { workspaceEditor }
@@ -901,22 +900,35 @@ struct ContentView: View {
         } message: {
             Text("当前存储损坏或版本不兼容，已暂停修改。原文件会保留为备份，然后创建空的 project-records.json。")
         }
-        .alert(
-            "删除运行配置？",
-            isPresented: isConfirmingRunConfigurationDeletion,
-            presenting: pendingRunConfigurationDeletion
-        ) { configuration in
-            Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) {
-                if runCoordinator.deleteRunConfiguration(configuration) {
-                    runCoordinator.closeTerminal(configurationID: configuration.id)
-                    if selectedRunConfigurationID == configuration.id {
-                        selectedRunConfigurationID = nil
-                    }
-                }
+    }
+
+    var body: some View {
+        mainContent
+        .onChange(of: projectsModel.document.runConfigurations.map(\.id)) { _, ids in
+            if let id = selectedRunConfigurationID, !ids.contains(id) { selectedRunConfigurationID = nil }
+            if let configuration = expandedTerminalConfiguration, !ids.contains(configuration.id) { expandedTerminalConfiguration = nil }
+            if let configuration = editingRunConfiguration, !ids.contains(configuration.id) {
+                editingRunConfiguration = nil
+                isShowingRunConfigurationEditor = false
             }
-        } message: { configuration in
-            Text("将删除运行配置“\(configuration.name)”。此操作不会修改 Project Root。")
+        }
+        .alert(
+            "删除保存内容？",
+            isPresented: isConfirmingRunConfigurationDeletion,
+            presenting: runCoordinator.pendingDeletion
+        ) { _ in
+            Button("取消", role: .cancel) { runCoordinator.cancelDeletion() }
+            Button("停止相关运行并删除", role: .destructive) { runCoordinator.confirmDeletion() }
+        } message: { intent in
+            Text(intent.message)
+        }
+        .alert("删除未完成", isPresented: Binding(
+            get: { runCoordinator.deletionError != nil },
+            set: { if !$0 { runCoordinator.deletionError = nil } }
+        )) {
+            Button("好") { runCoordinator.deletionError = nil }
+        } message: {
+            Text(runCoordinator.deletionError ?? "")
         }
     }
 
@@ -953,8 +965,8 @@ struct ContentView: View {
 
     private var isConfirmingRunConfigurationDeletion: Binding<Bool> {
         Binding(
-            get: { pendingRunConfigurationDeletion != nil },
-            set: { if !$0 { pendingRunConfigurationDeletion = nil } }
+            get: { runCoordinator.pendingDeletion != nil },
+            set: { if !$0 { runCoordinator.cancelDeletion() } }
         )
     }
 
@@ -1146,7 +1158,12 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 workspaceNavigation
                 Divider()
-                if page == .projects { projectsPage } else { runsPage }
+                if runCoordinator.activeDeletion != nil {
+                    ProgressView("正在安全停止相关运行，完成后删除保存内容…").padding()
+                }
+                if projectsModel.document.workspaces.isEmpty {
+                    ContentUnavailableView("暂无工作区", systemImage: "folder", description: Text("点击“新建工作区”开始添加项目或运行配置。"))
+                } else if page == .projects { projectsPage } else { runsPage }
             }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else if page == .overview, let snapshot {
@@ -1305,6 +1322,7 @@ struct ContentView: View {
                 get: { projectsModel.currentWorkspace.id },
                 set: { _ = projectsModel.selectWorkspace($0) }
             )) {
+                if projectsModel.document.workspaces.isEmpty { Text("无工作区").tag("") }
                 ForEach(projectsModel.document.workspaces) { workspace in
                     Text(workspace.name).tag(workspace.id)
                 }
@@ -1337,6 +1355,11 @@ struct ContentView: View {
                     isShowingWorkspaceEditor = true
                 }
                 .accessibilityLabel("重命名当前工作区")
+                .disabled(projectsModel.document.workspaces.isEmpty)
+                Button("删除工作区", role: .destructive) {
+                    runCoordinator.requestDeletion(workspaceID: projectsModel.currentWorkspace.id)
+                }
+                .disabled(projectsModel.document.workspaces.isEmpty || projectsModel.isScanning || runCoordinator.activeDeletion != nil)
             }
             .disabled(projectsModel.mutationsArePaused)
         }
@@ -1999,7 +2022,7 @@ struct ContentView: View {
                                 projectsModel.mutationsArePaused
                                     || (configuration.isEnabled && state.isLive)
                             )
-                            Menu { Button("删除", role: .destructive) { pendingRunConfigurationDeletion = configuration } } label: {
+                            Menu { Button("删除", role: .destructive) { runCoordinator.requestDeletion(configurationID: configuration.id) } } label: {
                                 Image(systemName: "ellipsis")
                                     .frame(width: 34, height: 22)
                             }

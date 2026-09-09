@@ -777,7 +777,7 @@ final class ProjectRecordsTests: XCTestCase {
             workingDirectory: updated.workingDirectory
         ))
         let unavailableUpdated = try XCTUnwrap(model.runConfigurations(projectID: try XCTUnwrap(model.records.first { $0.path == alpha.path }).id).first)
-        XCTAssertTrue(model.deleteRunConfiguration(betaRun))
+        XCTAssertTrue(model.deleteSavedContent(configurationIDs: [betaRun.id], workspaceID: nil))
         XCTAssertEqual(try store.load().runConfigurations, [unavailableUpdated])
 
         try FileManager.default.createDirectory(at: alphaScripts, withIntermediateDirectories: true)

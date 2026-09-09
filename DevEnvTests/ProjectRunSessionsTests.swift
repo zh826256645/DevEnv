@@ -7,6 +7,161 @@ import XCTest
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+    func testProjectRemovalCannotInterruptAnAlreadyStoppingConfigurationDeletion() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [directory])
+        let coordinator = fixture.coordinator
+        let configuration = try XCTUnwrap(coordinator.createRunConfiguration(
+            projectID: directory.path, name: "删除", command: "pwd", workingDirectory: ""
+        ))
+        XCTAssertEqual(coordinator.run(configuration), .started)
+        coordinator.stop(configurationID: configuration.id)
+        coordinator.requestDeletion(configurationID: configuration.id)
+        coordinator.confirmDeletion()
+        XCTAssertNil(coordinator.removeProjects(projectIDs: [directory.path]))
+        fixture.scheduler.runNext()
+        fixture.scheduler.runNext()
+        XCTAssertNil(coordinator.activeDeletion)
+        XCTAssertTrue(coordinator.runConfigurations().isEmpty)
+        XCTAssertEqual(fixture.projectsModel.records.count, 1)
+    }
+
+    func testDeletionSaveFailureRetainsRecordsAndCanRetryWithoutRestartingProcesses() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [directory])
+        let coordinator = fixture.coordinator
+        let configuration = try XCTUnwrap(coordinator.createRunConfiguration(name: "保存失败", command: "pwd", workingDirectory: ""))
+        XCTAssertEqual(coordinator.run(configuration), .started)
+        let before = fixture.projectsModel.document
+        let records = directory.appendingPathComponent("records.json")
+        try FileManager.default.removeItem(at: records)
+        try FileManager.default.createDirectory(at: records, withIntermediateDirectories: false)
+        coordinator.requestDeletion(workspaceID: Workspace.defaultWorkspace.id)
+        coordinator.confirmDeletion()
+        fixture.scheduler.runNext()
+        fixture.scheduler.runNext()
+        XCTAssertEqual(fixture.projectsModel.document, before)
+        XCTAssertNotNil(coordinator.deletionError)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(137))
+        try FileManager.default.removeItem(at: records)
+        coordinator.requestDeletion(workspaceID: Workspace.defaultWorkspace.id)
+        coordinator.confirmDeletion()
+        XCTAssertNil(coordinator.deletionError)
+        XCTAssertTrue(try fixture.store.load().workspaces.isEmpty)
+        XCTAssertEqual(fixture.factory.engines[0].launches.count, 1)
+    }
+
+    func testDeletionRejectsReplacementExecutionAndCancelsPendingRestart() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [])
+        let coordinator = fixture.coordinator
+        let configuration = try XCTUnwrap(coordinator.createRunConfiguration(name: "替代执行", command: "pwd", workingDirectory: ""))
+        XCTAssertEqual(coordinator.run(configuration), .started)
+        coordinator.requestDeletion(configurationID: configuration.id)
+        coordinator.restart(configuration)
+        fixture.scheduler.runNext()
+        fixture.scheduler.runNext()
+        fixture.factory.engines[0].ownedProcessIDs = [42]
+        coordinator.confirmDeletion()
+        XCTAssertNotNil(coordinator.deletionError)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .running)
+        coordinator.restart(configuration)
+        coordinator.requestDeletion(configurationID: configuration.id)
+        coordinator.confirmDeletion()
+        XCTAssertEqual(coordinator.run(configuration), .rejected("正在删除运行配置"))
+        coordinator.restart(configuration)
+        fixture.scheduler.runNext()
+        fixture.scheduler.runNext()
+        XCTAssertTrue(coordinator.runConfigurations().isEmpty)
+        XCTAssertNil(coordinator.session(for: configuration.id))
+        XCTAssertEqual(fixture.factory.engines[0].launches.count, 2)
+    }
+
+    func testWorkspaceDeletionFailureKeepsAllRecordsAndOtherWorkspaceRunThenRetries() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [directory])
+        let coordinator = fixture.coordinator
+        let first = try XCTUnwrap(coordinator.createRunConfiguration(name: "一", command: "pwd", workingDirectory: directory.path))
+        let second = try XCTUnwrap(coordinator.createRunConfiguration(name: "二", command: "pwd", workingDirectory: directory.path))
+        let otherWorkspace = try XCTUnwrap(fixture.projectsModel.createWorkspace(name: "其他"))
+        let other = try XCTUnwrap(coordinator.createRunConfiguration(name: "其他", command: "pwd", workingDirectory: directory.path))
+        for configuration in [first, second, other] { XCTAssertEqual(coordinator.run(configuration), .started) }
+        fixture.factory.engines[1].signalSucceeds = false
+        coordinator.requestDeletion(workspaceID: Workspace.defaultWorkspace.id)
+        coordinator.confirmDeletion()
+        for _ in 0 ..< 4 { fixture.scheduler.runNext() }
+        XCTAssertNotNil(coordinator.deletionError)
+        XCTAssertNil(coordinator.activeDeletion)
+        XCTAssertEqual(coordinator.runConfigurations().count, 3)
+        XCTAssertEqual(fixture.projectsModel.document.workspaces.count, 2)
+        XCTAssertTrue(coordinator.session(for: second.id)?.state.isLive == true)
+        XCTAssertTrue(fixture.factory.engines[2].signals.isEmpty)
+        fixture.factory.engines[1].signalSucceeds = true
+        coordinator.requestDeletion(workspaceID: Workspace.defaultWorkspace.id)
+        coordinator.confirmDeletion()
+        for _ in 0 ..< 8 where coordinator.activeDeletion != nil { fixture.scheduler.runNext() }
+        XCTAssertNil(coordinator.deletionError)
+        XCTAssertEqual(coordinator.runConfigurations(), [other])
+        XCTAssertEqual(fixture.projectsModel.document.workspaces, [otherWorkspace])
+        XCTAssertEqual(coordinator.session(for: other.id)?.state, .running)
+        XCTAssertTrue(fixture.factory.engines[2].signals.isEmpty)
+        XCTAssertEqual(try fixture.store.load(), fixture.projectsModel.document)
+    }
+
+    func testDeletingLastWorkspacePreservesFilesAndRejectsStaleStarts() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [directory])
+        let file = directory.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to: file)
+        let coordinator = fixture.coordinator
+        let configuration = try XCTUnwrap(coordinator.createRunConfiguration(name: "待删除", command: "pwd", workingDirectory: ""))
+        let start = coordinator.makeBatchStartIntent(in: [configuration])
+        coordinator.requestDeletion(workspaceID: Workspace.defaultWorkspace.id)
+        coordinator.confirmDeletion()
+        XCTAssertTrue(fixture.projectsModel.document.workspaces.isEmpty)
+        XCTAssertTrue(fixture.projectsModel.records.isEmpty)
+        XCTAssertEqual(try fixture.store.load().selectedWorkspaceID, "")
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "keep")
+        coordinator.submitBatchStart(start)
+        XCTAssertNil(coordinator.session(for: configuration.id))
+        XCTAssertNil(coordinator.createRunConfiguration(name: "无工作区", command: "pwd", workingDirectory: ""))
+        fixture.projectsModel.addDirect([directory])
+        XCTAssertTrue(fixture.projectsModel.records.isEmpty)
+        XCTAssertNotNil(fixture.projectsModel.createWorkspace(name: "重新开始"))
+        XCTAssertNotNil(coordinator.createRunConfiguration(name: "新配置", command: "pwd", workingDirectory: ""))
+        XCTAssertEqual(try fixture.store.load(), fixture.projectsModel.document)
+    }
+
+    func testDeletionWaitsForSafeStopAndCancelDoesNothing() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [])
+        let coordinator = fixture.coordinator
+        let configuration = try XCTUnwrap(coordinator.createRunConfiguration(name: "删除", command: "pwd", workingDirectory: ""))
+        let sibling = try XCTUnwrap(coordinator.createRunConfiguration(name: "保留", command: "pwd", workingDirectory: ""))
+        XCTAssertEqual(coordinator.run(configuration), .started)
+        XCTAssertEqual(coordinator.run(sibling), .started)
+        coordinator.requestDeletion(configurationID: configuration.id)
+        coordinator.cancelDeletion()
+        XCTAssertTrue(fixture.factory.engines[0].signals.isEmpty)
+        XCTAssertEqual(Set(coordinator.runConfigurations().map(\.id)), [configuration.id, sibling.id])
+        coordinator.requestDeletion(configurationID: configuration.id)
+        coordinator.confirmDeletion()
+        XCTAssertEqual(Set(coordinator.runConfigurations().map(\.id)), [configuration.id, sibling.id])
+        fixture.scheduler.runNext()
+        fixture.scheduler.runNext()
+        XCTAssertEqual(coordinator.runConfigurations(), [sibling])
+        XCTAssertNil(coordinator.session(for: configuration.id))
+        XCTAssertEqual(try fixture.store.load().runConfigurations, [sibling])
+        XCTAssertEqual(coordinator.session(for: sibling.id)?.state, .running)
+        XCTAssertTrue(fixture.factory.engines[1].signals.isEmpty)
+    }
+
     func testDetachingProjectPreservesDefaultAndRelativeWorkingDirectories() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

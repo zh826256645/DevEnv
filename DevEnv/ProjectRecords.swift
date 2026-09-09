@@ -618,10 +618,9 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
             : try values.decode([Workspace].self, forKey: .workspaces)
         selectedWorkspaceID = storedSchemaVersion < 6 ? Workspace.defaultWorkspace.id
             : try values.decode(String.self, forKey: .selectedWorkspaceID)
-        guard !workspaces.isEmpty,
-              Set(workspaces.map(\.id)).count == workspaces.count,
+        guard Set(workspaces.map(\.id)).count == workspaces.count,
               workspaces.allSatisfy({ !$0.id.isEmpty && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
-              workspaces.map(\.id).contains(selectedWorkspaceID) else {
+              (workspaces.isEmpty ? selectedWorkspaceID.isEmpty : workspaces.map(\.id).contains(selectedWorkspaceID)) else {
             throw ProjectRecordStoreError.corrupt
         }
         if storedSchemaVersion < 5 {
@@ -1118,7 +1117,7 @@ final class ProjectsViewModel: ObservableObject {
     var mutationsArePaused: Bool { storageError != nil }
 
     var currentWorkspace: Workspace {
-        document.workspaces.first { $0.id == document.selectedWorkspaceID } ?? Workspace.defaultWorkspace
+        document.workspaces.first { $0.id == document.selectedWorkspaceID } ?? Workspace(id: "", name: "无工作区")
     }
 
     @discardableResult
@@ -1260,6 +1259,7 @@ final class ProjectsViewModel: ObservableObject {
         sourceProjectID: String? = nil
     ) -> ProjectRunConfiguration? {
         guard !mutationsArePaused,
+              document.workspaces.contains(where: { $0.id == document.selectedWorkspaceID }),
               (projectID == nil || workspaceRecords.contains(where: { $0.id == projectID })) else { return nil }
         do {
             let input = try normalizedRunConfigurationInput(
@@ -1350,18 +1350,38 @@ final class ProjectsViewModel: ObservableObject {
     }
 
     @discardableResult
-    func deleteRunConfiguration(_ configuration: ProjectRunConfiguration) -> Bool {
-        guard !mutationsArePaused,
-              document.runConfigurations.contains(where: { $0.id == configuration.id }) else { return false }
+    func deleteSavedContent(configurationIDs: Set<String>, workspaceID: String?) -> Bool {
+        guard !mutationsArePaused, !isScanning else { return false }
+        if let workspaceID {
+            guard document.workspaces.contains(where: { $0.id == workspaceID }),
+                  Set(document.runConfigurations.filter { $0.workspaceID == workspaceID }.map(\.id)) == configurationIDs else { return false }
+        }
+        let projectIDs = Set(records.filter { $0.workspaceID == workspaceID }.map(\.id))
         guard applyDocumentChange({ document in
-            document.runConfigurations.removeAll { $0.id == configuration.id }
+            document.runConfigurations.removeAll { configurationIDs.contains($0.id) }
+            if let workspaceID {
+                document.records.removeAll { $0.workspaceID == workspaceID }
+                document.ignoredProjects.removeAll { $0.workspaceID == workspaceID }
+                document.workspaces.removeAll { $0.id == workspaceID }
+                if document.selectedWorkspaceID == workspaceID {
+                    document.selectedWorkspaceID = document.workspaces.first?.id ?? ""
+                }
+            }
         }) else { return false }
-        resultMessage = "已删除运行配置“\(configuration.name)”"
+        for id in projectIDs {
+            displayedNewProjectIDs.remove(id)
+            analyses.removeValue(forKey: id)
+            suggestionStore.removeValue(forKey: id)
+            projectNotices.removeValue(forKey: id)
+            staleProjectIDs.remove(id)
+            refreshingProjectIDs.remove(id)
+        }
+        resultMessage = "已删除保存内容，未修改磁盘项目目录。"
         return true
     }
 
     func addDirect(_ urls: [URL]) {
-        guard !mutationsArePaused, !isScanning else { return }
+        guard !mutationsArePaused, !isScanning, !document.workspaces.isEmpty else { return }
         let paths = discovery.directProjectPaths(urls)
         guard applyDocumentChange({ $0.addDirect(paths, workspaceID: $0.selectedWorkspaceID) }) else { return }
         refreshProjects()
@@ -1383,7 +1403,7 @@ final class ProjectsViewModel: ObservableObject {
     }
 
     func scan(_ urls: [URL]) {
-        guard !mutationsArePaused, !isScanning else { return }
+        guard !mutationsArePaused, !isScanning, !document.workspaces.isEmpty else { return }
         cancelProjectRefresh()
         operationError = nil
         resultMessage = nil
