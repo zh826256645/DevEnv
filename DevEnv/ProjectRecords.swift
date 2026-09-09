@@ -748,7 +748,10 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         let ignoredPaths = Set(ignoredProjects.filter { projectIDs.contains($0.id) }.map(\.path))
         records.removeAll { projectIDs.contains($0.id) }
         ignoredProjects.removeAll { projectIDs.contains($0.id) }
-        runConfigurations.removeAll { $0.projectID.map(projectIDs.contains) == true }
+        // Keep independent run configurations; deleting a project only removes their association.
+        for index in runConfigurations.indices where runConfigurations[index].projectID.map(projectIDs.contains) == true {
+            runConfigurations[index].projectID = nil
+        }
         for project in projects where !ignoredProjects.contains(where: { $0.path == project.path && $0.workspaceID == project.workspaceID }) {
             ignoredProjects.append(IgnoredProject(
                 path: project.path,

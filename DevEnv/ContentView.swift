@@ -889,7 +889,7 @@ struct ContentView: View {
             let activeSessionCount = configurations.filter {
                 runCoordinator.session(for: $0.id)?.state.isLive == true
             }.count
-            Text("将移除 \(summary.projectCount) 个项目记录、\(configurations.count) 个已保存运行配置和 \(activeSessionCount) 个活动会话，并清除 \(summary.ignoredProjectCount) 个忽略记录？活动会话将停止；不会删除、移动或修改原项目文件。项目记录会进入 Ignored Projects；忽略记录会从 DevEnv 中移除。")
+            Text("将移除 \(summary.projectCount) 个项目记录并解除 \(configurations.count) 个运行配置的项目关联（\(activeSessionCount) 个活动会话将停止），同时清除 \(summary.ignoredProjectCount) 个忽略记录？不会删除、移动或修改原项目文件。")
         }
         .alert("重新创建项目记录存储？", isPresented: $isConfirmingProjectStoreReset) {
             Button("取消", role: .cancel) {}
@@ -1300,18 +1300,32 @@ struct ContentView: View {
     }
 
     private var workspaceNavigation: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                Picker("工作区", selection: Binding(
-                    get: { projectsModel.currentWorkspace.id },
-                    set: { _ = projectsModel.selectWorkspace($0) }
-                )) {
-                    ForEach(projectsModel.document.workspaces) { workspace in
-                        Text(workspace.name).tag(workspace.id)
-                    }
+        HStack(spacing: 12) {
+            Picker("工作区", selection: Binding(
+                get: { projectsModel.currentWorkspace.id },
+                set: { _ = projectsModel.selectWorkspace($0) }
+            )) {
+                ForEach(projectsModel.document.workspaces) { workspace in
+                    Text(workspace.name).tag(workspace.id)
                 }
-                .frame(maxWidth: 320)
-                .accessibilityLabel("切换工作区")
+            }
+            .labelsHidden()
+            .fixedSize()
+            .accessibilityLabel("切换工作区")
+            .disabled(projectsModel.mutationsArePaused)
+            Picker("工作区页签", selection: Binding(
+                get: { selectedPage == .runs ? Page.runs : Page.projects },
+                set: { requestPage($0) }
+            )) {
+                Text("项目").tag(Page.projects)
+                Text("运行").tag(Page.runs)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityLabel("工作区页签")
+            .frame(width: 100)
+            Spacer()
+            Group {
                 Button("新建工作区") {
                     renamingWorkspaceID = nil
                     workspaceNameDraft = ""
@@ -1323,18 +1337,8 @@ struct ContentView: View {
                     isShowingWorkspaceEditor = true
                 }
                 .accessibilityLabel("重命名当前工作区")
-                Spacer()
             }
             .disabled(projectsModel.mutationsArePaused)
-            Picker("工作区页签", selection: Binding(
-                get: { selectedPage == .runs ? Page.runs : Page.projects },
-                set: { requestPage($0) }
-            )) {
-                Text("项目").tag(Page.projects)
-                Text("运行").tag(Page.runs)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 220)
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 16)

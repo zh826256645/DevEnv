@@ -1400,10 +1400,6 @@ final class ProjectRunCoordinator: ObservableObject {
             }
             return succeeded
         }) else { return nil }
-        for configurationID in configurationIDs {
-            sessions.removeValue(forKey: configurationID)
-            commandDrafts.removeValue(forKey: configurationID)
-        }
         objectWillChange.send()
         return summary
     }
