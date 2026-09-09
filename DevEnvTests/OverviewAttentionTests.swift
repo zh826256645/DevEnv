@@ -5,6 +5,21 @@ import XCTest
 final class OverviewAttentionTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 2_000_000_000)
 
+    func testSameDirectoryRecordsShareRequirementRiskButKeepRecordNavigation() {
+        let first = run(id: "first", projectID: "api-record", projectPath: "/tmp/active", state: .running)
+        let second = run(id: "second", projectID: "worker-record", projectPath: "/tmp/active", state: .running)
+        let requirements = analysis(requirements: [requirement("node", .unsatisfied)])
+        let result = project(runs: [first, second], analyses: ["api-record": requirements, "worker-record": requirements])
+        XCTAssertEqual(result.runs.count, 2)
+        XCTAssertEqual(result.items.filter { $0.kind == .projectRequirement }.count, 1)
+        XCTAssertEqual(result.items.first?.target, .project("api-record", capability: "node"))
+        let missing = project(runs: [first, second])
+        XCTAssertEqual(missing.items.filter { $0.kind == .projectRequirementsEvidence }.count, 1)
+        let available = project(runs: [first, second], analyses: ["worker-record": requirements])
+        XCTAssertFalse(available.items.contains { $0.kind == .projectRequirementsEvidence })
+        XCTAssertEqual(available.items.first?.target, .project("worker-record", capability: "node"))
+    }
+
     func testRunFailuresAreUniqueAndNormalStopsAreIgnored() {
         let failed = run(id: "failed", state: .exited(1), failure: "退出码 1", failureAt: now.addingTimeInterval(-10))
         let normal = run(id: "normal", state: .exited(0))
@@ -138,12 +153,13 @@ final class OverviewAttentionTests: XCTestCase {
     private func run(
         id: String,
         projectID: String = "/tmp/project",
+        projectPath: String? = nil,
         state: ProjectRunSessionState,
         ownedProcessIDs: Set<Int32>? = [],
         failure: String? = nil,
         failureAt: Date? = nil
     ) -> OverviewAttentionRunInput {
-        let project = ProjectRecord(id: projectID, path: projectID, discoveredAt: now)
+        let project = ProjectRecord(id: projectID, path: projectPath ?? projectID, discoveredAt: now)
         return OverviewAttentionRunInput(
             configuration: ProjectRunConfiguration(id: id, projectID: projectID, name: id, command: "run", workingDirectory: projectID),
             project: project, state: state, lastSuccessfulCommand: nil, startedAt: now.addingTimeInterval(-120),

@@ -158,23 +158,29 @@ enum OverviewAttention {
             add("environment-snapshot-stale", "环境扫描结果已过期", "超过 24 小时没有完成一次环境扫描", .warning, .refresh, input.snapshot.scannedAt, .environmentRefresh)
         }
 
-        let activeProjectIDs = Set(runs.filter { $0.state.isLive }.map { $0.project.id })
+        let activeProjects = Dictionary(grouping: runs.filter { $0.state.isLive }, by: { $0.project.path })
+            .values.compactMap { group in
+                let projects = group.map(\.project).sorted { $0.id < $1.id }
+                return projects.first { input.analyses[$0.id] != nil && !input.staleProjectIDs.contains($0.id) }
+                    ?? projects.first { input.analyses[$0.id] != nil }
+                    ?? projects.first
+            }.sorted { $0.path < $1.path }
         var requirementRiskIDs: Set<String> = []
         var requirementItemIDs: Set<String> = []
         var pathConflictIDs: Set<String> = []
-        for projectID in activeProjectIDs.sorted() {
-            guard let project = runs.first(where: { $0.project.id == projectID })?.project else { continue }
+        for project in activeProjects {
+            let projectID = project.id
             guard let analysis = input.analyses[projectID] else {
                 if !input.refreshingProjectIDs.contains(projectID) {
-                add("project-requirements-unavailable:\(projectID)", "\(project.title) 项目要求证据不可用", "尚未取得 Project Requirements 分析结果", .warning, .projectRequirementsEvidence, nil, .project(projectID, capability: nil))
+                add("project-requirements-unavailable:\(project.path)", "\(project.title) 项目要求证据不可用", "尚未取得 Project Requirements 分析结果", .warning, .projectRequirementsEvidence, nil, .project(projectID, capability: nil))
                 }
                 continue
             }
             if input.staleProjectIDs.contains(projectID) {
-                add("project-requirements-stale:\(projectID)", "\(project.title) 项目要求证据已过期", "当前显示上次成功分析结果，尚未取得最新证据", .warning, .projectRequirementsEvidence, nil, .project(projectID, capability: nil))
+                add("project-requirements-stale:\(project.path)", "\(project.title) 项目要求证据已过期", "当前显示上次成功分析结果，尚未取得最新证据", .warning, .projectRequirementsEvidence, nil, .project(projectID, capability: nil))
             }
             for requirement in analysis.requirements {
-                let itemID = "project-requirement:\(projectID):\(requirement.capability)"
+                let itemID = "project-requirement:\(project.path):\(requirement.capability)"
                 guard requirementItemIDs.insert(itemID).inserted else { continue }
                 if requirement.satisfaction == .unsatisfied, databaseCapabilities.contains(requirement.capability) {
                     requirementRiskIDs.insert(itemID)
@@ -204,16 +210,16 @@ enum OverviewAttention {
             }
         }
 
-        for projectID in activeProjectIDs.sorted() {
-            guard let analysis = input.analyses[projectID], let project = runs.first(where: { $0.project.id == projectID })?.project else { continue }
+        for project in activeProjects {
+            guard let analysis = input.analyses[project.id] else { continue }
             for requirement in analysis.requirements where runtimeCapabilities.contains(requirement.capability) {
-                let requirementID = "project-requirement:\(projectID):\(requirement.capability)"
+                let requirementID = "project-requirement:\(project.path):\(requirement.capability)"
                 guard !requirementRiskIDs.contains(requirementID),
                       let runtime = input.snapshot.runtimes.first(where: { $0.id == requirement.capability }),
                       runtime.hasPathVersionConflict else { continue }
                 guard pathConflictIDs.insert(requirementID).inserted else { continue }
                 let effectiveVersion = runtime.installations.first(where: \.isEffective)?.version ?? "未知"
-                add("path-conflict:\(projectID):\(requirement.capability)", "\(capabilityTitle(requirement.capability)) PATH 版本冲突", "\(project.title)：要求 \(requirement.expression) · 当前生效 \(effectiveVersion)", .warning, .pathConflict, nil, .runtime(requirement.capability))
+                add("path-conflict:\(project.path):\(requirement.capability)", "\(capabilityTitle(requirement.capability)) PATH 版本冲突", "\(project.title)：要求 \(requirement.expression) · 当前生效 \(effectiveVersion)", .warning, .pathConflict, nil, .runtime(requirement.capability))
             }
         }
 

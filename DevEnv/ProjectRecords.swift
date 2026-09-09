@@ -681,16 +681,14 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         )
     }
 
-    mutating func restore(path: String, at date: Date = Date()) {
+    @discardableResult
+    mutating func restore(path: String, at date: Date = Date()) -> ProjectRecord {
         let boundary = ignoredProjects.first { $0.path == path }?.boundary ?? .manifest
         ignoredProjects.removeAll { $0.path == path }
-        if let index = records.firstIndex(where: { $0.path == path }) {
-            records[index].lastDiscoveredAt = date
-            records[index].boundary = boundary
-        } else {
-            records.append(ProjectRecord(path: path, discoveredAt: date, boundary: boundary))
-        }
+        let restored = ProjectRecord(path: path, discoveredAt: date, boundary: boundary)
+        records.append(restored)
         records.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        return restored
     }
 }
 
@@ -1373,10 +1371,14 @@ final class ProjectsViewModel: ObservableObject {
         )
     }
 
-    func restore(_ ignoredProject: IgnoredProject) {
-        guard !mutationsArePaused, !isScanning else { return }
-        guard applyDocumentChange({ $0.restore(path: ignoredProject.path) }) else { return }
+    @discardableResult
+    func restore(_ ignoredProject: IgnoredProject) -> ProjectRecord? {
+        guard !mutationsArePaused, !isScanning,
+              document.ignoredProjects.contains(where: { $0.path == ignoredProject.path }) else { return nil }
+        var restored: ProjectRecord?
+        guard applyDocumentChange({ restored = $0.restore(path: ignoredProject.path) }) else { return nil }
         refreshProjects()
+        return restored
     }
 
     func recreateStore() {

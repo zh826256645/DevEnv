@@ -64,6 +64,29 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("package.json").path))
     }
 
+    @MainActor
+    func testRestoringSameDirectoryProjectCreatesNewIdentityWithoutChangingSurvivor() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+        let first = ProjectRecord(path: root.path, discoveredAt: Date(timeIntervalSince1970: 100), boundary: .git)
+        let survivor = ProjectRecord(path: root.path, discoveredAt: Date(timeIntervalSince1970: 200), boundary: .explicit)
+        try store.save(ProjectRecordDocument(records: [first, survivor]))
+        let model = ProjectsViewModel(store: store)
+        model.remove(first)
+        let ignored = try XCTUnwrap(model.ignoredProjects.first)
+        let restoredSelection = try XCTUnwrap(model.restore(ignored))
+        XCTAssertEqual(model.records.count, 2)
+        let restored = try XCTUnwrap(model.records.first { $0.id != survivor.id })
+        XCTAssertEqual(restoredSelection.id, restored.id)
+        XCTAssertNotEqual(restored.id, first.id)
+        XCTAssertEqual(restored.boundary, .git)
+        XCTAssertEqual(model.records.first { $0.id == survivor.id }, survivor)
+        XCTAssertTrue(model.ignoredProjects.isEmpty)
+        XCTAssertEqual(Set(try store.load().records.map(\.id)), [restored.id, survivor.id])
+    }
+
     func testLegacyProjectAssociationsMigrateOnceWithoutChangingRunIntent() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

@@ -869,7 +869,7 @@ struct ContentView: View {
             let activeSessionCount = configurations.filter {
                 runCoordinator.session(for: $0.id)?.state.isLive == true
             }.count
-            Text("将移除 \(summary.projectCount) 个项目记录、\(configurations.count) 个已保存运行配置和 \(activeSessionCount) 个活动会话，并清除 \(summary.ignoredProjectCount) 个忽略记录？活动会话将停止，Project Trust 将删除；不会删除、移动或修改原项目文件。项目记录会进入 Ignored Projects；忽略记录会从 DevEnv 中移除。")
+            Text("将移除 \(summary.projectCount) 个项目记录、\(configurations.count) 个已保存运行配置和 \(activeSessionCount) 个活动会话，并清除 \(summary.ignoredProjectCount) 个忽略记录？活动会话将停止，无其他项目引用的目录将清除 Project Trust；不会删除、移动或修改原项目文件。项目记录会进入 Ignored Projects；忽略记录会从 DevEnv 中移除。")
         }
         .alert("重新创建项目记录存储？", isPresented: $isConfirmingProjectStoreReset) {
             Button("取消", role: .cancel) {}
@@ -2589,8 +2589,8 @@ struct ContentView: View {
                                 Spacer()
                                 if !isSelectingProjects {
                                     Button("恢复") {
-                                        projectsModel.restore(project)
-                                        selectedProjectID = project.path
+                                        guard let restored = projectsModel.restore(project) else { return }
+                                        selectedProjectID = restored.id
                                         projectSearchIsFocused = true
                                     }
                                     .accessibilityLabel("恢复 \(project.path)")
