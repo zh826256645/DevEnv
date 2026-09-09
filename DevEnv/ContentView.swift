@@ -577,7 +577,7 @@ struct ContentView: View {
     private struct OverviewRun: Identifiable {
         var id: String { configuration.id }
         let configuration: ProjectRunConfiguration
-        let project: ProjectRecord
+        let project: ProjectRecord?
         let session: ProjectRunSession
         let bindings: [ListenerBinding]?
         let repositoryState: ProjectRepositoryState
@@ -709,8 +709,8 @@ struct ContentView: View {
     @State private var runConfigurationWorkingDirectory = "."
     @State private var runConfigurationSaveAttempted = false
     @State private var runConfigurationSourceIdentity: String?
+    @State private var runConfigurationSourceProjectID: String?
     @State private var pendingRunConfigurationDeletion: ProjectRunConfiguration?
-    @State private var pendingProjectRunTrust: ProjectRunFrozenStartRequest?
     @State private var selectedRunConfigurationID: String?
     @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
     @State private var runSearchText = ""
@@ -884,12 +884,12 @@ struct ContentView: View {
         } message: {
             let summary = projectsModel.removalSummary(for: pendingProjectRemovalIDs)
             let configurations = runCoordinator.runConfigurations().filter {
-                pendingProjectRemovalIDs.contains($0.projectID)
+                $0.projectID.map(pendingProjectRemovalIDs.contains) == true
             }
             let activeSessionCount = configurations.filter {
                 runCoordinator.session(for: $0.id)?.state.isLive == true
             }.count
-            Text("将移除 \(summary.projectCount) 个项目记录、\(configurations.count) 个已保存运行配置和 \(activeSessionCount) 个活动会话，并清除 \(summary.ignoredProjectCount) 个忽略记录？活动会话将停止，无其他项目引用的目录将清除 Project Trust；不会删除、移动或修改原项目文件。项目记录会进入 Ignored Projects；忽略记录会从 DevEnv 中移除。")
+            Text("将移除 \(summary.projectCount) 个项目记录、\(configurations.count) 个已保存运行配置和 \(activeSessionCount) 个活动会话，并清除 \(summary.ignoredProjectCount) 个忽略记录？活动会话将停止；不会删除、移动或修改原项目文件。项目记录会进入 Ignored Projects；忽略记录会从 DevEnv 中移除。")
         }
         .alert("重新创建项目记录存储？", isPresented: $isConfirmingProjectStoreReset) {
             Button("取消", role: .cancel) {}
@@ -917,20 +917,6 @@ struct ContentView: View {
             }
         } message: { configuration in
             Text("将删除运行配置“\(configuration.name)”。此操作不会修改 Project Root。")
-        }
-        .alert(
-            "信任并运行此 Project Root？",
-            isPresented: isConfirmingProjectRunTrust,
-            presenting: pendingProjectRunTrust
-        ) { request in
-            Button("取消", role: .cancel) {}
-            Button("信任并运行") {
-                if runCoordinator.confirmTrustAndRun(request) == .started {
-                    selectedRunConfigurationID = request.configuration.id
-                }
-            }
-        } message: { request in
-            Text("完整命令：\n\(request.command)\n\n工作目录：\n\(request.workingDirectory)\n\n确认后，此 Project Root 的后续运行不再重复询问。")
         }
     }
 
@@ -969,20 +955,6 @@ struct ContentView: View {
         Binding(
             get: { pendingRunConfigurationDeletion != nil },
             set: { if !$0 { pendingRunConfigurationDeletion = nil } }
-        )
-    }
-
-    private var isConfirmingProjectRunTrust: Binding<Bool> {
-        Binding(
-            get: { pendingProjectRunTrust != nil },
-            set: { if !$0 { pendingProjectRunTrust = nil } }
-        )
-    }
-
-    private var isConfirmingRunAllTrust: Binding<Bool> {
-        Binding(
-            get: { runCoordinator.pendingBatchTrustReview != nil },
-            set: { if !$0 { runCoordinator.cancelBatchTrustReview() } }
         )
     }
 
@@ -1592,7 +1564,7 @@ struct ContentView: View {
                     Label("新建配置", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(projectsModel.workspaceRecords.isEmpty || projectsModel.mutationsArePaused)
+                .disabled(projectsModel.mutationsArePaused)
                 .accessibilityLabel("新建运行配置")
             }
             .padding(.horizontal, 4)
@@ -1620,16 +1592,6 @@ struct ContentView: View {
             }
         }
         .alert(
-            "信任并全部启动？",
-            isPresented: isConfirmingRunAllTrust,
-            presenting: runCoordinator.pendingBatchTrustReview
-        ) { _ in
-            Button("取消", role: .cancel) { runCoordinator.cancelBatchTrustReview() }
-            Button("信任并全部启动") { runCoordinator.confirmBatchTrustAndStart() }
-        } message: { review in
-            Text(batchTrustReviewMessage(review))
-        }
-        .alert(
             "停止全部活动会话？",
             isPresented: isConfirmingStopAll,
             presenting: runCoordinator.pendingBatchStopIntent
@@ -1654,15 +1616,6 @@ struct ContentView: View {
     private var runsPageContent: some View {
         if let storageError = projectsModel.storageError {
             runStorageErrorView(storageError)
-        } else if projectsModel.workspaceRecords.isEmpty && workspaceRunConfigurations.isEmpty {
-            ContentUnavailableView {
-                Label("尚未添加项目", systemImage: "folder.badge.plus")
-            } description: {
-                Text("请先在“项目”页面添加 Project Root，再创建运行配置。")
-            } actions: {
-                Button("前往项目页面") { selectPage(.projects) }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if workspaceRunConfigurations.isEmpty
             && selectedRunSuggestions.isEmpty {
             ContentUnavailableView {
@@ -1697,7 +1650,7 @@ struct ContentView: View {
     }
 
     private var runEmptyDescription: String {
-        runProjectFilterID == nil ? "为项目保存名称、命令和 Project Root 相对工作目录。" : "当前项目尚未保存运行配置。"
+        runProjectFilterID == nil ? "在工作区保存名称、命令和工作目录；项目关联可选。" : "当前项目尚未保存运行配置。"
     }
 
     private var selectedRunSuggestions: [ProjectRunSuggestion] {
@@ -1744,26 +1697,6 @@ struct ContentView: View {
     private func requestRunAll() {
         guard runCoordinator.canStartBatch(in: visibleRunConfigurations) else { return }
         runCoordinator.startBatch(in: visibleRunConfigurations)
-    }
-
-    private func batchTrustReviewMessage(_ review: ProjectRunBatchTrustReview) -> String {
-        let requestDetails = review.intent.startRequests.map { request in
-            """
-            配置：\(request.configuration.name)
-            Project Root：\(request.projectRoot)
-            完整命令：
-            \(request.command)
-            工作目录：
-            \(request.workingDirectory)
-            """
-        }.joined(separator: "\n\n")
-        return """
-        将信任 \(review.projectRootsRequiringTrust.count) 个 Project Root，并启动 \(review.intent.startRequests.count) 个运行配置。
-
-        \(requestDetails)
-
-        确认后，成功保存 Project Trust 的 Project Root 后续运行不再重复询问。
-        """
     }
 
     private func requestStopAll() {
@@ -1916,7 +1849,7 @@ struct ContentView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(configuration.isEnabled ? Color.primary : Color.secondary)
                         .lineLimit(1)
-                    Text("\(projectsModel.records.first { $0.id == configuration.projectID }?.title ?? "未知项目") · \(configuration.command)")
+                    Text("\(projectsModel.records.first { $0.id == configuration.projectID }?.title ?? (configuration.projectID == nil ? "独立运行" : "关联项目不存在")) · \(configuration.command)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -1979,7 +1912,7 @@ struct ContentView: View {
                                     .frame(minHeight: 24, alignment: .center)
                                 projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
                             }
-                            Text(project.map { "\($0.title)" } ?? "所属项目记录不存在")
+                            Text(project.map { "\($0.title)" } ?? (configuration.projectID == nil ? "独立运行" : "关联项目记录不存在"))
                                 .font(.callout).foregroundStyle(.secondary)
                             Text(project?.path ?? "").font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
                         }
@@ -2020,13 +1953,12 @@ struct ContentView: View {
                                 .disabled(true)
                             } else if state.canRestart {
                                 Button("重启") {
-                                    guard let project else { return }
                                     runCoordinator.restart(configuration, project: project)
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.regular)
                                 .frame(minWidth: 60, minHeight: 36)
-                                .disabled(project == nil || project?.availability.isUnavailable == true)
+                                .disabled((configuration.projectID != nil && project == nil) || project?.availability.isUnavailable == true)
                                 Button("停止", role: .destructive) { runCoordinator.stop(configurationID: configuration.id) }
                                     .buttonStyle(.borderedProminent)
                                     .tint(.red)
@@ -2043,7 +1975,7 @@ struct ContentView: View {
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.regular)
                                     .frame(minWidth: session == nil ? 60 : 76, minHeight: 36)
-                                    .disabled(project == nil || project?.availability.isUnavailable == true)
+                                    .disabled((configuration.projectID != nil && project == nil) || project?.availability.isUnavailable == true)
                             }
                             Button("编辑") { beginEditingRunConfiguration(configuration) }
                                 .buttonStyle(.bordered)
@@ -2094,21 +2026,16 @@ struct ContentView: View {
                             runDetailField(configuration.command)
                         }
                         runDetailRow("工作目录") {
-                            runDetailField(configuration.workingDirectory == "." ? "项目根目录（.）" : configuration.workingDirectory)
+                            runDetailField(configuration.workingDirectory.isEmpty ? (configuration.projectID == nil ? "默认：当前用户目录（启动时解析）" : "默认：项目目录") : configuration.workingDirectory)
                         }
                         runDetailRow("来源") {
                             if configuration.sourceIdentity != nil {
-                                Text(runCoordinator.isSuggestionSourceAvailable(configuration) ? "来自 package.json scripts" : "项目声明已消失")
-                                    .foregroundStyle(runCoordinator.isSuggestionSourceAvailable(configuration) ? Color.secondary : Color.orange)
+                                Text(configuration.sourceIdentity ?? "").foregroundStyle(.secondary)
                             } else { Text("手动创建").foregroundStyle(.secondary) }
                         }
                         if let project {
                             runDetailRow("创建时间") { Text(formatted(project.firstDiscoveredAt)).foregroundStyle(.secondary) }
                             runDetailRow("更新时间") { Text(formatted(project.lastDiscoveredAt)).foregroundStyle(.secondary) }
-                            runDetailRow("信任状态", showsDivider: false) {
-                                Text(projectsModel.isProjectRunTrusted(project.path) ? "首次运行已确认信任" : "首次运行时需要确认")
-                                    .foregroundStyle(.secondary)
-                            }
                         }
                         if runCoordinator.hasCommandDraft(configurationID: configuration.id) {
                             Label("命令修改将在成功启动后保存", systemImage: "clock.arrow.circlepath").foregroundStyle(.secondary).padding(.vertical, 10)
@@ -2359,10 +2286,7 @@ struct ContentView: View {
     }
 
     private func run(_ configuration: ProjectRunConfiguration, project: ProjectRecord?) {
-        guard let project else { return }
         switch runCoordinator.run(configuration, project: project) {
-        case let .needsTrust(request):
-            pendingProjectRunTrust = request
         case .started:
             selectedRunConfigurationID = configuration.id
         case .rejected:
@@ -2381,7 +2305,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(editingRunConfiguration == nil ? "新建运行配置" : "编辑运行配置")
                         .font(.headline.weight(.semibold))
-                    Text("设置项目的启动命令和工作目录")
+                    Text("设置工作区运行命令，项目关联可选")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -2404,14 +2328,14 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                     runConfigurationEditorField("项目", systemImage: "folder") {
                         Picker("项目", selection: $runConfigurationProjectID) {
+                            Text("不关联项目").tag("")
                             ForEach(projectsModel.workspaceRecords) { project in
                                 Text(project.title).tag(project.id)
                             }
                         }
                         .pickerStyle(.menu)
                         .labelsHidden()
-                        .disabled(editingRunConfiguration != nil)
-                        .accessibilityLabel("运行配置所属项目")
+                        .accessibilityLabel("运行配置关联项目（可选）")
                     }
 
                     runConfigurationEditorField("名称", systemImage: "textformat") {
@@ -2445,7 +2369,7 @@ struct ContentView: View {
                     }
 
                     runConfigurationEditorField("工作目录", systemImage: "location") {
-                        TextField(".", text: $runConfigurationWorkingDirectory)
+                        TextField("留空使用默认目录", text: $runConfigurationWorkingDirectory)
                             .textFieldStyle(.plain)
                             .font(.body.monospaced())
                             .padding(.horizontal, 10)
@@ -2455,14 +2379,14 @@ struct ContentView: View {
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                                     .stroke(Color.primary.opacity(0.11))
                             }
-                            .accessibilityLabel("Project Root 相对工作目录")
+                            .accessibilityLabel("绝对、项目相对或默认工作目录")
                     }
 
                     VStack(alignment: .leading, spacing: 7) {
                         Label("启动参数说明", systemImage: "info.circle")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(AppTheme.accent)
-                        Text("工作目录使用 Project Root 相对路径；根目录填写 .")
+                        Text("支持绝对路径或项目相对路径（允许 ../）。留空使用项目目录或当前用户目录；解除关联时保留原工作目录。")
                         if editingRunConfiguration != nil {
                             Text("命令修改将在成功启动后保存；启动失败时保留上次可用命令。")
                         }
@@ -2495,7 +2419,7 @@ struct ContentView: View {
                 Button(editingRunConfiguration == nil ? "创建配置" : "保存修改", action: saveRunConfiguration)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(runConfigurationProjectID.isEmpty || projectsModel.mutationsArePaused)
+                    .disabled(projectsModel.mutationsArePaused)
             }
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
@@ -2522,14 +2446,15 @@ struct ContentView: View {
     }
 
     private func beginCreatingRunConfiguration() {
-        guard let projectID = runProjectFilterID ?? projectsModel.workspaceRecords.first?.id else { return }
+        let projectID = runProjectFilterID ?? ""
         editingRunConfiguration = nil
         runConfigurationProjectID = projectID
         runConfigurationName = ""
         runConfigurationCommand = ""
-        runConfigurationWorkingDirectory = "."
+        runConfigurationWorkingDirectory = ""
         runConfigurationSaveAttempted = false
         runConfigurationSourceIdentity = nil
+        runConfigurationSourceProjectID = nil
         isShowingRunConfigurationEditor = true
     }
 
@@ -2560,36 +2485,41 @@ struct ContentView: View {
         runConfigurationWorkingDirectory = suggestion.workingDirectory
         runConfigurationSaveAttempted = false
         runConfigurationSourceIdentity = suggestion.sourceIdentity
+        runConfigurationSourceProjectID = suggestion.projectID
         isShowingRunConfigurationEditor = true
     }
 
     private func beginEditingRunConfiguration(_ configuration: ProjectRunConfiguration) {
         editingRunConfiguration = configuration
-        runConfigurationProjectID = configuration.projectID
+        runConfigurationProjectID = configuration.projectID ?? ""
         runConfigurationName = configuration.name
         runConfigurationCommand = configuration.command
         runConfigurationWorkingDirectory = configuration.workingDirectory
         runConfigurationSaveAttempted = false
         runConfigurationSourceIdentity = configuration.sourceIdentity
+        runConfigurationSourceProjectID = configuration.sourceProjectID
         isShowingRunConfigurationEditor = true
     }
 
     private func saveRunConfiguration() {
         runConfigurationSaveAttempted = true
-        let succeeded = if let editingRunConfiguration {
-            runCoordinator.updateRunConfiguration(
+        let succeeded: Bool
+        if var editingRunConfiguration {
+            editingRunConfiguration.projectID = runConfigurationProjectID.isEmpty ? nil : runConfigurationProjectID
+            succeeded = runCoordinator.updateRunConfiguration(
                 editingRunConfiguration,
                 name: runConfigurationName,
                 command: runConfigurationCommand,
                 workingDirectory: runConfigurationWorkingDirectory
             )
         } else {
-            runCoordinator.createRunConfiguration(
-                projectID: runConfigurationProjectID,
+            succeeded = runCoordinator.createRunConfiguration(
+                projectID: runConfigurationProjectID.isEmpty ? nil : runConfigurationProjectID,
                 name: runConfigurationName,
                 command: runConfigurationCommand,
                 workingDirectory: runConfigurationWorkingDirectory,
-                sourceIdentity: runConfigurationSourceIdentity
+                sourceIdentity: runConfigurationSourceIdentity,
+                sourceProjectID: runConfigurationSourceProjectID
             ) != nil
         }
         if succeeded { isShowingRunConfigurationEditor = false }
@@ -3809,7 +3739,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(run.project.title)，\(run.configuration.name)，\(projectRunStateTitle(run.session.state))")
+            .accessibilityLabel("\(run.project?.title ?? "独立运行")，\(run.configuration.name)，\(projectRunStateTitle(run.session.state))")
             .accessibilityHint("打开运行会话")
 
             HStack(spacing: 6) {
@@ -3824,7 +3754,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help("进入会话")
-                .accessibilityLabel("进入 \(run.project.title) 运行会话")
+                .accessibilityLabel("进入 \(run.project?.title ?? "独立运行") 运行会话")
 
                 Button(role: .destructive) {
                     runCoordinator.stop(configurationID: run.configuration.id)
@@ -3841,7 +3771,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .disabled(!canStop)
                 .help(run.session.state == .stopping ? "正在停止" : "停止")
-                .accessibilityLabel("停止 \(run.project.title) 运行会话")
+                .accessibilityLabel("停止 \(run.project?.title ?? "独立运行") 运行会话")
             }
             .frame(width: columns.actions)
         }
@@ -3856,7 +3786,7 @@ struct ContentView: View {
             overviewRunLogo(run)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 7) {
-                    Text(run.project.title)
+                    Text(run.project?.title ?? "独立运行")
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
@@ -3868,7 +3798,7 @@ struct ContentView: View {
                         .padding(.vertical, 2)
                         .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 5))
                 }
-                Text(run.project.path)
+                Text(run.project?.path ?? run.session.currentExecution?.workingDirectory ?? "")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -3935,7 +3865,7 @@ struct ContentView: View {
     }
 
     private func overviewRunBrand(_ run: OverviewRun) -> (assetName: String, color: Color)? {
-        guard let analysis = projectsModel.analyses[run.project.id] else { return nil }
+        guard let project = run.project, let analysis = projectsModel.analyses[project.id] else { return nil }
         let componentCapabilities = analysis.components
             .first { $0.relativePath == run.configuration.workingDirectory }?
             .requirements.map(\.capability) ?? []
@@ -4221,8 +4151,8 @@ struct ContentView: View {
 
     private func overviewAttention(_ snapshot: MachineSnapshot, now: Date) -> OverviewAttentionResult {
         let runs = runCoordinator.runConfigurations().compactMap { configuration -> OverviewAttentionRunInput? in
-            guard let project = projectsModel.records.first(where: { $0.id == configuration.projectID }),
-                  let session = runCoordinator.session(for: configuration.id) else { return nil }
+            let project = projectsModel.records.first { $0.id == configuration.projectID }
+            guard let session = runCoordinator.session(for: configuration.id) else { return nil }
             return OverviewAttentionRunInput(
                 configuration: configuration,
                 project: project,
@@ -4233,7 +4163,7 @@ struct ContentView: View {
                 failureAt: session.failureAt,
                 ownedProcessIDs: session.ownedProcessIDs,
                 physicalMemoryBytes: session.physicalMemoryBytes,
-                repositoryState: ProjectRepositoryState.read(projectRoot: project.path)
+                repositoryState: project.map { ProjectRepositoryState.read(projectRoot: $0.path) } ?? .nonGit
             )
         }
         return OverviewAttention.project(OverviewAttentionInput(

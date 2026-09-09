@@ -7,6 +7,154 @@ import XCTest
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+    func testDetachingProjectPreservesDefaultAndRelativeWorkingDirectories() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [projectRoot])
+        let coordinator = fixture.coordinator
+        for (path, expected) in [("", projectRoot.path), ("..", directory.path)] {
+            var configuration = try XCTUnwrap(coordinator.createRunConfiguration(projectID: projectRoot.path, name: "解除关联", command: "pwd", workingDirectory: path))
+            configuration.projectID = nil
+            XCTAssertTrue(coordinator.updateRunConfiguration(configuration, name: configuration.name, command: configuration.command, workingDirectory: path))
+            let saved = try XCTUnwrap(coordinator.runConfigurations().first { $0.id == configuration.id })
+            XCTAssertNil(saved.projectID)
+            XCTAssertEqual(saved.workingDirectory, expected)
+            XCTAssertEqual(coordinator.run(saved), .started)
+            XCTAssertEqual(coordinator.session(for: saved.id)?.activeExecution?.workingDirectory, expected)
+        }
+    }
+
+    func testDetachingConfigurationKeepsItsOriginalSuggestionSource() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"packageManager":"npm@10","scripts":{"dev":"serve"}}"#.utf8).write(to: root.appendingPathComponent("package.json"))
+        let fixture = try ProjectRunTestFixture(directory: root, configurations: [], projectRoots: [root])
+        fixture.projectsModel.refreshProjects()
+        for _ in 0 ..< 100 where fixture.projectsModel.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let coordinator = fixture.coordinator
+        let suggestion = try XCTUnwrap(coordinator.runSuggestions().first)
+        var configuration = try XCTUnwrap(coordinator.adoptSuggestion(suggestion))
+        configuration.projectID = nil
+        XCTAssertTrue(coordinator.updateRunConfiguration(configuration, name: configuration.name, command: configuration.command, workingDirectory: root.path))
+        let detached = try XCTUnwrap(coordinator.runConfigurations().first)
+        XCTAssertTrue(coordinator.isSuggestionSourceAvailable(detached))
+        XCTAssertTrue(coordinator.runSuggestions().isEmpty)
+        XCTAssertEqual(try fixture.store.load().runConfigurations.first, detached)
+    }
+
+    func testIndependentConfigurationPersistsAndUsesFreshDefaultDirectoryOnEachExecution() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [])
+        let coordinator = fixture.coordinator
+        let configuration = try XCTUnwrap(coordinator.createRunConfiguration(
+            name: "独立运行", command: "  printf hello\n", workingDirectory: ""
+        ))
+        XCTAssertNil(configuration.projectID)
+        XCTAssertEqual(try fixture.store.load().runConfigurations, [configuration])
+        XCTAssertEqual(coordinator.run(configuration), .started)
+        let session = try XCTUnwrap(coordinator.session(for: configuration.id))
+        let first = try XCTUnwrap(session.activeExecution)
+        XCTAssertNil(first.projectRoot)
+        XCTAssertEqual(first.command, "  printf hello\n")
+        XCTAssertEqual(first.workingDirectory, FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().standardizedFileURL.path)
+        XCTAssertEqual(coordinator.run(configuration), .rejected("该运行配置已有活动会话"))
+        XCTAssertFalse(coordinator.setRunConfigurationEnabled(configuration, isEnabled: false))
+        coordinator.restart(configuration)
+        fixture.scheduler.runNext()
+        fixture.scheduler.runNext()
+        XCTAssertEqual(session.state, .running)
+        XCTAssertNotEqual(session.activeExecution?.id, first.id)
+        XCTAssertEqual(session.activeExecution?.workingDirectory, first.workingDirectory)
+        coordinator.stop(configurationID: configuration.id)
+        fixture.scheduler.runNext()
+        fixture.scheduler.runNext()
+        XCTAssertFalse(session.state.isLive)
+        XCTAssertTrue(coordinator.setRunConfigurationEnabled(configuration, isEnabled: false))
+        XCTAssertEqual(coordinator.run(configuration), .rejected("运行配置已禁用"))
+        XCTAssertNotNil(session.terminalView)
+    }
+
+    func testOptionalAssociationValidatesWorkspaceAndPreservesSourceAndDirectoryIntent() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectRoot = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [projectRoot])
+        let model = fixture.projectsModel
+        let coordinator = fixture.coordinator
+        let configuration = try XCTUnwrap(coordinator.createRunConfiguration(
+            name: "来源配置", command: "pwd", workingDirectory: "", sourceIdentity: "package.json#scripts.dev"
+        ))
+        var linked = configuration
+        linked.projectID = projectRoot.path
+        XCTAssertTrue(coordinator.updateRunConfiguration(linked, name: linked.name, command: linked.command, workingDirectory: ""))
+        linked = try XCTUnwrap(coordinator.runConfigurations().first)
+        XCTAssertEqual(linked.sourceIdentity, configuration.sourceIdentity)
+        XCTAssertEqual(coordinator.run(linked), .started)
+        XCTAssertEqual(coordinator.session(for: linked.id)?.activeExecution?.workingDirectory, projectRoot.path)
+        fixture.factory.engines[0].finish(exitCode: 0)
+        XCTAssertTrue(coordinator.updateRunConfiguration(linked, name: linked.name, command: linked.command, workingDirectory: ".."))
+        let relative = try XCTUnwrap(coordinator.runConfigurations().first)
+        XCTAssertEqual(coordinator.run(relative), .started)
+        XCTAssertEqual(coordinator.session(for: linked.id)?.activeExecution?.workingDirectory, directory.path)
+        fixture.factory.engines[0].finish(exitCode: 0)
+        _ = try XCTUnwrap(model.createWorkspace(name: "其他工作区"))
+        XCTAssertNil(coordinator.createRunConfiguration(projectID: projectRoot.path, name: "越界", command: "pwd", workingDirectory: ""))
+        let independent = try XCTUnwrap(coordinator.createRunConfiguration(name: "独立", command: "pwd", workingDirectory: ""))
+        var forged = independent
+        forged.projectID = projectRoot.path
+        XCTAssertFalse(coordinator.updateRunConfiguration(forged, name: forged.name, command: forged.command, workingDirectory: ""))
+        guard case .rejected = coordinator.run(forged) else { return XCTFail("拒绝跨工作区项目关联") }
+        XCTAssertEqual(try fixture.store.load().runConfigurations.first { $0.id == independent.id }, independent)
+    }
+
+    func testIndependentMissingDirectoryFailsWithoutFallbackAndFailedSavePreservesRecords() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [])
+        let coordinator = fixture.coordinator
+        let missing = directory.appendingPathComponent("missing").path
+        let configuration = try XCTUnwrap(coordinator.createRunConfiguration(name: "缺失", command: "pwd", workingDirectory: missing))
+        guard case .rejected = coordinator.run(configuration) else { return XCTFail("缺失目录不能回退") }
+        XCTAssertTrue(fixture.factory.engines.flatMap(\.launches).isEmpty)
+        XCTAssertNil(coordinator.session(for: configuration.id)?.activeExecution)
+        XCTAssertNil(coordinator.createRunConfiguration(name: "无项目相对目录", command: "pwd", workingDirectory: "."))
+        let stored = try fixture.store.load()
+        let recordsFile = directory.appendingPathComponent("records.json")
+        try FileManager.default.removeItem(at: recordsFile)
+        try FileManager.default.createDirectory(at: recordsFile, withIntermediateDirectories: false)
+        XCTAssertNil(coordinator.createRunConfiguration(name: "不能保存", command: "pwd", workingDirectory: ""))
+        XCTAssertEqual(coordinator.runConfigurations(), stored.runConfigurations)
+        XCTAssertFalse(coordinator.updateRunConfiguration(configuration, name: "不能保存", command: "new", workingDirectory: ""))
+        XCTAssertEqual(coordinator.runConfigurations(), stored.runConfigurations)
+    }
+
+    func testCoordinatorAcceptsAbsoluteWorkingDirectoryWithoutTrust() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let model = ProjectsViewModel(store: ProjectRecordStore(fileURL: root.appendingPathComponent("records.json")))
+        model.addDirect([root])
+        for _ in 0 ..< 100 where model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        let project = try XCTUnwrap(model.records.first)
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: model, makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"), scheduler: FakeProjectRunScheduler()
+        )
+        let configuration = try XCTUnwrap(coordinator.createRunConfiguration(
+            projectID: project.id, name: "Absolute", command: "pwd", workingDirectory: "/"
+        ))
+        XCTAssertEqual(coordinator.run(configuration, project: project), .started)
+        XCTAssertEqual(factory.engines.first?.launches.first?.workingDirectory, "/")
+    }
+
     func testWorkspaceSwitchAndRenameKeepExecutionsDraftsAndWindowSessionsAlive() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -20,7 +168,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         model.addDirect([root])
         let firstProject = try XCTUnwrap(model.workspaceRecords.first)
         let first = try XCTUnwrap(coordinator.createRunConfiguration(projectID: firstProject.id, name: "服务", command: "sleep 30", workingDirectory: "."))
-        XCTAssertTrue(model.trustProjectRunRoot(root.path))
         XCTAssertEqual(coordinator.run(first, projectRoot: root.path), .started)
         let session = try XCTUnwrap(coordinator.session(for: first.id))
         let executionID = try XCTUnwrap(session.activeExecution?.id)
@@ -66,7 +213,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         let secondRun = try XCTUnwrap(coordinator.createRunConfiguration(
             projectID: second.id, name: "Worker", command: "sleep 60", workingDirectory: "."
         ))
-        XCTAssertTrue(model.trustProjectRunRoot(first.path))
         XCTAssertEqual(coordinator.run(firstRun, projectRoot: first.path), .started)
         XCTAssertEqual(coordinator.run(secondRun, projectRoot: second.path), .started)
         let execution = try XCTUnwrap(coordinator.session(for: secondRun.id)?.activeExecution)
@@ -79,7 +225,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: secondRun.id)?.state, .running)
         XCTAssertEqual(coordinator.runConfigurations(), [secondRun])
         XCTAssertTrue(factory.engines[1].signals.isEmpty)
-        XCTAssertTrue(model.isProjectRunTrusted(second.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
     }
 
@@ -120,7 +265,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部停止")?.isEnabled ?? true)
     }
 
-    func testStatusBarGlobalStartSubmitsAllProjectsToSharedFrozenIntent() throws {
+    func testStatusBarGlobalStartSubmitsAllProjectsToSharedFrozenIntent() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let firstRoot = directory.appendingPathComponent("first")
@@ -147,6 +292,8 @@ final class ProjectRunSessionsTests: XCTestCase {
         document.records = [firstRoot.path, secondRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
+        projectsModel.refreshProjects()
+        for _ in 0 ..< 100 where projectsModel.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
             projectsModel: projectsModel,
@@ -179,25 +326,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         ))
 
         XCTAssertEqual(handoffCount, 1)
-        XCTAssertEqual(coordinator.pendingBatchTrustReview?.intent.startRequests, [
-            ProjectRunFrozenStartRequest(
-                configuration: first,
-                projectRoot: firstRoot.path,
-                command: first.command,
-                workingDirectory: firstRoot.path
-            ),
-            ProjectRunFrozenStartRequest(
-                configuration: second,
-                projectRoot: secondRoot.path,
-                command: second.command,
-                workingDirectory: secondWorkingDirectory.path
-            ),
-        ])
-        XCTAssertEqual(
-            coordinator.pendingBatchTrustReview?.projectRootsRequiringTrust,
-            [firstRoot.path, secondRoot.path].sorted()
-        )
-        XCTAssertTrue(factory.engines.isEmpty)
+        XCTAssertEqual(factory.engines.flatMap(\.launches).map(\.workingDirectory), [firstRoot.path, secondWorkingDirectory.path])
     }
 
     func testStatusBarTrustedGlobalStartIsImmediateAndRetainsSharedSessions() async throws {
@@ -226,8 +355,7 @@ final class ProjectRunSessionsTests: XCTestCase {
             projectsModel: projectsModel,
             makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler(),
-            isProjectRunTrusted: { $0 == projectRoot.path }
+            scheduler: FakeProjectRunScheduler()
         )
         var handoffCount = 0
         let appDelegate = DevEnvAppDelegate(
@@ -247,7 +375,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         let session = try XCTUnwrap(coordinator.session(for: configuration.id))
         let executionID = try XCTUnwrap(session.activeExecution?.id)
         XCTAssertEqual(handoffCount, 1)
-        XCTAssertNil(coordinator.pendingBatchTrustReview)
         XCTAssertEqual(session.state, .running)
         XCTAssertEqual(coordinator.sessionSummary, ProjectRunSessionSummary(running: 1, stopped: 0, exceptional: 0))
         _ = ContentView(projectsModel: projectsModel, runCoordinator: coordinator)
@@ -282,8 +409,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         document.records = [firstRoot.path, secondRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(firstRoot.path))
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(secondRoot.path))
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
             projectsModel: projectsModel,
@@ -470,16 +595,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         let secondRoot = directory.appendingPathComponent("second")
         try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
-        let projectsModel = ProjectsViewModel(
-            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        )
         let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: projectsModel,
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         let first = ProjectRunConfiguration(
             id: "first",
             projectID: firstRoot.path,
@@ -508,15 +624,19 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "swift test",
             workingDirectory: "."
         )
+        let projectsModel = try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [first, sameProject, second, inactive])
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
 
         for configuration in [first, second] {
-            guard case let .needsTrust(request) = coordinator.run(
+            XCTAssertEqual(coordinator.run(
                 configuration,
                 projectRoot: configuration.projectID
-            ) else {
-                return XCTFail("首次运行必须请求信任")
-            }
-            XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+            ), .started)
         }
         XCTAssertEqual(coordinator.run(sameProject, projectRoot: firstRoot.path), .started)
         let firstSession = try XCTUnwrap(coordinator.session(for: first.id))
@@ -536,14 +656,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: storageDirectory) }
         let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: storageDirectory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         var project = ProjectRecord(path: "/Volumes/Missing/project", discoveredAt: Date())
         project.availability = .unavailable("项目根目录不存在")
         let configuration = ProjectRunConfiguration(
@@ -552,6 +664,12 @@ final class ProjectRunSessionsTests: XCTestCase {
             name: "开发服务器",
             command: "npm run dev",
             workingDirectory: "."
+        )
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: storageDirectory.appendingPathComponent("records.json")), configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
         )
 
         XCTAssertEqual(
@@ -570,14 +688,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         let storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: storageDirectory) }
         let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: storageDirectory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         let project = ProjectRecord(path: storageDirectory.appendingPathComponent("project").path, discoveredAt: Date())
         let configuration = ProjectRunConfiguration(
             id: "unknown-run",
@@ -585,6 +695,12 @@ final class ProjectRunSessionsTests: XCTestCase {
             name: "Unknown Run",
             command: "npm run dev",
             workingDirectory: "."
+        )
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: storageDirectory.appendingPathComponent("records.json")), configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
         )
 
         XCTAssertEqual(
@@ -599,7 +715,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(factory.engines[0].launches.isEmpty)
     }
 
-    func testDisabledConfigurationCannotStartDirectlyOrFromPendingTrust() throws {
+    func testDisabledConfigurationCannotStartDirectlyOrFromFrozenIntent() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let projectRoot = directory.appendingPathComponent("project")
@@ -623,19 +739,17 @@ final class ProjectRunSessionsTests: XCTestCase {
             scheduler: FakeProjectRunScheduler()
         )
 
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: projectRoot.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
+        let intent = coordinator.makeBatchStartIntent(in: [configuration])
         XCTAssertTrue(projectsModel.setRunConfigurationEnabled(configuration, isEnabled: false))
         let disabled = try XCTUnwrap(projectsModel.runConfigurations().first)
 
         XCTAssertFalse(coordinator.canStartBatch(in: coordinator.runConfigurations()))
         XCTAssertEqual(coordinator.run(disabled, projectRoot: projectRoot.path), .rejected("运行配置已禁用"))
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .rejected("运行配置已禁用"))
-        XCTAssertTrue(factory.engines.isEmpty)
+        coordinator.submitBatchStart(intent)
+        XCTAssertTrue(factory.engines.flatMap(\.launches).isEmpty)
     }
 
-    func testBatchStartWithMixedTrustCreatesOneFrozenReviewWithoutLaunching() throws {
+    func testBatchStartImmediatelyLaunchesEveryEligibleConfiguration() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let trustedRoot = directory.appendingPathComponent("trusted")
@@ -662,147 +776,16 @@ final class ProjectRunSessionsTests: XCTestCase {
             configurations: [trusted, untrusted],
             projectRoots: [trustedRoot, untrustedRoot]
         )
-        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(trustedRoot.path))
 
-        fixture.coordinator.startBatch(in: [trusted, untrusted])
-
-        let review = try XCTUnwrap(fixture.coordinator.pendingBatchTrustReview)
-        XCTAssertEqual(review.projectRootsRequiringTrust, [untrustedRoot.path])
-        XCTAssertEqual(review.intent.startRequests, [
-            ProjectRunFrozenStartRequest(
-                configuration: trusted,
-                projectRoot: trustedRoot.path,
-                command: trusted.command,
-                workingDirectory: trustedRoot.path
-            ),
-            ProjectRunFrozenStartRequest(
-                configuration: untrusted,
-                projectRoot: untrustedRoot.path,
-                command: untrusted.command,
-                workingDirectory: untrustedWorkingDirectory.path
-            ),
-        ])
-        XCTAssertTrue(fixture.factory.engines.isEmpty)
-        XCTAssertNil(fixture.coordinator.session(for: trusted.id))
-        XCTAssertNil(fixture.coordinator.session(for: untrusted.id))
-    }
-
-    func testCancellingBatchTrustReviewDiscardsIntentWithoutTrustOrLaunches() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let projectRoot = directory.appendingPathComponent("untrusted")
-        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
-        let configuration = ProjectRunConfiguration(
-            id: "cancelled",
-            projectID: projectRoot.path,
-            name: "Cancelled",
-            command: "npm run cancelled",
-            workingDirectory: "."
-        )
-        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        var document = ProjectRecordDocument(runConfigurations: [configuration])
-        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
-        try store.save(document)
-        let projectsModel = ProjectsViewModel(store: store)
-        let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: projectsModel,
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
-        coordinator.startBatch(in: [configuration])
-        XCTAssertNotNil(coordinator.pendingBatchTrustReview)
-
-        coordinator.cancelBatchTrustReview()
-
-        XCTAssertNil(coordinator.pendingBatchTrustReview)
-        XCTAssertFalse(projectsModel.isProjectRunTrusted(projectRoot.path))
-        XCTAssertTrue(try store.load().trustedProjectRoots.isEmpty)
-        XCTAssertTrue(factory.engines.isEmpty)
-        XCTAssertNil(coordinator.session(for: configuration.id))
-    }
-
-    func testConfirmingBatchTrustPersistsRootsIndependentlyAndContinuesAfterFailure() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let alreadyTrustedRoot = directory.appendingPathComponent("already-trusted")
-        let failingRoot = directory.appendingPathComponent("failing")
-        let successfulRoot = directory.appendingPathComponent("successful")
-        for root in [alreadyTrustedRoot, failingRoot, successfulRoot] {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        }
-        let alreadyTrusted = ProjectRunConfiguration(
-            id: "already-trusted",
-            projectID: alreadyTrustedRoot.path,
-            name: "Already Trusted",
-            command: "run already trusted",
-            workingDirectory: "."
-        )
-        let failing = ProjectRunConfiguration(
-            id: "failing",
-            projectID: failingRoot.path,
-            name: "Failing Trust",
-            command: "run failing trust",
-            workingDirectory: "."
-        )
-        let successful = ProjectRunConfiguration(
-            id: "successful",
-            projectID: successfulRoot.path,
-            name: "Successful Trust",
-            command: "run successful trust",
-            workingDirectory: "."
-        )
-        let configurations = [alreadyTrusted, failing, successful]
-        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        var document = ProjectRecordDocument(runConfigurations: configurations)
-        document.records = [alreadyTrustedRoot.path, failingRoot.path, successfulRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
-        try store.save(document)
-        let projectsModel = ProjectsViewModel(store: store)
-        projectsModel.refreshProjects()
-        for _ in 0 ..< 100 where projectsModel.records.contains(where: { $0.availability == .unknown }) {
+        fixture.projectsModel.refreshProjects()
+        for _ in 0 ..< 100 where fixture.projectsModel.records.contains(where: { $0.availability == .unknown }) {
             try await Task.sleep(for: .milliseconds(10))
         }
-        var trustedRoots: Set<String> = [alreadyTrustedRoot.path]
-        var persistenceAttempts: [String] = []
-        let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: projectsModel,
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler(),
-            isProjectRunTrusted: { trustedRoots.contains($0) },
-            trustProjectRunRoot: { projectRoot in
-                persistenceAttempts.append(projectRoot)
-                guard projectRoot != failingRoot.path else { return false }
-                trustedRoots.insert(projectRoot)
-                return true
-            }
-        )
-        coordinator.startBatch(in: configurations)
-        XCTAssertEqual(
-            coordinator.pendingBatchTrustReview?.projectRootsRequiringTrust,
-            [failingRoot.path, successfulRoot.path]
-        )
+        fixture.coordinator.startBatch(in: [trusted, untrusted])
 
-        coordinator.confirmBatchTrustAndStart()
-
-        XCTAssertNil(coordinator.pendingBatchTrustReview)
-        XCTAssertEqual(persistenceAttempts, [failingRoot.path, successfulRoot.path])
-        XCTAssertEqual(trustedRoots, [alreadyTrustedRoot.path, successfulRoot.path])
-        XCTAssertEqual(coordinator.session(for: alreadyTrusted.id)?.state, .running)
-        let failedTrustSession = try XCTUnwrap(coordinator.session(for: failing.id))
-        XCTAssertEqual(failedTrustSession.state, .launchFailed("Project Root 尚未信任"))
-        XCTAssertEqual(failedTrustSession.currentExecution?.id, failedTrustSession.failureExecution?.id)
-        XCTAssertEqual(coordinator.session(for: successful.id)?.state, .running)
-        XCTAssertEqual(factory.engines.count, 3)
-        XCTAssertEqual(
-            factory.engines.flatMap(\.launches).map(\.arguments),
-            [
-                ["-i", "-c", alreadyTrusted.command],
-                ["-i", "-c", successful.command],
-            ]
-        )
+        XCTAssertEqual(fixture.coordinator.session(for: trusted.id)?.state, .running)
+        XCTAssertEqual(fixture.coordinator.session(for: untrusted.id)?.state, .running)
+        XCTAssertEqual(fixture.factory.engines.flatMap(\.launches).map(\.workingDirectory), [trustedRoot.path, untrustedWorkingDirectory.path])
     }
 
     func testBatchStartIntentUsesOnlySuppliedEligibleScope() async throws {
@@ -866,8 +849,6 @@ final class ProjectRunSessionsTests: XCTestCase {
             projectsModel.records.first { $0.id == missingRoot.path }?.availability,
             .unavailable("项目根目录不存在")
         )
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(activeRoot.path))
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(includedRoot.path))
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
             projectsModel: projectsModel,
@@ -929,8 +910,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         document.records = [includedRoot.path, outsideRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(includedRoot.path))
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(outsideRoot.path))
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
             projectsModel: projectsModel,
@@ -970,7 +949,6 @@ final class ProjectRunSessionsTests: XCTestCase {
             configurations: [configuration],
             projectRoots: [directory]
         )
-        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(directory.path))
         XCTAssertEqual(fixture.coordinator.run(configuration, projectRoot: directory.path), .started)
         let executionID = try XCTUnwrap(fixture.coordinator.session(for: configuration.id)?.activeExecution?.id)
         fixture.coordinator.stop(executionID: executionID)
@@ -1000,17 +978,13 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration]),
             makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
             scheduler: FakeProjectRunScheduler()
         )
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: directory.path), .started)
         coordinator.requestBatchStop(in: [configuration])
         XCTAssertNotNil(coordinator.pendingBatchStopIntent)
 
@@ -1041,17 +1015,13 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [ended, replaced]),
             makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
             scheduler: FakeProjectRunScheduler()
         )
-        guard case let .needsTrust(request) = coordinator.run(ended, projectRoot: directory.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+
+        XCTAssertEqual(coordinator.run(ended, projectRoot: directory.path), .started)
         XCTAssertEqual(coordinator.run(replaced, projectRoot: directory.path), .started)
         let endedExecutionID = try XCTUnwrap(coordinator.session(for: ended.id)?.activeExecution?.id)
         let replacedExecutionID = try XCTUnwrap(coordinator.session(for: replaced.id)?.activeExecution?.id)
@@ -1092,17 +1062,13 @@ final class ProjectRunSessionsTests: XCTestCase {
         let factory = FakeProjectRunEngineFactory()
         let scheduler = FakeProjectRunScheduler()
         let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration]),
             makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
             scheduler: scheduler
         )
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: directory.path), .started)
         coordinator.restart(configuration, projectRoot: directory.path)
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .restarting)
         XCTAssertTrue(coordinator.canStopBatch(in: [configuration]))
@@ -1142,17 +1108,13 @@ final class ProjectRunSessionsTests: XCTestCase {
         let factory = FakeProjectRunEngineFactory()
         let scheduler = FakeProjectRunScheduler()
         let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [first, second]),
             makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
             scheduler: scheduler
         )
-        guard case let .needsTrust(request) = coordinator.run(first, projectRoot: directory.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+
+        XCTAssertEqual(coordinator.run(first, projectRoot: directory.path), .started)
         XCTAssertEqual(coordinator.run(second, projectRoot: directory.path), .started)
         factory.engines[0].signalSucceeds = false
 
@@ -1210,7 +1172,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(projectRoot.path))
         let factory = FakeProjectRunEngineFactory()
         factory.startErrors = [nil, nil, FakeProjectRunError.launchFailed, nil, nil, nil, nil]
         let scheduler = FakeProjectRunScheduler()
@@ -1292,7 +1253,6 @@ final class ProjectRunSessionsTests: XCTestCase {
             projectRoots: [projectRoot]
         )
         XCTAssertEqual(fixture.projectsModel.records.first?.availability, .unknown)
-        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(projectRoot.path))
 
         XCTAssertEqual(fixture.coordinator.batchStartCandidates(in: [configuration]).map(\.id), [configuration.id])
         let intent = fixture.coordinator.makeBatchStartIntent(in: [configuration])
@@ -1336,7 +1296,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         for _ in 0 ..< 100 where fixture.projectsModel.records.contains(where: { $0.availability == .unknown }) {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(projectRoot.path))
 
         let intent = fixture.coordinator.makeBatchStartIntent(in: [invalid, valid])
         XCTAssertEqual(intent.startRequests.map(\.configuration.id), [valid.id])
@@ -1392,7 +1351,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         for _ in 0 ..< 100 where projectsModel.records.contains(where: { $0.availability == .unknown }) {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(projectRoot.path))
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
             projectsModel: projectsModel,
@@ -1465,7 +1423,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         for _ in 0 ..< 100 where fixture.projectsModel.records.contains(where: { $0.availability == .unknown }) {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(projectRoot.path))
         let intent = fixture.coordinator.makeBatchStartIntent(in: [configuration])
         XCTAssertEqual(fixture.coordinator.run(configuration, projectRoot: projectRoot.path), .started)
         let runningExecutionID = try XCTUnwrap(
@@ -1516,7 +1473,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         for _ in 0 ..< 100 where projectsModel.records.contains(where: { $0.availability == .unknown }) {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(projectRoot.path))
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
             projectsModel: projectsModel,
@@ -1571,8 +1527,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         for _ in 0 ..< 100 where projectsModel.records.contains(where: { $0.availability == .unknown }) {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(removedRoot.path))
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(survivingRoot.path))
         let factory = FakeProjectRunEngineFactory()
         let coordinator = ProjectRunCoordinator(
             projectsModel: projectsModel,
@@ -1587,7 +1541,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         coordinator.submitBatchStart(intent)
 
         let removedSession = try XCTUnwrap(coordinator.session(for: removed.id))
-        XCTAssertEqual(removedSession.state, .launchFailed("运行配置已删除"))
+        XCTAssertEqual(removedSession.state, .launchFailed("运行配置不存在"))
         XCTAssertEqual(removedSession.currentExecution?.id, removedSession.failureExecution?.id)
         XCTAssertEqual(coordinator.session(for: surviving.id)?.state, .running)
         XCTAssertEqual(factory.engines.count, 2)
@@ -1623,7 +1577,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         for _ in 0 ..< 100 where projectsModel.records.contains(where: { $0.availability == .unknown }) {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(projectRoot.path))
         let factory = FakeProjectRunEngineFactory()
         factory.startErrors = [FakeProjectRunError.launchFailed, nil]
         let coordinator = ProjectRunCoordinator(
@@ -1678,7 +1631,6 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "npm run dev",
             workingDirectory: "."
         ))
-        XCTAssertTrue(projectsModel.trustProjectRunRoot(projectRoot.path))
         let coordinator = ProjectRunCoordinator(
             projectsModel: projectsModel,
             makeEngine: { FakeProjectRunEngine() },
@@ -1695,16 +1647,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let projectsModel = ProjectsViewModel(
-            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        )
         let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: projectsModel,
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: directory.path,
@@ -1712,11 +1655,15 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "npm run dev",
             workingDirectory: "."
         )
+        let projectsModel = try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration])
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
 
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: directory.path), .started)
         let firstSession = try XCTUnwrap(coordinator.session(for: configuration.id))
         XCTAssertEqual(firstSession.lastSuccessfulCommand, configuration.command)
         XCTAssertNotNil(firstSession.startedAt)
@@ -1738,14 +1685,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: directory.path,
@@ -1753,11 +1692,14 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "npm run dev",
             workingDirectory: "."
         )
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
 
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: directory.path), .started)
         let session = try XCTUnwrap(coordinator.session(for: configuration.id))
         let terminal = session.terminalView
         let firstExecution = try XCTUnwrap(session.currentExecution)
@@ -1786,14 +1728,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let factory = FakeProjectRunEngineFactory()
         factory.startError = FakeProjectRunError.launchFailed
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: directory.path,
@@ -1801,12 +1735,15 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "npm run dev",
             workingDirectory: "."
         )
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
 
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
         XCTAssertEqual(
-            coordinator.confirmTrustAndRun(request),
+            coordinator.run(configuration, projectRoot: directory.path),
             .rejected(FakeProjectRunError.launchFailed.localizedDescription)
         )
         let session = try XCTUnwrap(coordinator.session(for: configuration.id))
@@ -1841,7 +1778,6 @@ final class ProjectRunSessionsTests: XCTestCase {
             configurations: [configuration],
             projectRoots: [projectRoot]
         )
-        XCTAssertTrue(fixture.projectsModel.trustProjectRunRoot(projectRoot.path))
         XCTAssertEqual(fixture.coordinator.run(configuration, projectRoot: projectRoot.path), .started)
         let session = try XCTUnwrap(fixture.coordinator.session(for: configuration.id))
         let activeExecutionID = try XCTUnwrap(session.activeExecution?.id)
@@ -1861,7 +1797,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(fixture.factory.engines[0].signals.isEmpty)
     }
 
-    func testLaunchRejectsAWorkingDirectoryChangedAfterTrustReview() throws {
+    func testLaunchRejectsAWorkingDirectoryChangedAfterFreezing() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let projectRoot = directory.appendingPathComponent("project")
@@ -1871,15 +1807,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.createDirectory(at: firstTarget, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: secondTarget, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: workingDirectory, withDestinationURL: firstTarget)
-        let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: projectRoot.path,
@@ -1888,17 +1815,18 @@ final class ProjectRunSessionsTests: XCTestCase {
             workingDirectory: "current"
         )
 
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: projectRoot.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [configuration], projectRoots: [projectRoot])
+        let factory = fixture.factory
+        fixture.projectsModel.refreshProjects()
+        for _ in 0 ..< 100 where fixture.projectsModel.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        let coordinator = fixture.coordinator
+        let intent = coordinator.makeBatchStartIntent(in: [configuration])
+        let request = try XCTUnwrap(intent.startRequests.first)
         XCTAssertEqual(request.workingDirectory, firstTarget.path)
         try FileManager.default.removeItem(at: workingDirectory)
         try FileManager.default.createSymbolicLink(at: workingDirectory, withDestinationURL: secondTarget)
 
-        XCTAssertEqual(
-            coordinator.confirmTrustAndRun(request),
-            .rejected(ProjectRunLaunchError.reviewedWorkingDirectoryChanged.localizedDescription)
-        )
+        coordinator.submitBatchStart(intent)
         let session = try XCTUnwrap(coordinator.session(for: configuration.id))
         XCTAssertEqual(session.currentExecution?.workingDirectory, firstTarget.path)
         XCTAssertEqual(
@@ -1914,14 +1842,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: directory.path,
@@ -1929,11 +1849,14 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "npm run dev",
             workingDirectory: "."
         )
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
 
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: directory.path), .started)
         let session = try XCTUnwrap(coordinator.session(for: configuration.id))
         let firstExecutionID = try XCTUnwrap(session.currentExecution?.id)
         let engine = try XCTUnwrap(factory.engines.first)
@@ -1959,7 +1882,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(session.state, .stopping)
     }
 
-    func testRemovingProjectRecordCommitsStoreBeforeCleaningSessionsAndTrust() throws {
+    func testRemovingProjectRecordCommitsStoreBeforeCleaningSessions() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let firstRoot = directory.appendingPathComponent("first")
@@ -1993,13 +1916,10 @@ final class ProjectRunSessionsTests: XCTestCase {
             scheduler: FakeProjectRunScheduler()
         )
         for configuration in [first, second] {
-            guard case let .needsTrust(request) = coordinator.run(
+            XCTAssertEqual(coordinator.run(
                 configuration,
                 projectRoot: configuration.projectID
-            ) else {
-                return XCTFail("首次运行必须请求信任")
-            }
-            XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+            ), .started)
         }
         factory.engines[0].signalSucceeds = false
 
@@ -2026,13 +1946,11 @@ final class ProjectRunSessionsTests: XCTestCase {
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
             scheduler: FakeProjectRunScheduler()
         )
-        guard case .needsTrust = relaunchedCoordinator.run(first, projectRoot: firstRoot.path) else {
-            return XCTFail("移除 Project Record 必须删除 Project Trust")
-        }
+        XCTAssertEqual(relaunchedCoordinator.run(first, projectRoot: firstRoot.path), .rejected("运行配置已禁用"))
         XCTAssertEqual(relaunchedCoordinator.run(second, projectRoot: secondRoot.path), .started)
     }
 
-    func testFailedProjectRemovalPreservesSessionsConfigurationsAndTrust() throws {
+    func testFailedProjectRemovalPreservesSessionsConfigurations() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let projectRoot = directory.appendingPathComponent("project")
@@ -2058,13 +1976,10 @@ final class ProjectRunSessionsTests: XCTestCase {
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
             scheduler: FakeProjectRunScheduler()
         )
-        guard case let .needsTrust(request) = coordinator.run(
+        XCTAssertEqual(coordinator.run(
             configuration,
             projectRoot: projectRoot.path
-        ) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        ), .started)
         try FileManager.default.removeItem(at: storageDirectory)
         try Data().write(to: storageDirectory)
 
@@ -2085,21 +2000,14 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
     }
 
-    func testFirstRunRequiresPersistentProjectTrustBeforeLaunching() throws {
+    func testFirstRunLaunchesImmediatelyAndCanRelaunch() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let projectRoot = directory.appendingPathComponent("project")
         let workingDirectory = projectRoot.appendingPathComponent("scripts")
         try FileManager.default.createDirectory(at: workingDirectory, withIntermediateDirectories: true)
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        let projectsModel = ProjectsViewModel(store: store)
         let factory = FakeProjectRunEngineFactory()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: projectsModel,
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: projectRoot.path,
@@ -2107,19 +2015,14 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "printf '\u{1b}[31mred\u{1b}[0m\\n'",
             workingDirectory: "scripts"
         )
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: store, configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
 
-        let request: ProjectRunFrozenStartRequest
-        switch coordinator.run(configuration, projectRoot: projectRoot.path) {
-        case let .needsTrust(pendingRequest):
-            request = pendingRequest
-        default:
-            return XCTFail("首次运行必须先请求 Project Trust")
-        }
-
-        XCTAssertEqual(request.command, configuration.command)
-        XCTAssertEqual(request.workingDirectory, workingDirectory.path)
-        XCTAssertTrue(factory.engines.isEmpty)
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: projectRoot.path), .started)
         let engine = try XCTUnwrap(factory.engines.first)
         XCTAssertEqual(engine.launches, [
             .init(
@@ -2143,7 +2046,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(relaunchedFactory.engines.count, 1)
     }
 
-    func testCoordinatorPersistsTrustAndCommitsAnEditedCommandOnlyAfterLaunch() throws {
+    func testCoordinatorCommitsAnEditedCommandOnlyAfterLaunch() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let projectRoot = directory.appendingPathComponent("project")
@@ -2179,14 +2082,9 @@ final class ProjectRunSessionsTests: XCTestCase {
         let staged = try XCTUnwrap(coordinator.runConfigurations().first)
         XCTAssertEqual(staged.command, draft)
         XCTAssertEqual(try store.load().runConfigurations.first?.command, configuration.command)
-        guard case let .needsTrust(request) = coordinator.run(staged, projectRoot: projectRoot.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(request.command, draft)
-        guard case .rejected = coordinator.confirmTrustAndRun(request) else {
+        guard case .rejected = coordinator.run(staged, projectRoot: projectRoot.path) else {
             return XCTFail("启动失败必须保留 launch draft")
         }
-        XCTAssertEqual(try store.load().trustedProjectRoots, [projectRoot.path])
         XCTAssertEqual(try store.load().runConfigurations.first?.command, configuration.command)
 
         factory.engines[0].startError = nil
@@ -2202,14 +2100,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
         let factory = FakeProjectRunEngineFactory()
         let scheduler = FakeProjectRunScheduler()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: scheduler
-        )
         let first = ProjectRunConfiguration(
             id: "first",
             projectID: projectRoot.path,
@@ -2224,10 +2114,14 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "sleep 30 & wait",
             workingDirectory: "."
         )
-        guard case let .needsTrust(request) = coordinator.run(first, projectRoot: projectRoot.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [first, second]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: scheduler
+        )
+
+        XCTAssertEqual(coordinator.run(first, projectRoot: projectRoot.path), .started)
         XCTAssertEqual(coordinator.run(first, projectRoot: projectRoot.path), .rejected("该运行配置已有活动会话"))
 
         coordinator.stop(configurationID: first.id)
@@ -2267,14 +2161,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let factory = FakeProjectRunEngineFactory()
         let scheduler = FakeProjectRunScheduler()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: scheduler
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: directory.path,
@@ -2282,10 +2168,14 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "sleep 30",
             workingDirectory: "."
         )
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: directory.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: scheduler
+        )
+
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: directory.path), .started)
         let session = try XCTUnwrap(coordinator.session(for: configuration.id))
         let firstExecutionID = try XCTUnwrap(session.currentExecution?.id)
         let engine = try XCTUnwrap(factory.engines.first)
@@ -2333,14 +2223,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let factory = FakeProjectRunEngineFactory()
         let scheduler = FakeProjectRunScheduler()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: scheduler
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: directory.path,
@@ -2348,13 +2230,17 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "sleep 30",
             workingDirectory: "."
         )
-        guard case let .needsTrust(request) = coordinator.run(
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: scheduler
+        )
+
+        XCTAssertEqual(coordinator.run(
             configuration,
             projectRoot: directory.path
-        ) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        ), .started)
         let engine = try XCTUnwrap(factory.engines.first)
         engine.signalSucceeds = false
 
@@ -2388,14 +2274,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let factory = FakeProjectRunEngineFactory()
         let scheduler = FakeProjectRunScheduler()
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: scheduler
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: directory.path,
@@ -2403,13 +2281,17 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "exit 2",
             workingDirectory: "."
         )
-        guard case let .needsTrust(request) = coordinator.run(
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: scheduler
+        )
+
+        XCTAssertEqual(coordinator.run(
             configuration,
             projectRoot: directory.path
-        ) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        ), .started)
         let engine = try XCTUnwrap(factory.engines.first)
         engine.signalSucceeds = false
 
@@ -2443,14 +2325,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         }
         let factory = FakeProjectRunEngineFactory()
         let shellProvider = FakeProjectRunShellProvider(path: "/bin/zsh")
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(
-                store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-            ),
-            makeEngine: factory.makeEngine,
-            shellProvider: shellProvider,
-            scheduler: FakeProjectRunScheduler()
-        )
         let configuration = ProjectRunConfiguration(
             id: "run",
             projectID: projectRoot.path,
@@ -2458,10 +2332,14 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: "exit 7",
             workingDirectory: "scripts"
         )
-        guard case let .needsTrust(request) = coordinator.run(configuration, projectRoot: projectRoot.path) else {
-            return XCTFail("首次运行必须请求信任")
-        }
-        XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [configuration]),
+            makeEngine: factory.makeEngine,
+            shellProvider: shellProvider,
+            scheduler: FakeProjectRunScheduler()
+        )
+
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: projectRoot.path), .started)
         let session = try XCTUnwrap(coordinator.session(for: configuration.id))
         let engine = try XCTUnwrap(factory.engines.first)
         let retainedTerminal = engine.terminalView
@@ -2476,9 +2354,9 @@ final class ProjectRunSessionsTests: XCTestCase {
         let successfulExecutionID = try XCTUnwrap(session.currentExecution?.id)
 
         try FileManager.default.removeItem(at: workingDirectory)
-        try FileManager.default.createSymbolicLink(at: workingDirectory, withDestinationURL: outside)
+        try FileManager.default.createSymbolicLink(at: workingDirectory, withDestinationURL: outside.appendingPathComponent("missing"))
         guard case .rejected = coordinator.run(rerun, projectRoot: projectRoot.path) else {
-            return XCTFail("符号链接逃逸必须拒绝")
+            return XCTFail("失效符号链接必须拒绝")
         }
         XCTAssertEqual(engine.launches.count, 2)
         XCTAssertEqual(coordinator.session(for: configuration.id)?.lastSuccessfulCommand, "exit 0")
@@ -2687,15 +2565,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         let secondRoot = directory.appendingPathComponent("second")
         try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
-        let projectsModel = ProjectsViewModel(
-            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
-        )
-        let coordinator = ProjectRunCoordinator(
-            projectsModel: projectsModel,
-            makeEngine: { SwiftTermProjectRunEngine() },
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
-        )
         let first = ProjectRunConfiguration(
             id: "first",
             projectID: firstRoot.path,
@@ -2717,14 +2586,19 @@ final class ProjectRunSessionsTests: XCTestCase {
             command: #"/bin/sh -c 'trap "" HUP INT TERM; while :; do sleep 1; done' & child=$!; disown; printf 'BACKGROUND:%s\n' "$child"; sleep 1"#,
             workingDirectory: "."
         )
+        let projectsModel = try storedRunModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")), configurations: [first, second, background])
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: { SwiftTermProjectRunEngine() },
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+
         for configuration in [first, second] {
-            guard case let .needsTrust(request) = coordinator.run(
+            XCTAssertEqual(coordinator.run(
                 configuration,
                 projectRoot: configuration.projectID
-            ) else {
-                return XCTFail("首次运行必须请求信任")
-            }
-            XCTAssertEqual(coordinator.confirmTrustAndRun(request), .started)
+            ), .started)
         }
         XCTAssertEqual(coordinator.run(background, projectRoot: firstRoot.path), .started)
         let firstSession = try XCTUnwrap(coordinator.session(for: first.id))
@@ -2892,6 +2766,17 @@ final class ProjectRunSessionsTests: XCTestCase {
         childNeedsCleanup = isRunning(childPID)
         XCTAssertFalse(childNeedsCleanup, "后台子进程仍然存活：\(childPID)")
     }
+}
+
+@MainActor
+private func storedRunModel(store: ProjectRecordStore, configurations: [ProjectRunConfiguration]) throws -> ProjectsViewModel {
+    let roots = Set(configurations.compactMap(\.projectID))
+    let document = ProjectRecordDocument(
+        records: roots.sorted().map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) },
+        runConfigurations: configurations
+    )
+    try store.save(document)
+    return ProjectsViewModel(store: store)
 }
 
 @MainActor

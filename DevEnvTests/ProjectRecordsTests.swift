@@ -201,11 +201,9 @@ final class ProjectRecordsTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(Set(model.records.map(\.id)), [first.id, second.id])
-        XCTAssertTrue(model.trustProjectRunRoot(first.path))
         model.remove(first)
         XCTAssertEqual(model.records.map(\.id), [second.id])
         XCTAssertEqual(model.runConfigurations(), [secondRun])
-        XCTAssertTrue(model.isProjectRunTrusted(second.path))
         XCTAssertTrue(model.isSuggestionSourceAvailable(secondRun))
         XCTAssertEqual(try store.load().records.first?.title, "Worker")
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("package.json").path))
@@ -255,8 +253,8 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(run.workingDirectory, "services/api")
         XCTAssertEqual(run.sourceIdentity, "services/api/package.json#scripts.dev")
         XCTAssertFalse(run.isEnabled)
-        XCTAssertEqual(migrated.trustedProjectRoots, ["/Projects/app"])
         XCTAssertEqual(try store.load(), migrated)
+        XCTAssertFalse(try String(contentsOf: file, encoding: .utf8).contains("trustedProjectRoots"))
     }
 
     @MainActor
@@ -703,7 +701,6 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(document.records.map(\.path), ["/Projects/alpha"])
         XCTAssertEqual(document.ignoredProjects.map(\.path), ["/Projects/beta"])
         XCTAssertTrue(document.runConfigurations.isEmpty)
-        XCTAssertTrue(document.trustedProjectRoots.isEmpty)
     }
 
     func testVersionTwoStoreMigratesProjectTrustIntoTheApplicationSupportDocument() throws {
@@ -723,7 +720,6 @@ final class ProjectRecordsTests: XCTestCase {
         let document = try ProjectRecordStore(fileURL: fileURL).load()
 
         XCTAssertEqual(document.schemaVersion, ProjectRecordDocument.currentSchemaVersion)
-        XCTAssertTrue(document.trustedProjectRoots.isEmpty)
     }
 
     @MainActor
@@ -834,7 +830,7 @@ final class ProjectRecordsTests: XCTestCase {
     }
 
     @MainActor
-    func testRunConfigurationWorkingDirectoryCannotEscapeProjectRoot() throws {
+    func testRunConfigurationPreservesDirectoryIntentUntilExecution() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let project = directory.appendingPathComponent("project")
@@ -872,18 +868,18 @@ final class ProjectRecordsTests: XCTestCase {
             workingDirectory: "inside-link"
         ))
 
-        XCTAssertEqual(rootRun.workingDirectory, ".")
-        XCTAssertEqual(childRun.workingDirectory, "Sources")
+        XCTAssertEqual(rootRun.workingDirectory, "")
+        XCTAssertEqual(childRun.workingDirectory, "inside-link")
         try FileManager.default.removeItem(at: project.appendingPathComponent("inside-link"))
         try FileManager.default.removeItem(at: child)
         try FileManager.default.createSymbolicLink(at: child, withDestinationURL: outside)
-        XCTAssertFalse(loadedModel.updateRunConfiguration(
+        XCTAssertTrue(loadedModel.updateRunConfiguration(
             childRun,
-            name: "不能保留逃逸目录",
+            name: "保留工作目录意图",
             command: "true",
             workingDirectory: childRun.workingDirectory
         ))
-        for invalidPath in [
+        for path in [
             outside.path,
             "../outside",
             "Sources/../Sources",
@@ -891,14 +887,14 @@ final class ProjectRecordsTests: XCTestCase {
             "README.md",
             "escape-link",
         ] {
-            XCTAssertNil(loadedModel.createRunConfiguration(
+            XCTAssertNotNil(loadedModel.createRunConfiguration(
                 projectID: try XCTUnwrap(loadedModel.records.first { $0.path == project.path }).id,
-                name: invalidPath,
+                name: path,
                 command: "true",
-                workingDirectory: invalidPath
+                workingDirectory: path
             ))
         }
-        XCTAssertEqual(loadedModel.runConfigurations().count, 2)
+        XCTAssertEqual(loadedModel.runConfigurations().count, 8)
     }
 
     func testIgnoredProjectIsAnExclusionBoundaryAndDirectAddResolvesItsSymlink() throws {

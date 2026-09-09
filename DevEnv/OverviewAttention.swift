@@ -29,7 +29,7 @@ enum OverviewAttentionKind: String, Sendable {
 
 struct OverviewAttentionRunInput: Sendable {
     let configuration: ProjectRunConfiguration
-    let project: ProjectRecord
+    let project: ProjectRecord?
     let state: ProjectRunSessionState
     let lastSuccessfulCommand: String?
     let startedAt: Date?
@@ -55,7 +55,7 @@ struct OverviewRunProjection: Identifiable, Sendable {
     var id: String { configuration.id }
 
     let configuration: ProjectRunConfiguration
-    let project: ProjectRecord
+    let project: ProjectRecord?
     let state: ProjectRunSessionState
     let lastSuccessfulCommand: String?
     let startedAt: Date?
@@ -138,11 +138,11 @@ enum OverviewAttention {
 
         for run in runs {
             guard let message = run.failureMessage else { continue }
-            add("run-failure:\(run.id)", "\(run.project.title) 运行失败", "\(run.configuration.name)：\(message)", .critical, .runFailure, run.failureAt, .run(run.id))
+            add("run-failure:\(run.id)", "\(run.project?.title ?? run.configuration.name) 运行失败", "\(run.configuration.name)：\(message)", .critical, .runFailure, run.failureAt, .run(run.id))
         }
 
         for run in runs where run.state == .running && run.ownedProcessIDs == nil {
-            add("run-evidence:\(run.id)", "\(run.project.title) 运行证据不足", "无法确证该运行会话的进程归属，端口与内存状态可能不完整", .warning, .runEvidence, run.startedAt, .run(run.id))
+            add("run-evidence:\(run.id)", "\(run.project?.title ?? run.configuration.name) 运行证据不足", "无法确证该运行会话的进程归属，端口与内存状态可能不完整", .warning, .runEvidence, run.startedAt, .run(run.id))
         }
 
         let dynamicUpdatedAt = input.dynamicStatusRefreshedAt ?? input.snapshot.scannedAt
@@ -158,9 +158,9 @@ enum OverviewAttention {
             add("environment-snapshot-stale", "环境扫描结果已过期", "超过 24 小时没有完成一次环境扫描", .warning, .refresh, input.snapshot.scannedAt, .environmentRefresh)
         }
 
-        let activeProjects = Dictionary(grouping: runs.filter { $0.state.isLive }, by: { $0.project.path })
+        let activeProjects = Dictionary(grouping: runs.filter { $0.state.isLive }.compactMap(\.project), by: { $0.path })
             .values.compactMap { group in
-                let projects = group.map(\.project).sorted { $0.id < $1.id }
+                let projects = group.sorted { $0.id < $1.id }
                 return projects.first { input.analyses[$0.id] != nil && !input.staleProjectIDs.contains($0.id) }
                     ?? projects.first { input.analyses[$0.id] != nil }
                     ?? projects.first
@@ -226,7 +226,7 @@ enum OverviewAttention {
         for run in runs {
             let exposed = (run.bindings ?? []).filter { !$0.isLoopback }.sorted { $0.port == $1.port ? $0.address < $1.address : $0.port < $1.port }
             guard !exposed.isEmpty else { continue }
-            add("exposed-run:\(run.id)", "\(run.project.title) 可能对局域网开放", "监听地址：\(exposed.map(bindingText).joined(separator: " · "))", .warning, .exposedPort, run.startedAt, .localServices)
+            add("exposed-run:\(run.id)", "\(run.project?.title ?? run.configuration.name) 可能对局域网开放", "监听地址：\(exposed.map(bindingText).joined(separator: " · "))", .warning, .exposedPort, run.startedAt, .localServices)
         }
 
         if let free = input.snapshot.system.diskFreeBytes, free < lowDiskBytes {

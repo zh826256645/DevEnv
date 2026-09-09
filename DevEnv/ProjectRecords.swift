@@ -164,24 +164,26 @@ struct ProjectRemovalSummary: Equatable, Sendable {
 struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
     let id: String
     var workspaceID: String
-    let projectID: String
+    var projectID: String?
     var name: String
     var command: String
     var workingDirectory: String
     let sourceIdentity: String?
+    let sourceProjectID: String?
     var isEnabled: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case id, projectID, name, command, workingDirectory, sourceIdentity, isEnabled, workspaceID
+        case id, projectID, name, command, workingDirectory, sourceIdentity, sourceProjectID, isEnabled, workspaceID
     }
 
     init(
         id: String = UUID().uuidString,
-        projectID: String,
+        projectID: String? = nil,
         name: String,
         command: String,
         workingDirectory: String,
         sourceIdentity: String? = nil,
+        sourceProjectID: String? = nil,
         isEnabled: Bool = true,
         workspaceID: String = Workspace.defaultWorkspace.id
     ) {
@@ -192,18 +194,20 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
         self.command = command
         self.workingDirectory = workingDirectory
         self.sourceIdentity = sourceIdentity
+        self.sourceProjectID = sourceProjectID
         self.isEnabled = isEnabled
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
-        projectID = try values.decode(String.self, forKey: .projectID)
+        projectID = try values.decodeIfPresent(String.self, forKey: .projectID)
         workspaceID = try values.decodeIfPresent(String.self, forKey: .workspaceID) ?? Workspace.defaultWorkspace.id
         name = try values.decode(String.self, forKey: .name)
         command = try values.decode(String.self, forKey: .command)
         workingDirectory = try values.decode(String.self, forKey: .workingDirectory)
         sourceIdentity = try values.decodeIfPresent(String.self, forKey: .sourceIdentity)
+        sourceProjectID = try values.decodeIfPresent(String.self, forKey: .sourceProjectID)
         isEnabled = try values.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
     }
 }
@@ -574,18 +578,17 @@ struct ProjectRunSuggestionScanner: Sendable {
 }
 
 struct ProjectRecordDocument: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 6
+    static let currentSchemaVersion = 7
 
     let schemaVersion: Int
     var records: [ProjectRecord]
     var ignoredProjects: [IgnoredProject]
     var runConfigurations: [ProjectRunConfiguration]
-    var trustedProjectRoots: [String]
     var workspaces: [Workspace]
     var selectedWorkspaceID: String
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, records, ignoredProjects, runConfigurations, trustedProjectRoots
+        case schemaVersion, records, ignoredProjects, runConfigurations
         case workspaces, selectedWorkspaceID
     }
 
@@ -593,7 +596,6 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         records: [ProjectRecord] = [],
         ignoredProjects: [IgnoredProject] = [],
         runConfigurations: [ProjectRunConfiguration] = [],
-        trustedProjectRoots: [String] = [],
         workspaces: [Workspace] = [Workspace.defaultWorkspace],
         selectedWorkspaceID: String = Workspace.defaultWorkspace.id
     ) {
@@ -601,7 +603,6 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         self.records = records
         self.ignoredProjects = ignoredProjects
         self.runConfigurations = runConfigurations
-        self.trustedProjectRoots = trustedProjectRoots
         self.workspaces = workspaces
         self.selectedWorkspaceID = selectedWorkspaceID
     }
@@ -643,20 +644,29 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         runConfigurations = storedSchemaVersion == 1
             ? []
             : try values.decode([ProjectRunConfiguration].self, forKey: .runConfigurations)
-        trustedProjectRoots = storedSchemaVersion < 3
-            ? []
-            : try values.decode([String].self, forKey: .trustedProjectRoots)
         if storedSchemaVersion < 5 {
             let projectIDs = Dictionary(uniqueKeysWithValues: records.map { ($0.path, $0.id) })
             runConfigurations = runConfigurations.map { configuration in
                 ProjectRunConfiguration(
                     id: configuration.id,
-                    projectID: projectIDs[configuration.projectID] ?? configuration.projectID,
+                    projectID: configuration.projectID.flatMap { projectIDs[$0] } ?? configuration.projectID,
                     name: configuration.name,
                     command: configuration.command,
                     workingDirectory: configuration.workingDirectory,
                     sourceIdentity: configuration.sourceIdentity,
                     isEnabled: configuration.isEnabled
+                )
+            }
+        }
+        if storedSchemaVersion < 7 {
+            runConfigurations = runConfigurations.map { configuration in
+                ProjectRunConfiguration(
+                    id: configuration.id, projectID: configuration.projectID,
+                    name: configuration.name, command: configuration.command,
+                    workingDirectory: configuration.workingDirectory,
+                    sourceIdentity: configuration.sourceIdentity,
+                    sourceProjectID: configuration.sourceIdentity == nil ? nil : configuration.projectID,
+                    isEnabled: configuration.isEnabled, workspaceID: configuration.workspaceID
                 )
             }
         }
@@ -676,7 +686,7 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
             }
             let projectWorkspaces = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0.workspaceID) })
             guard runConfigurations.allSatisfy({ configuration in
-                projectWorkspaces[configuration.projectID].map { $0 == configuration.workspaceID } ?? true
+                configuration.projectID.flatMap { projectWorkspaces[$0] }.map { $0 == configuration.workspaceID } ?? true
             }), Set(runConfigurations.map(\.id)).count == runConfigurations.count,
                 Set(ignoredProjects.map(\.id)).count == ignoredProjects.count else {
                 throw ProjectRecordStoreError.corrupt
@@ -738,9 +748,7 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         let ignoredPaths = Set(ignoredProjects.filter { projectIDs.contains($0.id) }.map(\.path))
         records.removeAll { projectIDs.contains($0.id) }
         ignoredProjects.removeAll { projectIDs.contains($0.id) }
-        runConfigurations.removeAll { projectIDs.contains($0.projectID) }
-        let removedPaths = Set(projects.map(\.path)).subtracting(records.map(\.path))
-        trustedProjectRoots.removeAll { removedPaths.contains($0) }
+        runConfigurations.removeAll { $0.projectID.map(projectIDs.contains) == true }
         for project in projects where !ignoredProjects.contains(where: { $0.path == project.path && $0.workspaceID == project.workspaceID }) {
             ignoredProjects.append(IgnoredProject(
                 path: project.path,
@@ -784,8 +792,8 @@ enum ProjectRunConfigurationError: LocalizedError {
     case configurationNotFound
     case nameRequired
     case commandRequired
-    case workingDirectoryMustBeRelative
-    case workingDirectoryOutsideProject
+    case relativeDirectoryNeedsProject
+    case workingDirectoryInaccessible
     case workingDirectoryMissing
     case workingDirectoryNotDirectory
 
@@ -795,8 +803,8 @@ enum ProjectRunConfigurationError: LocalizedError {
         case .configurationNotFound: "运行配置不存在"
         case .nameRequired: "名称不能为空"
         case .commandRequired: "命令不能为空"
-        case .workingDirectoryMustBeRelative: "工作目录必须使用 Project Root 相对路径"
-        case .workingDirectoryOutsideProject: "工作目录不能离开 Project Root"
+        case .relativeDirectoryNeedsProject: "项目相对工作目录需要关联项目"
+        case .workingDirectoryInaccessible: "工作目录不可访问或路径无效"
         case .workingDirectoryMissing: "工作目录不存在"
         case .workingDirectoryNotDirectory: "工作目录不是目录"
         }
@@ -1199,7 +1207,7 @@ final class ProjectsViewModel: ObservableObject {
         document.runConfigurations
             .filter { (projectID == nil || $0.projectID == projectID) && (workspaceID == nil || $0.workspaceID == workspaceID) }
             .sorted { lhs, rhs in
-                let projectOrder = lhs.projectID.localizedStandardCompare(rhs.projectID)
+                let projectOrder = (lhs.projectID ?? "").localizedStandardCompare(rhs.projectID ?? "")
                 if projectOrder != .orderedSame { return projectOrder == .orderedAscending }
                 return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
             }
@@ -1207,8 +1215,9 @@ final class ProjectsViewModel: ObservableObject {
 
     func runSuggestions(projectID: String? = nil, workspaceID: String? = nil) -> [ProjectRunSuggestion] {
         let savedSources: Set<String> = Set(document.runConfigurations.compactMap { configuration in
-            guard projectID == nil || configuration.projectID == projectID else { return nil }
-            return configuration.sourceIdentity.map { "\(configuration.projectID):\($0)" }
+            guard projectID == nil || configuration.sourceProjectID == projectID else { return nil }
+            guard let sourceProjectID = configuration.sourceProjectID else { return nil }
+            return configuration.sourceIdentity.map { "\(sourceProjectID):\($0)" }
         })
         let values = (projectID.map { suggestionStore[$0] ?? [] } ?? suggestionStore.values.flatMap { $0 })
             .filter { !savedSources.contains($0.id) }
@@ -1220,27 +1229,14 @@ final class ProjectsViewModel: ObservableObject {
 
     func isSuggestionSourceAvailable(_ configuration: ProjectRunConfiguration) -> Bool {
         guard let sourceIdentity = configuration.sourceIdentity else { return true }
-        return suggestionStore[configuration.projectID]?.contains { $0.sourceIdentity == sourceIdentity } == true
-    }
-
-    func isProjectRunTrusted(_ projectRoot: String) -> Bool {
-        document.trustedProjectRoots.contains(projectRoot)
-    }
-
-    @discardableResult
-    func trustProjectRunRoot(_ projectRoot: String) -> Bool {
-        guard !mutationsArePaused else { return false }
-        guard !isProjectRunTrusted(projectRoot) else { return true }
-        return applyDocumentChange {
-            $0.trustedProjectRoots.append(projectRoot)
-            $0.trustedProjectRoots.sort()
-        }
+        guard let projectID = configuration.sourceProjectID else { return false }
+        return suggestionStore[projectID]?.contains { $0.sourceIdentity == sourceIdentity } == true
     }
 
     @discardableResult
     func adoptSuggestion(_ suggestion: ProjectRunSuggestion) -> ProjectRunConfiguration? {
         guard !document.runConfigurations.contains(where: {
-            $0.projectID == suggestion.projectID && $0.sourceIdentity == suggestion.sourceIdentity
+            $0.sourceProjectID == suggestion.projectID && $0.sourceIdentity == suggestion.sourceIdentity
         }) else { return nil }
         return createRunConfiguration(
             projectID: suggestion.projectID,
@@ -1253,14 +1249,15 @@ final class ProjectsViewModel: ObservableObject {
 
     @discardableResult
     func createRunConfiguration(
-        projectID: String,
+        projectID: String? = nil,
         name: String,
         command: String,
         workingDirectory: String,
-        sourceIdentity: String? = nil
+        sourceIdentity: String? = nil,
+        sourceProjectID: String? = nil
     ) -> ProjectRunConfiguration? {
         guard !mutationsArePaused,
-              workspaceRecords.contains(where: { $0.id == projectID }) else { return nil }
+              (projectID == nil || workspaceRecords.contains(where: { $0.id == projectID })) else { return nil }
         do {
             let input = try normalizedRunConfigurationInput(
                 projectID: projectID,
@@ -1275,6 +1272,7 @@ final class ProjectsViewModel: ObservableObject {
                 command: input.command,
                 workingDirectory: input.workingDirectory,
                 sourceIdentity: sourceIdentity?.isEmpty == false ? sourceIdentity : nil,
+                sourceProjectID: sourceIdentity?.isEmpty == false ? (sourceProjectID ?? projectID) : nil,
                 workspaceID: document.selectedWorkspaceID
             )
             guard applyDocumentChange({ $0.runConfigurations.append(configuration) }) else { return nil }
@@ -1300,20 +1298,30 @@ final class ProjectsViewModel: ObservableObject {
                 throw ProjectRunConfigurationError.configurationNotFound
             }
             let existing = document.runConfigurations[index]
+            var directory = workingDirectory
+            if let projectID = existing.projectID, configuration.projectID == nil,
+               directory == existing.workingDirectory,
+               !NSString(string: directory).isAbsolutePath,
+               let project = document.records.first(where: { $0.id == projectID }) {
+                directory = try ProjectRunWorkingDirectory.location(
+                    projectRoot: project.path, workingDirectory: directory
+                ).path
+            }
             let input = try normalizedRunConfigurationInput(
-                projectID: existing.projectID,
+                projectID: configuration.projectID,
                 name: name,
                 command: command,
-                workingDirectory: workingDirectory,
-                existingWorkingDirectory: existing.workingDirectory
+                workingDirectory: directory,
+                workspaceID: existing.workspaceID
             )
             let updated = ProjectRunConfiguration(
                 id: existing.id,
-                projectID: existing.projectID,
+                projectID: configuration.projectID,
                 name: input.name,
                 command: rememberCommand ? input.command : existing.command,
                 workingDirectory: input.workingDirectory,
                 sourceIdentity: existing.sourceIdentity,
+                sourceProjectID: existing.sourceProjectID,
                 isEnabled: existing.isEnabled,
                 workspaceID: existing.workspaceID
             )
@@ -1609,34 +1617,28 @@ final class ProjectsViewModel: ObservableObject {
     }
 
     private func normalizedRunConfigurationInput(
-        projectID: String,
+        projectID: String?,
         name: String,
         command: String,
         workingDirectory: String,
-        existingWorkingDirectory: String? = nil
+        workspaceID: String? = nil
     ) throws -> (name: String, command: String, workingDirectory: String) {
-        guard let project = document.records.first(where: { $0.id == projectID }) else {
-            throw ProjectRunConfigurationError.projectNotFound
+        if let projectID {
+            guard document.records.contains(where: {
+                $0.id == projectID && $0.workspaceID == (workspaceID ?? document.selectedWorkspaceID)
+            }) else { throw ProjectRunConfigurationError.projectNotFound }
         }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw ProjectRunConfigurationError.nameRequired }
-        guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !command.contains("\0") else {
             throw ProjectRunConfigurationError.commandRequired
         }
-        let relativePath = try ProjectRunWorkingDirectory.normalize(relativePath: workingDirectory)
-        var projectRootIsDirectory: ObjCBool = false
-        let projectRootIsAvailable = FileManager.default.fileExists(
-            atPath: project.path,
-            isDirectory: &projectRootIsDirectory
-        ) && projectRootIsDirectory.boolValue
-        if relativePath == existingWorkingDirectory, !projectRootIsAvailable {
-            return (name, command, relativePath)
+        let path = try ProjectRunWorkingDirectory.normalize(path: workingDirectory)
+        guard path.isEmpty || NSString(string: path).isAbsolutePath || projectID != nil else {
+            throw ProjectRunConfigurationError.relativeDirectoryNeedsProject
         }
-        let directory = try ProjectRunWorkingDirectory.resolve(
-            projectRoot: project.path,
-            relativePath: relativePath
-        )
-        return (name, command, directory.relativePath)
+        return (name, command, path)
     }
 
     private func applyDocumentChange(

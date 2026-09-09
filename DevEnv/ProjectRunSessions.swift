@@ -72,14 +72,14 @@ struct ProjectRunExecution: Identifiable, Equatable, Sendable {
     let id: UUID
     let configurationID: String
     let command: String
-    let projectRoot: String
+    let projectRoot: String?
     let workingDirectory: String?
 
     init(
         id: UUID = UUID(),
         configurationID: String,
         command: String,
-        projectRoot: String,
+        projectRoot: String?,
         workingDirectory: String?
     ) {
         self.id = id
@@ -99,14 +99,14 @@ enum ProjectRunSessionSummaryCategory: Equatable, Sendable {
 
 struct ProjectRunFrozenStartRequest: Equatable, Sendable {
     let configuration: ProjectRunConfiguration
-    let projectRoot: String
+    let projectRoot: String?
     let command: String
     let workingDirectory: String
     let commandWasDraft: Bool
 
     init(
         configuration: ProjectRunConfiguration,
-        projectRoot: String,
+        projectRoot: String?,
         command: String,
         workingDirectory: String,
         commandWasDraft: Bool = false
@@ -123,17 +123,11 @@ struct ProjectRunBatchIntent: Equatable, Sendable {
     let startRequests: [ProjectRunFrozenStartRequest]
 }
 
-struct ProjectRunBatchTrustReview: Equatable, Sendable {
-    let intent: ProjectRunBatchIntent
-    let projectRootsRequiringTrust: [String]
-}
-
 struct ProjectRunBatchStopIntent: Equatable, Sendable {
     let executionIDs: [ProjectRunExecution.ID]
 }
 
 enum ProjectRunActionResult: Equatable, Sendable {
-    case needsTrust(ProjectRunFrozenStartRequest)
     case started
     case rejected(String)
 }
@@ -835,75 +829,63 @@ final class ProjectRunSession: ObservableObject, Identifiable {
 }
 
 struct ProjectRunWorkingDirectory {
-    static func normalize(relativePath: String) throws -> String {
-        let trimmedPath = relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let relativePath = trimmedPath.isEmpty ? "." : trimmedPath
-        guard !NSString(string: relativePath).isAbsolutePath else {
-            throw ProjectRunConfigurationError.workingDirectoryMustBeRelative
-        }
-        guard !relativePath.split(separator: "/", omittingEmptySubsequences: false).contains("..") else {
-            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
-        }
-        return relativePath
+    static func normalize(path: String) throws -> String {
+        let path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.contains("\0") else { throw ProjectRunConfigurationError.workingDirectoryInaccessible }
+        return path
     }
 
-    static func resolve(projectRoot: String, relativePath: String) throws -> (relativePath: String, path: String) {
-        let storedRoot = URL(fileURLWithPath: projectRoot, isDirectory: true).standardizedFileURL
-        let root = storedRoot.resolvingSymlinksInPath().standardizedFileURL
-        guard root.path == storedRoot.path else {
-            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
+    static func location(projectRoot: String?, workingDirectory: String) throws -> URL {
+        let path = try normalize(path: workingDirectory)
+        let unresolved: URL
+        if path.isEmpty {
+            unresolved = projectRoot.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? FileManager.default.homeDirectoryForCurrentUser
+        } else if NSString(string: path).isAbsolutePath {
+            unresolved = URL(fileURLWithPath: path, isDirectory: true)
+        } else {
+            guard let projectRoot else { throw ProjectRunConfigurationError.relativeDirectoryNeedsProject }
+            unresolved = URL(fileURLWithPath: projectRoot, isDirectory: true).appendingPathComponent(path, isDirectory: true)
         }
-        let relativePath = try normalize(relativePath: relativePath)
-        let unresolved = root.appendingPathComponent(relativePath, isDirectory: true).standardizedFileURL
-        guard unresolved.path == root.path || unresolved.path.hasPrefix(root.path + "/") else {
-            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
-        }
-        let directory = unresolved.resolvingSymlinksInPath().standardizedFileURL
-        guard directory.path == root.path || directory.path.hasPrefix(root.path + "/") else {
-            throw ProjectRunConfigurationError.workingDirectoryOutsideProject
-        }
+        return unresolved.standardizedFileURL
+    }
+
+    static func resolve(projectRoot: String?, workingDirectory: String) throws -> URL {
+        let directory = try location(projectRoot: projectRoot, workingDirectory: workingDirectory)
+            .resolvingSymlinksInPath().standardizedFileURL
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) else {
             throw ProjectRunConfigurationError.workingDirectoryMissing
         }
-        guard isDirectory.boolValue else {
-            throw ProjectRunConfigurationError.workingDirectoryNotDirectory
+        guard isDirectory.boolValue else { throw ProjectRunConfigurationError.workingDirectoryNotDirectory }
+        guard FileManager.default.isReadableFile(atPath: directory.path), access(directory.path, X_OK) == 0 else {
+            throw ProjectRunConfigurationError.workingDirectoryInaccessible
         }
-        return (
-            directory.path == root.path ? "." : String(directory.path.dropFirst(root.path.count + 1)),
-            directory.path
-        )
+        return directory
     }
 }
 
 @MainActor
 final class ProjectRunCoordinator: ObservableObject {
     @Published private(set) var sessions: [String: ProjectRunSession] = [:]
-    @Published private(set) var pendingBatchTrustReview: ProjectRunBatchTrustReview?
     @Published private(set) var pendingBatchStopIntent: ProjectRunBatchStopIntent?
 
     private let projectsModel: ProjectsViewModel
     private let makeEngine: () -> any ProjectRunProcessEngine
     private let shellProvider: any ProjectRunShellProviding
     private let scheduler: any ProjectRunScheduling
-    private let isProjectRunTrusted: (String) -> Bool
-    private let trustProjectRunRoot: (String) -> Bool
     private var commandDrafts: [String: String] = [:]
 
     init(
         projectsModel: ProjectsViewModel,
         makeEngine: @escaping () -> any ProjectRunProcessEngine,
         shellProvider: any ProjectRunShellProviding,
-        scheduler: any ProjectRunScheduling,
-        isProjectRunTrusted: ((String) -> Bool)? = nil,
-        trustProjectRunRoot: ((String) -> Bool)? = nil
+        scheduler: any ProjectRunScheduling
     ) {
         self.projectsModel = projectsModel
         self.makeEngine = makeEngine
         self.shellProvider = shellProvider
         self.scheduler = scheduler
-        self.isProjectRunTrusted = isProjectRunTrusted ?? projectsModel.isProjectRunTrusted
-        self.trustProjectRunRoot = trustProjectRunRoot ?? projectsModel.trustProjectRunRoot
     }
 
     convenience init(projectsModel: ProjectsViewModel) {
@@ -948,18 +930,20 @@ final class ProjectRunCoordinator: ObservableObject {
 
     @discardableResult
     func createRunConfiguration(
-        projectID: String,
+        projectID: String? = nil,
         name: String,
         command: String,
         workingDirectory: String,
-        sourceIdentity: String? = nil
+        sourceIdentity: String? = nil,
+        sourceProjectID: String? = nil
     ) -> ProjectRunConfiguration? {
         projectsModel.createRunConfiguration(
             projectID: projectID,
             name: name,
             command: command,
             workingDirectory: workingDirectory,
-            sourceIdentity: sourceIdentity
+            sourceIdentity: sourceIdentity,
+            sourceProjectID: sourceProjectID
         )
     }
 
@@ -972,7 +956,7 @@ final class ProjectRunCoordinator: ObservableObject {
     ) -> Bool {
         guard let remembered = projectsModel.runConfigurations().first(where: { $0.id == configuration.id }),
               projectsModel.updateRunConfiguration(
-                  remembered,
+                  configuration,
                   name: name,
                   command: command,
                   workingDirectory: workingDirectory,
@@ -1093,10 +1077,12 @@ final class ProjectRunCoordinator: ObservableObject {
             guard includedConfigurationIDs.insert(scopedConfiguration.id).inserted,
                   let configuration = effectiveConfigurations[scopedConfiguration.id],
                   configuration.isEnabled,
-                  sessions[configuration.id]?.activeExecution == nil,
-                  let project = projectsModel.records.first(where: { $0.id == configuration.projectID }),
-                  !project.availability.isUnavailable else {
+                  sessions[configuration.id]?.activeExecution == nil else {
                 return nil
+            }
+            if let projectID = configuration.projectID {
+                guard let project = projectsModel.records.first(where: { $0.id == projectID }),
+                      !project.availability.isUnavailable else { return nil }
             }
             return configuration
         }
@@ -1110,17 +1096,16 @@ final class ProjectRunCoordinator: ObservableObject {
         in scope: [ProjectRunConfiguration]
     ) -> ProjectRunBatchIntent {
         let requests: [ProjectRunFrozenStartRequest] = batchStartCandidates(in: scope).compactMap { configuration in
-            guard let project = projectsModel.records.first(where: { $0.id == configuration.projectID }) else {
-                return nil
-            }
+            let project = projectsModel.records.first { $0.id == configuration.projectID }
             do {
+                try validateProjectContext(configuration, projectRoot: project?.path)
                 let directory = try ProjectRunWorkingDirectory.resolve(
-                    projectRoot: project.path,
-                    relativePath: configuration.workingDirectory
+                    projectRoot: project?.path,
+                    workingDirectory: configuration.workingDirectory
                 )
                 return ProjectRunFrozenStartRequest(
                     configuration: configuration,
-                    projectRoot: project.path,
+                    projectRoot: project?.path,
                     command: configuration.command,
                     workingDirectory: directory.path,
                     commandWasDraft: hasCommandDraft(configurationID: configuration.id)
@@ -1128,7 +1113,7 @@ final class ProjectRunCoordinator: ObservableObject {
             } catch {
                 _ = rejectStartAttempt(
                     configuration: configuration,
-                    projectRoot: project.path,
+                    projectRoot: project?.path,
                     workingDirectory: nil,
                     error: error
                 )
@@ -1140,46 +1125,9 @@ final class ProjectRunCoordinator: ObservableObject {
 
     func submitBatchStart(_ intent: ProjectRunBatchIntent) {
         for request in intent.startRequests {
-            guard let currentConfiguration = projectsModel.runConfigurations().first(where: {
-                $0.id == request.configuration.id
-            }) else {
-                _ = rejectStartRequest(request, message: "运行配置已删除")
-                continue
-            }
-            guard currentConfiguration.isEnabled else {
-                _ = rejectStartRequest(request, message: "运行配置已禁用")
-                continue
-            }
-            guard currentConfiguration.projectID == request.configuration.projectID else {
-                _ = rejectStartRequest(request, message: "运行配置所属项目已变化，需要重新确认")
-                continue
-            }
-            guard let project = projectsModel.records.first(where: {
-                $0.id == currentConfiguration.projectID
-            }) else {
-                _ = rejectStartRequest(request, message: "Project Root 已删除")
-                continue
-            }
-            guard project.path == request.projectRoot else {
-                _ = rejectStartRequest(request, message: "Project Root 已变化，需要重新确认")
-                continue
-            }
-            switch project.availability {
-            case .available:
-                break
-            case .unknown:
-                _ = rejectStartRequest(request, message: "正在确认项目是否可用")
-                continue
-            case let .unavailable(reason):
-                _ = rejectStartRequest(request, message: "项目不可用，不能执行：\(reason)")
-                continue
-            }
-            guard sessions[request.configuration.id]?.activeExecution == nil else {
-                _ = rejectStartRequest(request, message: "该运行配置已有活动会话")
-                continue
-            }
-            guard isProjectRunTrusted(request.projectRoot) else {
-                _ = rejectStartRequest(request, message: "Project Root 尚未信任")
+            if let project = projectsModel.records.first(where: { $0.id == request.configuration.projectID }),
+               let message = availabilityMessage(project) {
+                _ = rejectStartRequest(request, message: message)
                 continue
             }
             _ = launch(request)
@@ -1191,31 +1139,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func requestBatchStart(_ intent: ProjectRunBatchIntent) {
-        guard !intent.startRequests.isEmpty else { return }
-        let projectRootsRequiringTrust = Set(intent.startRequests.map(\.projectRoot).filter {
-            !isProjectRunTrusted($0)
-        }).sorted()
-        guard !projectRootsRequiringTrust.isEmpty else {
-            submitBatchStart(intent)
-            return
-        }
-        pendingBatchTrustReview = ProjectRunBatchTrustReview(
-            intent: intent,
-            projectRootsRequiringTrust: projectRootsRequiringTrust
-        )
-    }
-
-    func cancelBatchTrustReview() {
-        pendingBatchTrustReview = nil
-    }
-
-    func confirmBatchTrustAndStart() {
-        guard let review = pendingBatchTrustReview else { return }
-        pendingBatchTrustReview = nil
-        for projectRoot in review.projectRootsRequiringTrust where !isProjectRunTrusted(projectRoot) {
-            _ = trustProjectRunRoot(projectRoot)
-        }
-        submitBatchStart(review.intent)
+        submitBatchStart(intent)
     }
 
     func activeConfigurationsFirst(
@@ -1225,36 +1149,23 @@ final class ProjectRunCoordinator: ObservableObject {
             + configurations.filter { sessions[$0.id]?.state.isLive != true }
     }
 
-    func run(_ configuration: ProjectRunConfiguration, project: ProjectRecord) -> ProjectRunActionResult {
-        switch project.availability {
-        case .available:
-            run(configuration, projectRoot: project.path)
-        case .unknown:
-            rejectStartAttempt(
-                configuration: configuration,
-                projectRoot: project.path,
-                workingDirectory: nil,
-                message: "正在确认项目是否可用"
-            )
-        case let .unavailable(reason):
-            rejectStartAttempt(
-                configuration: configuration,
-                projectRoot: project.path,
-                workingDirectory: nil,
-                message: "项目不可用，不能执行：\(reason)"
-            )
+    func run(_ configuration: ProjectRunConfiguration, project: ProjectRecord? = nil) -> ProjectRunActionResult {
+        if let project, let message = availabilityMessage(project) {
+            return rejectStartAttempt(configuration: configuration, projectRoot: project.path, workingDirectory: nil, message: message)
         }
+        return run(configuration, projectRoot: project?.path ?? projectsModel.records.first { $0.id == configuration.projectID }?.path)
     }
 
-    func run(_ configuration: ProjectRunConfiguration, projectRoot: String) -> ProjectRunActionResult {
+    func run(_ configuration: ProjectRunConfiguration, projectRoot: String?) -> ProjectRunActionResult {
         guard isRunConfigurationEnabled(configuration) else { return .rejected("运行配置已禁用") }
         guard sessions[configuration.id]?.state.isLive != true else {
             return .rejected("该运行配置已有活动会话")
         }
         do {
+            try validateProjectContext(configuration, projectRoot: projectRoot)
             let directory = try ProjectRunWorkingDirectory.resolve(
                 projectRoot: projectRoot,
-                relativePath: configuration.workingDirectory
+                workingDirectory: configuration.workingDirectory
             )
             let request = ProjectRunFrozenStartRequest(
                 configuration: configuration,
@@ -1263,7 +1174,6 @@ final class ProjectRunCoordinator: ObservableObject {
                 workingDirectory: directory.path,
                 commandWasDraft: hasCommandDraft(configurationID: configuration.id)
             )
-            guard projectsModel.isProjectRunTrusted(projectRoot) else { return .needsTrust(request) }
             return launch(request)
         } catch {
             return rejectStartAttempt(
@@ -1273,14 +1183,6 @@ final class ProjectRunCoordinator: ObservableObject {
                 error: error
             )
         }
-    }
-
-    func confirmTrustAndRun(_ request: ProjectRunFrozenStartRequest) -> ProjectRunActionResult {
-        guard isRunConfigurationEnabled(request.configuration) else { return .rejected("运行配置已禁用") }
-        guard projectsModel.trustProjectRunRoot(request.projectRoot) else {
-            return .rejected(projectsModel.operationError ?? "Project Trust 保存失败")
-        }
-        return launch(request)
     }
 
     func stop(executionID: ProjectRunExecution.ID) {
@@ -1305,46 +1207,23 @@ final class ProjectRunCoordinator: ObservableObject {
         beginStopping(session, restarting: false)
     }
 
-    func restart(_ configuration: ProjectRunConfiguration, project: ProjectRecord) {
-        switch project.availability {
-        case .available:
-            restart(configuration, projectRoot: project.path)
-        case .unknown:
-            failRestartAttempt(
-                configuration: configuration,
-                projectRoot: project.path,
-                workingDirectory: nil,
-                message: "正在确认项目是否可用"
-            )
-        case let .unavailable(reason):
-            failRestartAttempt(
-                configuration: configuration,
-                projectRoot: project.path,
-                workingDirectory: nil,
-                message: "项目不可用，不能执行：\(reason)"
-            )
+    func restart(_ configuration: ProjectRunConfiguration, project: ProjectRecord? = nil) {
+        if let project, let message = availabilityMessage(project) {
+            failRestartAttempt(configuration: configuration, projectRoot: project.path, workingDirectory: nil, message: message)
+            return
         }
+        restart(configuration, projectRoot: project?.path ?? projectsModel.records.first { $0.id == configuration.projectID }?.path)
     }
 
-    func restart(_ configuration: ProjectRunConfiguration, projectRoot: String) {
+    func restart(_ configuration: ProjectRunConfiguration, projectRoot: String?) {
         guard let session = sessions[configuration.id], session.state.canRestart else { return }
         do {
+            guard isRunConfigurationEnabled(configuration) else { throw ProjectRunConfigurationError.configurationNotFound }
+            try validateProjectContext(configuration, projectRoot: projectRoot)
             let directory = try ProjectRunWorkingDirectory.resolve(
                 projectRoot: projectRoot,
-                relativePath: configuration.workingDirectory
+                workingDirectory: configuration.workingDirectory
             )
-            guard projectsModel.isProjectRunTrusted(projectRoot) else {
-                failRestart(
-                    session,
-                    message: "Project Root 尚未信任",
-                    failureExecution: makeExecution(
-                        configuration: configuration,
-                        projectRoot: projectRoot,
-                        workingDirectory: directory.path
-                    )
-                )
-                return
-            }
             session.pendingRestart = ProjectRunFrozenStartRequest(
                 configuration: configuration,
                 projectRoot: projectRoot,
@@ -1446,7 +1325,7 @@ final class ProjectRunCoordinator: ObservableObject {
 
     private func failRestartAttempt(
         configuration: ProjectRunConfiguration,
-        projectRoot: String,
+        projectRoot: String?,
         workingDirectory: String?,
         message: String
     ) {
@@ -1505,7 +1384,7 @@ final class ProjectRunCoordinator: ObservableObject {
     ) -> ProjectRemovalSummary? {
         let configurationIDs = Set(
             projectsModel.runConfigurations()
-                .filter { projectIDs.contains($0.projectID) }
+                .filter { $0.projectID.map(projectIDs.contains) == true }
                 .map(\.id)
         )
         guard let summary = projectsModel.remove(projectIDs: projectIDs, afterPersist: {
@@ -1556,10 +1435,41 @@ final class ProjectRunCoordinator: ObservableObject {
         sessions[configurationID]?.engine.clearTerminal()
     }
 
+    private func availabilityMessage(_ project: ProjectRecord) -> String? {
+        switch project.availability {
+        case .available: nil
+        case .unknown: "正在确认项目是否可用"
+        case let .unavailable(reason): "项目不可用，不能执行：\(reason)"
+        }
+    }
+
+    private func validateProjectContext(_ configuration: ProjectRunConfiguration, projectRoot: String?) throws {
+        guard let current = projectsModel.runConfigurations().first(where: { $0.id == configuration.id }),
+              current.workspaceID == configuration.workspaceID,
+              current.projectID == configuration.projectID else {
+            throw ProjectRunConfigurationError.configurationNotFound
+        }
+        guard let projectID = current.projectID else {
+            guard projectRoot == nil else { throw ProjectRunConfigurationError.projectNotFound }
+            return
+        }
+        guard let project = projectsModel.records.first(where: {
+            $0.id == projectID && $0.workspaceID == current.workspaceID
+        }), project.path == projectRoot else {
+            throw ProjectRunConfigurationError.projectNotFound
+        }
+    }
+
     private func launch(_ request: ProjectRunFrozenStartRequest) -> ProjectRunActionResult {
-        guard isRunConfigurationEnabled(request.configuration) else { return .rejected("运行配置已禁用") }
+        do { try validateProjectContext(request.configuration, projectRoot: request.projectRoot) }
+        catch { return rejectStartRequest(request, message: error.localizedDescription) }
+        guard !request.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !request.command.contains("\0") else {
+            return rejectStartRequest(request, message: ProjectRunConfigurationError.commandRequired.localizedDescription)
+        }
+        guard isRunConfigurationEnabled(request.configuration) else { return rejectStartRequest(request, message: "运行配置已禁用") }
         guard sessions[request.configuration.id]?.state.isLive != true else {
-            return .rejected("该运行配置已有活动会话")
+            return rejectStartRequest(request, message: "该运行配置已有活动会话")
         }
         let session = sessions[request.configuration.id] ?? makeSession(for: request.configuration.id)
         session.currentExecution = makeExecution(
@@ -1573,7 +1483,7 @@ final class ProjectRunCoordinator: ObservableObject {
         do {
             let directory = try ProjectRunWorkingDirectory.resolve(
                 projectRoot: request.projectRoot,
-                relativePath: request.configuration.workingDirectory
+                workingDirectory: request.configuration.workingDirectory
             )
             guard directory.path == request.workingDirectory else {
                 throw ProjectRunLaunchError.reviewedWorkingDirectoryChanged
@@ -1614,7 +1524,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     private func isRunConfigurationEnabled(_ configuration: ProjectRunConfiguration) -> Bool {
-        projectsModel.runConfigurations().first { $0.id == configuration.id }?.isEnabled ?? configuration.isEnabled
+        projectsModel.runConfigurations().first { $0.id == configuration.id }?.isEnabled ?? false
     }
 
     private func makeSession(for configurationID: String) -> ProjectRunSession {
@@ -1651,7 +1561,7 @@ final class ProjectRunCoordinator: ObservableObject {
 
     private func makeExecution(
         configuration: ProjectRunConfiguration,
-        projectRoot: String,
+        projectRoot: String?,
         workingDirectory: String?,
         command: String? = nil
     ) -> ProjectRunExecution {
@@ -1665,7 +1575,7 @@ final class ProjectRunCoordinator: ObservableObject {
 
     private func rejectStartAttempt(
         configuration: ProjectRunConfiguration,
-        projectRoot: String,
+        projectRoot: String?,
         workingDirectory: String?,
         error: Error
     ) -> ProjectRunActionResult {
@@ -1679,7 +1589,7 @@ final class ProjectRunCoordinator: ObservableObject {
 
     private func rejectStartAttempt(
         configuration: ProjectRunConfiguration,
-        projectRoot: String,
+        projectRoot: String?,
         workingDirectory: String?,
         message: String
     ) -> ProjectRunActionResult {

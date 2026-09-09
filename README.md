@@ -32,11 +32,12 @@ DevEnv 只保存轻量的 Project Record。移除记录不会删除、移动或�
 
 ### 2. 配置运行方式
 
-每个项目可以保存多个 Project Run Configuration，包括：
+每个工作区可以保存多个独立 Run Configuration，包括：
 
 - 名称
 - 启动命令
-- Project Root 相对工作目录
+- 可选的同工作区项目关联
+- 绝对、项目相对或默认工作目录
 
 运行配置可以手动创建，也可以从静态读取到的项目声明中采纳建议。目前支持从以下来源生成 Project Run Suggestion：
 
@@ -47,15 +48,13 @@ DevEnv 只保存轻量的 Project Record。移除记录不会删除、移动或�
 
 建议只是候选配置。DevEnv 不会在扫描阶段自动执行项目工具或命令。
 
-### 3. 首次确认信任
+### 3. 明确启动运行
 
-首次运行某个 Project Root 前，DevEnv 会展示完整命令和解析后的工作目录。用户确认后才会保存该 Project Root 的 Project Trust 并启动会话。
+每次启动必须由用户明确触发，不再要求信任授权；扫描不会自动执行命令。执行时冻结完整命令和实际工作目录，目录不可用则启动失败。修改命令后，只有新命令成功启动才会写回已保存配置。
 
-后续运行可以复用信任记录，但每次启动仍必须由用户明确触发。修改命令后，只有新命令成功启动才会写回已保存配置。
+### 4. 运行配置
 
-### 4. 运行项目
-
-DevEnv 使用当前用户的 Default Login Shell 和 SwiftTerm PTY 创建 Project Run Session，支持：
+DevEnv 使用当前用户的 Default Login Shell 和 SwiftTerm PTY 创建 Run Session，支持：
 
 - 启动、停止和重启单个运行配置
 - 按当前筛选结果批量启动或停止
@@ -117,11 +116,11 @@ Local Service 支持识别 Python、Node.js、Bun、Go、Rust、Java 运行时�
 DevEnv 需要观察本机工具并运行用户选择的项目命令，因此当前不启用 App Sandbox。使用源码版本前，应理解以下边界：
 
 - Environment Scan 和 Project Requirements 分析是只读流程，不会因为扫描结果自动执行项目命令。
-- Project Run 必须由用户明确触发；首次运行会展示完整命令和工作目录并要求确认。
-- Project Trust 只表示允许 DevEnv 在对应 Project Root 中执行已核对的配置，不表示项目安全或环境满足要求。
+- Run Configuration 属于工作区，可选关联同工作区项目；运行必须由用户明确触发，不再要求 Project Trust。
+- 工作目录支持绝对路径、项目相对路径（允许越出项目目录）或留空；留空时使用关联项目目录，否则使用启动时的当前用户目录。实际目录不可用时启动失败，不回退。
 - 项目命令以当前用户权限交给 Default Login Shell 执行，DevEnv 不隐藏或提升命令权限。
 - 停止操作只会向能够由当前 PTY 会话可靠确认归属的进程组发送信号。
-- Project Record、运行配置、信任记录和最近一次 Machine Snapshot 会保存在本机；会话状态、终端输出和退出码只存在于当前 App 进程。
+- Project Record、运行配置和最近一次 Machine Snapshot 会保存在本机；会话状态、终端输出和退出码只存在于当前 App 进程。
 - 退出 App 时会尝试终止仍由 DevEnv 持有的活动会话；关闭窗口不会结束它们。
 - 移除 Project Record 不会删除或修改原项目文件。
 
@@ -163,7 +162,7 @@ open DevEnv.xcodeproj
 - [为何不启用 App Sandbox](docs/adr/0001-run-without-app-sandbox.md)
 - [只读 Environment Scan 与 Machine Snapshot](docs/adr/0002-read-only-environment-scan-snapshot.md)
 - [Project Root 与 Project Component](docs/adr/0008-model-projects-by-root-and-component.md)
-- [可信 Project Run 与 Environment Scan 的边界](docs/adr/0010-separate-trusted-project-runs-from-environment-scans.md)
+- [Project Run 与 Environment Scan 的边界（信任要求已被 ADR-0014 取代）](docs/adr/0010-separate-trusted-project-runs-from-environment-scans.md)
 - [临时冻结的 Project Run Batch Intent](docs/adr/0012-model-batch-runs-as-ephemeral-frozen-intents.md)
 
 ## 参与项目
