@@ -612,7 +612,7 @@ struct ContentView: View {
         case systemInformation
         case settings
 
-        static var primaryPages: [Page] { allCases.filter { $0 != .settings } }
+        static var primaryPages: [Page] { allCases.filter { $0 != .settings && $0 != .runs } }
         var usesProjectRecords: Bool { self == .projects || self == .runs }
 
         var title: String {
@@ -700,6 +700,9 @@ struct ContentView: View {
     @State private var editingRunConfiguration: ProjectRunConfiguration?
     @State private var renamingProject: ProjectRecord?
     @State private var projectNameDraft = ""
+    @State private var isShowingWorkspaceEditor = false
+    @State private var renamingWorkspaceID: String?
+    @State private var workspaceNameDraft = ""
     @State private var runConfigurationProjectID = ""
     @State private var runConfigurationName = ""
     @State private var runConfigurationCommand = ""
@@ -724,6 +727,22 @@ struct ContentView: View {
     var body: some View {
         navigation(model.snapshot)
         .frame(minWidth: 1100, minHeight: 720)
+        .sheet(isPresented: $isShowingWorkspaceEditor) { workspaceEditor }
+        .onChange(of: projectsModel.currentWorkspace.id) { _, _ in
+            selectedProjectIDs.removeAll()
+            isSelectingProjects = false
+            if !projectsModel.workspaceRecords.contains(where: { $0.id == selectedProjectID }) {
+                selectedProjectID = nil
+            }
+            runProjectFilterID = nil
+            runSearchText = ""
+            projectSearchText = ""
+            if !workspaceRunConfigurations.contains(where: { $0.id == selectedRunConfigurationID }) {
+                selectedRunConfigurationID = nil
+            }
+            selectFirstProjectIfNeeded()
+            selectFirstRunConfigurationIfNeeded()
+        }
         .onChange(of: appAppearance, initial: true) { _, appearance in
             appearance.apply()
         }
@@ -765,6 +784,7 @@ struct ContentView: View {
             switch action {
             case .open:
                 if let configurationID = notification.userInfo?["configurationID"] as? String {
+                    selectWorkspaceForRun(configurationID)
                     runProjectFilterID = nil
                     runSearchText = ""
                     selectedRunConfigurationID = configurationID
@@ -1009,12 +1029,12 @@ struct ContentView: View {
 
                 List(selection: pageSelection) {
                     ForEach(Page.primaryPages, id: \.self) { page in
-                        Label(page.title, systemImage: page.systemImage)
+                        Label(page == .projects ? "工作区" : page.title, systemImage: page.systemImage)
                             .font(.system(size: 15, weight: .medium))
                             .imageScale(.large)
                             .padding(.vertical, 8)
                             .contentShape(Rectangle())
-                            .tag(page)
+                            .tag(page == .projects && selectedPage == .runs ? Page.runs : page)
                             .listRowInsets(EdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10))
                     }
                 }
@@ -1151,7 +1171,9 @@ struct ContentView: View {
     @ViewBuilder
     private func populatedPage(_ page: Page, snapshot: MachineSnapshot?) -> some View {
         if page.usesProjectRecords {
-            Group {
+            VStack(spacing: 0) {
+                workspaceNavigation
+                Divider()
                 if page == .projects { projectsPage } else { runsPage }
             }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1305,13 +1327,86 @@ struct ContentView: View {
         }
     }
 
+    private var workspaceNavigation: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Picker("工作区", selection: Binding(
+                    get: { projectsModel.currentWorkspace.id },
+                    set: { _ = projectsModel.selectWorkspace($0) }
+                )) {
+                    ForEach(projectsModel.document.workspaces) { workspace in
+                        Text(workspace.name).tag(workspace.id)
+                    }
+                }
+                .frame(maxWidth: 320)
+                .accessibilityLabel("切换工作区")
+                Button("新建工作区") {
+                    renamingWorkspaceID = nil
+                    workspaceNameDraft = ""
+                    isShowingWorkspaceEditor = true
+                }
+                Button("重命名") {
+                    renamingWorkspaceID = projectsModel.currentWorkspace.id
+                    workspaceNameDraft = projectsModel.currentWorkspace.name
+                    isShowingWorkspaceEditor = true
+                }
+                .accessibilityLabel("重命名当前工作区")
+                Spacer()
+            }
+            .disabled(projectsModel.mutationsArePaused)
+            Picker("工作区页签", selection: Binding(
+                get: { selectedPage == .runs ? Page.runs : Page.projects },
+                set: { requestPage($0) }
+            )) {
+                Text("项目").tag(Page.projects)
+                Text("运行").tag(Page.runs)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 220)
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 16)
+    }
+
+    private var workspaceEditor: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(renamingWorkspaceID == nil ? "新建工作区" : "重命名工作区").font(.headline)
+            TextField("工作区名称", text: $workspaceNameDraft)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("工作区名称")
+            Text("工作区用于组织项目与运行配置，无需选择目录。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let error = projectsModel.operationError {
+                Text(error).foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) { isShowingWorkspaceEditor = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存") {
+                    let saved = if let id = renamingWorkspaceID {
+                        projectsModel.renameWorkspace(id, name: workspaceNameDraft)
+                    } else {
+                        projectsModel.createWorkspace(name: workspaceNameDraft) != nil
+                    }
+                    if saved { isShowingWorkspaceEditor = false }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(workspaceNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || projectsModel.mutationsArePaused)
+            }
+        }
+        .padding(24)
+        .frame(width: 400)
+    }
+
     private var projectsPage: some View {
         VStack(spacing: 14) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("项目")
                         .font(.system(size: 29, weight: .bold))
-                    Text("\(projectsModel.records.count) 个项目  ·  本次新增 \(projectsModel.records.filter(\.isNew).count) 个")
+                    Text("\(projectsModel.workspaceRecords.count) 个项目  ·  本次新增 \(projectsModel.workspaceRecords.filter(\.isNew).count) 个")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -1417,7 +1512,7 @@ struct ContentView: View {
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
             }
 
-            if projectsModel.records.isEmpty && projectsModel.ignoredProjects.isEmpty {
+            if projectsModel.workspaceRecords.isEmpty && projectsModel.ignoredProjects.isEmpty {
                 ContentUnavailableView {
                     Label("尚未添加项目", systemImage: "folder.badge.plus")
                 } description: {
@@ -1455,7 +1550,7 @@ struct ContentView: View {
         .padding(24)
         .background(AppTheme.canvas)
         .onAppear(perform: selectFirstProjectIfNeeded)
-        .onChange(of: projectsModel.records.map(\.id)) { _, _ in
+        .onChange(of: projectsModel.workspaceRecords.map(\.id)) { _, _ in
             selectFirstProjectIfNeeded()
         }
         .onChange(of: selectedProjectID) { _, _ in
@@ -1476,7 +1571,7 @@ struct ContentView: View {
                 Spacer(minLength: 20)
                 Picker("筛选项目", selection: $runProjectFilterID) {
                     Text("全部项目").tag(Optional<String>.none)
-                    ForEach(projectsModel.records) { project in
+                    ForEach(projectsModel.workspaceRecords) { project in
                         Text(project.title).tag(Optional(project.id))
                     }
                 }
@@ -1497,7 +1592,7 @@ struct ContentView: View {
                     Label("新建配置", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(projectsModel.records.isEmpty || projectsModel.mutationsArePaused)
+                .disabled(projectsModel.workspaceRecords.isEmpty || projectsModel.mutationsArePaused)
                 .accessibilityLabel("新建运行配置")
             }
             .padding(.horizontal, 4)
@@ -1508,14 +1603,16 @@ struct ContentView: View {
         .padding(24)
         .background(AppTheme.canvas)
         .onAppear(perform: selectFirstRunConfigurationIfNeeded)
-        .onChange(of: projectsModel.records.map(\.id)) { _, projectIDs in
+        .onChange(of: projectsModel.workspaceRecords.map(\.id)) { _, projectIDs in
             if let runProjectFilterID, !projectIDs.contains(runProjectFilterID) {
                 self.runProjectFilterID = nil
             }
         }
         .onChange(of: runProjectFilterID) { _, _ in
             isRunSuggestionsExpanded = false
-            selectedRunConfigurationID = visibleRunConfigurations.first?.id
+            if !visibleRunConfigurations.contains(where: { $0.id == selectedRunConfigurationID }) {
+                selectedRunConfigurationID = visibleRunConfigurations.first?.id
+            }
         }
         .onChange(of: runSearchText) { _, _ in
             if !visibleRunConfigurations.contains(where: { $0.id == selectedRunConfigurationID }) {
@@ -1557,7 +1654,7 @@ struct ContentView: View {
     private var runsPageContent: some View {
         if let storageError = projectsModel.storageError {
             runStorageErrorView(storageError)
-        } else if projectsModel.records.isEmpty && runCoordinator.runConfigurations().isEmpty {
+        } else if projectsModel.workspaceRecords.isEmpty && workspaceRunConfigurations.isEmpty {
             ContentUnavailableView {
                 Label("尚未添加项目", systemImage: "folder.badge.plus")
             } description: {
@@ -1566,7 +1663,7 @@ struct ContentView: View {
                 Button("前往项目页面") { selectPage(.projects) }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if runCoordinator.runConfigurations(projectID: runProjectFilterID).isEmpty
+        } else if workspaceRunConfigurations.isEmpty
             && selectedRunSuggestions.isEmpty {
             ContentUnavailableView {
                 Label("没有运行配置", systemImage: "play.rectangle")
@@ -1604,12 +1701,16 @@ struct ContentView: View {
     }
 
     private var selectedRunSuggestions: [ProjectRunSuggestion] {
-        runCoordinator.runSuggestions(projectID: runProjectFilterID)
+        runCoordinator.runSuggestions(projectID: runProjectFilterID, workspaceID: projectsModel.currentWorkspace.id)
+    }
+
+    private var workspaceRunConfigurations: [ProjectRunConfiguration] {
+        runCoordinator.runConfigurations(projectID: runProjectFilterID, workspaceID: projectsModel.currentWorkspace.id)
     }
 
     private var visibleRunConfigurations: [ProjectRunConfiguration] {
         let configurations = runCoordinator.activeConfigurationsFirst(
-            runCoordinator.runConfigurations(projectID: runProjectFilterID)
+            workspaceRunConfigurations
         )
         guard !runSearchText.isEmpty else { return configurations }
         return configurations.filter {
@@ -2303,7 +2404,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                     runConfigurationEditorField("项目", systemImage: "folder") {
                         Picker("项目", selection: $runConfigurationProjectID) {
-                            ForEach(projectsModel.records) { project in
+                            ForEach(projectsModel.workspaceRecords) { project in
                                 Text(project.title).tag(project.id)
                             }
                         }
@@ -2421,7 +2522,7 @@ struct ContentView: View {
     }
 
     private func beginCreatingRunConfiguration() {
-        guard let projectID = runProjectFilterID ?? projectsModel.records.first?.id else { return }
+        guard let projectID = runProjectFilterID ?? projectsModel.workspaceRecords.first?.id else { return }
         editingRunConfiguration = nil
         runConfigurationProjectID = projectID
         runConfigurationName = ""
@@ -2773,7 +2874,7 @@ struct ContentView: View {
 
     private var selectedProject: ProjectRecord? {
         guard let selectedProjectID else { return nil }
-        return projectsModel.records.first { $0.id == selectedProjectID }
+        return projectsModel.workspaceRecords.first { $0.id == selectedProjectID }
     }
 
     private var visibleProjectRecordIDs: Set<String> {
@@ -3233,10 +3334,10 @@ struct ContentView: View {
     }
 
     private func selectFirstProjectIfNeeded() {
-        if let selectedProjectID, projectsModel.records.contains(where: { $0.id == selectedProjectID }) {
+        if let selectedProjectID, projectsModel.workspaceRecords.contains(where: { $0.id == selectedProjectID }) {
             return
         }
-        selectedProjectID = projectsModel.records.first?.id
+        selectedProjectID = projectsModel.workspaceRecords.first?.id
     }
 
     private func chooseProjectDirectories(forBatchScan: Bool) {
@@ -3807,8 +3908,16 @@ struct ContentView: View {
     }
 
     private func openOverviewRun(_ run: OverviewRun) {
+        selectWorkspaceForRun(run.configuration.id)
         selectedRunConfigurationID = run.configuration.id
         selectPage(.runs)
+    }
+
+    private func selectWorkspaceForRun(_ configurationID: String) {
+        guard let configuration = runCoordinator.runConfigurations().first(where: { $0.id == configurationID }) else { return }
+        guard projectsModel.selectWorkspace(configuration.workspaceID) else { return }
+        runProjectFilterID = nil
+        runSearchText = ""
     }
 
     @ViewBuilder
@@ -4153,9 +4262,13 @@ struct ContentView: View {
         isShowingNotifications = false
         switch destination {
         case let .run(configurationID):
+            selectWorkspaceForRun(configurationID)
             selectedRunConfigurationID = configurationID
             selectPage(.runs)
         case let .project(projectID, capability):
+            if let project = projectsModel.records.first(where: { $0.id == projectID }) {
+                guard projectsModel.selectWorkspace(project.workspaceID) else { return }
+            }
             selectedProjectID = projectID
             if let capability { expandedProjectRequirementID = capability }
             selectPage(.projects)

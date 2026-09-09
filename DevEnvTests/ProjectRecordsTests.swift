@@ -3,6 +3,153 @@ import XCTest
 
 final class ProjectRecordsTests: XCTestCase {
     @MainActor
+    func testNestedProjectBoundariesAndIgnoredDirectoriesDoNotLeakBetweenWorkspaces() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let child = root.appendingPathComponent("child")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        try Data(#"{"engines":{"node":">=20"}}"#.utf8).write(to: root.appendingPathComponent("package.json"))
+        try Data(#"{"engines":{"node":"18"}}"#.utf8).write(to: child.appendingPathComponent("package.json"))
+        let model = ProjectsViewModel(store: ProjectRecordStore(fileURL: root.appendingPathComponent("records.json")))
+        model.addDirect([root, child])
+        let firstParent = try XCTUnwrap(model.workspaceRecords.first { $0.path == root.path })
+        let childRecord = try XCTUnwrap(model.workspaceRecords.first { $0.path == child.path })
+        model.remove(childRecord)
+        _ = try XCTUnwrap(model.createWorkspace(name: "包含组件"))
+        model.addDirect([root])
+        let secondParent = try XCTUnwrap(model.workspaceRecords.first)
+        for _ in 0 ..< 200 where model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.analyses[firstParent.id]?.components.map(\.relativePath), ["."])
+        XCTAssertEqual(model.analyses[secondParent.id]?.components.map(\.relativePath), [".", "child"])
+    }
+
+    func testVersionFiveMigratesToDefaultWorkspaceAndInvalidOwnershipNeverOverwritesStore() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("records.json")
+        let legacy = Data(#"""
+        {"schemaVersion":5,"records":[{"id":"project","title":"API","path":"/Projects/app","firstDiscoveredAt":"1970-01-01T00:01:40Z","lastDiscoveredAt":"1970-01-01T00:01:40Z","isNew":false}],"ignoredProjects":[{"path":"/Projects/ignored","ignoredAt":"1970-01-01T00:01:40Z"}],"runConfigurations":[{"id":"run","projectID":"project","name":"API","command":"  serve\n","workingDirectory":"api","sourceIdentity":"api/package.json#scripts.dev","isEnabled":false}],"trustedProjectRoots":[]}
+        """#.utf8)
+        try legacy.write(to: file)
+        let store = ProjectRecordStore(fileURL: file)
+        let migrated = try store.load()
+        XCTAssertEqual(migrated.workspaces, [Workspace.defaultWorkspace])
+        XCTAssertEqual(migrated.records.first?.id, "project")
+        XCTAssertEqual(migrated.records.first?.workspaceID, Workspace.defaultWorkspace.id)
+        XCTAssertEqual(migrated.ignoredProjects.first?.workspaceID, Workspace.defaultWorkspace.id)
+        XCTAssertEqual(migrated.runConfigurations.first?.workspaceID, Workspace.defaultWorkspace.id)
+        XCTAssertEqual(migrated.runConfigurations.first?.projectID, "project")
+        XCTAssertEqual(migrated.runConfigurations.first?.command, "  serve\n")
+        XCTAssertEqual(migrated.runConfigurations.first?.workingDirectory, "api")
+        XCTAssertEqual(migrated.runConfigurations.first?.sourceIdentity, "api/package.json#scripts.dev")
+        XCTAssertEqual(migrated.runConfigurations.first?.isEnabled, false)
+        XCTAssertEqual(try store.load(), migrated)
+        let valid = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        for field in ["records", "ignoredProjects", "runConfigurations"] {
+            for workspaceID: String? in [nil, "unknown"] {
+                var object = valid
+                var rows = try XCTUnwrap(object[field] as? [[String: Any]])
+                rows[0]["workspaceID"] = workspaceID
+                object[field] = rows
+                let corrupt = try JSONSerialization.data(withJSONObject: object)
+                try corrupt.write(to: file)
+                XCTAssertThrowsError(try store.load())
+                XCTAssertEqual(try Data(contentsOf: file), corrupt)
+            }
+        }
+        var crossWorkspace = valid
+        crossWorkspace["workspaces"] = [["id": "default", "name": "默认工作区"], ["id": "other", "name": "其他"]]
+        var runs = try XCTUnwrap(crossWorkspace["runConfigurations"] as? [[String: Any]])
+        runs[0]["workspaceID"] = "other"
+        crossWorkspace["runConfigurations"] = runs
+        let corrupt = try JSONSerialization.data(withJSONObject: crossWorkspace)
+        try corrupt.write(to: file)
+        XCTAssertThrowsError(try store.load())
+        XCTAssertEqual(try Data(contentsOf: file), corrupt)
+    }
+
+    @MainActor
+    func testWorkspaceProjectDiscoverySuggestionsAndConfigurationOwnershipStayIsolated() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"packageManager":"npm@10","scripts":{"dev":"serve"}}"#.utf8).write(to: root.appendingPathComponent("package.json"))
+        let store = ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+        let model = ProjectsViewModel(store: store)
+        let firstWorkspace = model.currentWorkspace.id
+        model.addDirect([root])
+        model.addDirect([root])
+        let first = try XCTUnwrap(model.workspaceRecords.first)
+        let sibling = try XCTUnwrap(model.workspaceRecords.first { $0.id != first.id })
+        for _ in 0 ..< 100 where model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        let suggestion = try XCTUnwrap(model.runSuggestions(projectID: first.id).first)
+        let run = try XCTUnwrap(model.adoptSuggestion(suggestion))
+        let secondWorkspace = try XCTUnwrap(model.createWorkspace(name: "第二工作区"))
+        XCTAssertTrue(model.workspaceRecords.isEmpty)
+        XCTAssertTrue(model.runConfigurations(workspaceID: secondWorkspace.id).isEmpty)
+        XCTAssertNil(model.adoptSuggestion(suggestion))
+        XCTAssertNil(model.createRunConfiguration(projectID: first.id, name: "越界", command: "serve", workingDirectory: "."))
+        model.scan([root])
+        // A scan belongs to the workspace that submitted it, even after selection changes.
+        XCTAssertTrue(model.selectWorkspace(firstWorkspace))
+        for _ in 0 ..< 200 where model.isScanning || model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.workspaceRecords.count, 2)
+        model.remove(first)
+        XCTAssertEqual(model.workspaceRecords.map(\.id), [sibling.id])
+        XCTAssertEqual(model.ignoredProjects.count, 1)
+        XCTAssertTrue(model.selectWorkspace(secondWorkspace.id))
+        XCTAssertTrue(model.ignoredProjects.isEmpty)
+        XCTAssertEqual(model.workspaceRecords.count, 1)
+        let second = try XCTUnwrap(model.workspaceRecords.first)
+        XCTAssertNotEqual(second.id, first.id)
+        XCTAssertNotEqual(second.id, sibling.id)
+        model.scan([root])
+        for _ in 0 ..< 200 where model.isScanning || model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.workspaceRecords.map(\.id), [second.id])
+        let secondRun = try XCTUnwrap(model.createRunConfiguration(projectID: second.id, name: "服务", command: "serve", workingDirectory: "."))
+        XCTAssertEqual(secondRun.workspaceID, secondWorkspace.id)
+        XCTAssertEqual(run.workspaceID, firstWorkspace)
+        let reloaded = try store.load()
+        XCTAssertEqual(reloaded.runConfigurations, model.document.runConfigurations)
+        XCTAssertEqual(reloaded.records.map(\.workspaceID), model.document.records.map(\.workspaceID))
+        XCTAssertTrue(model.selectWorkspace(firstWorkspace))
+        model.scan([root])
+        for _ in 0 ..< 200 where model.isScanning || model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.workspaceRecords.map(\.id), [sibling.id])
+    }
+
+    @MainActor
+    func testWorkspacesPersistSelectionNamesAndRejectEmptyNamesWithSaveRollback() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let store = ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+        let model = ProjectsViewModel(store: store)
+        let defaultID = model.currentWorkspace.id
+        XCTAssertNil(model.createWorkspace(name: " \n"))
+        let workspace = try XCTUnwrap(model.createWorkspace(name: "  服务端  "))
+        XCTAssertEqual(model.currentWorkspace.name, "服务端")
+        XCTAssertNotEqual(workspace.id, defaultID)
+        XCTAssertTrue(model.renameWorkspace(workspace.id, name: "API"))
+        XCTAssertFalse(model.renameWorkspace(workspace.id, name: " "))
+        let reloaded = ProjectsViewModel(store: store)
+        XCTAssertEqual(reloaded.currentWorkspace.id, workspace.id)
+        XCTAssertEqual(reloaded.currentWorkspace.name, "API")
+        XCTAssertTrue(model.selectWorkspace(defaultID))
+        let original = try Data(contentsOf: root.appendingPathComponent("records.json"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
+        XCTAssertNil(model.createWorkspace(name: "不能保存"))
+        XCTAssertFalse(model.renameWorkspace(defaultID, name: "不能保存"))
+        XCTAssertFalse(model.selectWorkspace(workspace.id))
+        XCTAssertEqual(model.currentWorkspace.id, defaultID)
+        XCTAssertEqual(model.document.workspaces.count, 2)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("records.json")), original)
+    }
+
+    @MainActor
     func testExplicitSameDirectoryProjectsKeepIndependentPersistentIdentities() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

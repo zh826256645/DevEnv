@@ -915,8 +915,8 @@ final class ProjectRunCoordinator: ObservableObject {
         )
     }
 
-    func runConfigurations(projectID: String? = nil) -> [ProjectRunConfiguration] {
-        projectsModel.runConfigurations(projectID: projectID).map { configuration in
+    func runConfigurations(projectID: String? = nil, workspaceID: String? = nil) -> [ProjectRunConfiguration] {
+        projectsModel.runConfigurations(projectID: projectID, workspaceID: workspaceID).map { configuration in
             guard let command = commandDrafts[configuration.id] else { return configuration }
             var draft = configuration
             draft.command = command
@@ -924,8 +924,8 @@ final class ProjectRunCoordinator: ObservableObject {
         }
     }
 
-    func runSuggestions(projectID: String? = nil) -> [ProjectRunSuggestion] {
-        projectsModel.runSuggestions(projectID: projectID)
+    func runSuggestions(projectID: String? = nil, workspaceID: String? = nil) -> [ProjectRunSuggestion] {
+        projectsModel.runSuggestions(projectID: projectID, workspaceID: workspaceID)
     }
 
     var isRefreshingProjects: Bool {
