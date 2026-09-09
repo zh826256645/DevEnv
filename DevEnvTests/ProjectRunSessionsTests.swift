@@ -7,6 +7,45 @@ import XCTest
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+    func testSameDirectoryRecordRemovalKeepsSiblingExecutionAndConfiguration() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let model = ProjectsViewModel(store: ProjectRecordStore(fileURL: root.appendingPathComponent("records.json")))
+        model.addDirect([root])
+        let first = try XCTUnwrap(model.records.first)
+        model.addDirect([root])
+        let second = try XCTUnwrap(model.records.first { $0.id != first.id })
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: model,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        let firstRun = try XCTUnwrap(coordinator.createRunConfiguration(
+            projectID: first.id, name: "API", command: "sleep 30", workingDirectory: "."
+        ))
+        let secondRun = try XCTUnwrap(coordinator.createRunConfiguration(
+            projectID: second.id, name: "Worker", command: "sleep 60", workingDirectory: "."
+        ))
+        XCTAssertTrue(model.trustProjectRunRoot(first.path))
+        XCTAssertEqual(coordinator.run(firstRun, projectRoot: first.path), .started)
+        XCTAssertEqual(coordinator.run(secondRun, projectRoot: second.path), .started)
+        let execution = try XCTUnwrap(coordinator.session(for: secondRun.id)?.activeExecution)
+        XCTAssertEqual(execution.workingDirectory, second.path)
+        XCTAssertTrue(model.renameProject(second.id, title: "Renamed worker"))
+        XCTAssertEqual(coordinator.runConfigurations(projectID: second.id), [secondRun])
+        XCTAssertNotNil(coordinator.removeProjects(projectIDs: [first.id]))
+        XCTAssertNil(coordinator.session(for: firstRun.id))
+        XCTAssertEqual(coordinator.session(for: secondRun.id)?.activeExecution?.id, execution.id)
+        XCTAssertEqual(coordinator.session(for: secondRun.id)?.state, .running)
+        XCTAssertEqual(coordinator.runConfigurations(), [secondRun])
+        XCTAssertTrue(factory.engines[1].signals.isEmpty)
+        XCTAssertTrue(model.isProjectRunTrusted(second.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+    }
+
     func testRunSessionSummaryClassifiesLifecycleAndExitStates() {
         XCTAssertEqual(ProjectRunSessionState.starting.summaryCategory, .running)
         XCTAssertEqual(ProjectRunSessionState.stopping.summaryCategory, .running)
@@ -68,7 +107,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [first, second])
-        document.addDirect([firstRoot.path, secondRoot.path])
+        document.records = [firstRoot.path, secondRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         let factory = FakeProjectRunEngineFactory()
@@ -138,7 +177,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [configuration])
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         projectsModel.refreshProjects()
@@ -203,7 +242,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [first, second])
-        document.addDirect([firstRoot.path, secondRoot.path])
+        document.records = [firstRoot.path, secondRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         XCTAssertTrue(projectsModel.trustProjectRunRoot(firstRoot.path))
@@ -261,7 +300,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument()
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         let coordinator = ProjectRunCoordinator(
@@ -530,7 +569,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument()
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         let configuration = try XCTUnwrap(projectsModel.createRunConfiguration(
@@ -625,7 +664,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [configuration])
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         let factory = FakeProjectRunEngineFactory()
@@ -680,7 +719,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         let configurations = [alreadyTrusted, failing, successful]
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: configurations)
-        document.addDirect([alreadyTrustedRoot.path, failingRoot.path, successfulRoot.path])
+        document.records = [alreadyTrustedRoot.path, failingRoot.path, successfulRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         projectsModel.refreshProjects()
@@ -779,7 +818,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         var document = ProjectRecordDocument(runConfigurations: [
             included, outside, disabled, active, unavailable,
         ])
-        document.addDirect([includedRoot.path, outsideRoot.path, activeRoot.path, missingRoot.path])
+        document.records = [includedRoot.path, outsideRoot.path, activeRoot.path, missingRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         projectsModel.refreshProjects()
@@ -850,7 +889,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [included, outside, inactive])
-        document.addDirect([includedRoot.path, outsideRoot.path])
+        document.records = [includedRoot.path, outsideRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         XCTAssertTrue(projectsModel.trustProjectRunRoot(includedRoot.path))
@@ -1131,7 +1170,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         ]
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: configurations)
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         XCTAssertTrue(projectsModel.trustProjectRunRoot(projectRoot.path))
@@ -1309,7 +1348,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [drafted, disabledAfterReview])
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         projectsModel.refreshProjects()
@@ -1433,7 +1472,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [changed, sibling])
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         projectsModel.refreshProjects()
@@ -1488,7 +1527,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [removed, surviving])
-        document.addDirect([removedRoot.path, survivingRoot.path])
+        document.records = [removedRoot.path, survivingRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         projectsModel.refreshProjects()
@@ -1540,7 +1579,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [failed, successful])
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         projectsModel.refreshProjects()
@@ -1593,7 +1632,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument()
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         let configuration = try XCTUnwrap(projectsModel.createRunConfiguration(
@@ -1906,7 +1945,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [first, second])
-        document.addDirect([firstRoot.path, secondRoot.path])
+        document.records = [firstRoot.path, secondRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         let factory = FakeProjectRunEngineFactory()
@@ -1972,7 +2011,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let store = ProjectRecordStore(fileURL: storageDirectory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: [configuration])
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         let factory = FakeProjectRunEngineFactory()
@@ -2081,7 +2120,7 @@ final class ProjectRunSessionsTests: XCTestCase {
             workingDirectory: "."
         )
         var document = ProjectRecordDocument(runConfigurations: [configuration])
-        document.addDirect([projectRoot.path])
+        document.records = [projectRoot.path].map { ProjectRecord(id: $0, path: $0, discoveredAt: Date()) }
         try store.save(document)
         let projectsModel = ProjectsViewModel(store: store)
         let factory = FakeProjectRunEngineFactory()
@@ -2834,7 +2873,7 @@ private struct ProjectRunTestFixture {
     ) throws {
         store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
         var document = ProjectRecordDocument(runConfigurations: configurations)
-        document.addDirect(projectRoots.map(\.path))
+        document.records = projectRoots.map { ProjectRecord(id: $0.path, path: $0.path, discoveredAt: Date()) }
         try store.save(document)
         projectsModel = ProjectsViewModel(store: store)
         factory = FakeProjectRunEngineFactory()

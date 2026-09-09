@@ -143,7 +143,7 @@ final class OverviewAttentionTests: XCTestCase {
         failure: String? = nil,
         failureAt: Date? = nil
     ) -> OverviewAttentionRunInput {
-        let project = ProjectRecord(path: projectID, discoveredAt: now)
+        let project = ProjectRecord(id: projectID, path: projectID, discoveredAt: now)
         return OverviewAttentionRunInput(
             configuration: ProjectRunConfiguration(id: id, projectID: projectID, name: id, command: "run", workingDirectory: projectID),
             project: project, state: state, lastSuccessfulCommand: nil, startedAt: now.addingTimeInterval(-120),

@@ -56,8 +56,8 @@ enum ProjectRepositoryState: Equatable, Sendable {
 }
 
 struct ProjectRecord: Codable, Identifiable, Equatable, Sendable {
-    var id: String { path }
-    var title: String { URL(fileURLWithPath: path, isDirectory: true).lastPathComponent }
+    let id: String
+    var title: String
 
     let path: String
     let firstDiscoveredAt: Date
@@ -67,15 +67,18 @@ struct ProjectRecord: Codable, Identifiable, Equatable, Sendable {
     var availability: ProjectAvailability
 
     private enum CodingKeys: String, CodingKey {
-        case path, firstDiscoveredAt, lastDiscoveredAt, isNew, boundary
+        case id, title, path, firstDiscoveredAt, lastDiscoveredAt, isNew, boundary
     }
 
     init(
+        id: String = UUID().uuidString,
         path: String,
         discoveredAt: Date,
         isNew: Bool = true,
         boundary: ProjectRootBoundary = .manifest
     ) {
+        self.id = id
+        title = URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
         self.path = path
         firstDiscoveredAt = discoveredAt
         lastDiscoveredAt = discoveredAt
@@ -85,8 +88,16 @@ struct ProjectRecord: Codable, Identifiable, Equatable, Sendable {
     }
 
     init(from decoder: Decoder) throws {
+        try self.init(from: decoder, legacy: false)
+    }
+
+    fileprivate init(from decoder: Decoder, legacy: Bool) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         path = try values.decode(String.self, forKey: .path)
+        id = legacy ? UUID().uuidString : try values.decode(String.self, forKey: .id)
+        title = legacy
+            ? URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
+            : try values.decode(String.self, forKey: .title)
         firstDiscoveredAt = try values.decode(Date.self, forKey: .firstDiscoveredAt)
         lastDiscoveredAt = try values.decode(Date.self, forKey: .lastDiscoveredAt)
         isNew = try values.decode(Bool.self, forKey: .isNew)
@@ -96,6 +107,8 @@ struct ProjectRecord: Codable, Identifiable, Equatable, Sendable {
 
     func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(title, forKey: .title)
         try values.encode(path, forKey: .path)
         try values.encode(firstDiscoveredAt, forKey: .firstDiscoveredAt)
         try values.encode(lastDiscoveredAt, forKey: .lastDiscoveredAt)
@@ -196,8 +209,8 @@ struct ProjectRunSuggestionScanner: Sendable {
     private static let runScriptBases: Set<String> = ["dev", "start", "serve"]
     private static let nonRunScriptBases: Set<String> = ["build", "test", "lint", "migrate", "migration", "check", "typecheck"]
 
-    func scan(projectRoot: String, analysis: ProjectRequirementsAnalysis) -> [ProjectRunSuggestion] {
-        let root = URL(fileURLWithPath: projectRoot, isDirectory: true)
+    func scan(project: ProjectRecord, analysis: ProjectRequirementsAnalysis) -> [ProjectRunSuggestion] {
+        let root = URL(fileURLWithPath: project.path, isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL
         guard analysis.rootPath == root.path else { return [] }
         var suggestions: [ProjectRunSuggestion] = []
@@ -212,7 +225,7 @@ struct ProjectRunSuggestionScanner: Sendable {
                     let packageRelative = relativePath(directory.appendingPathComponent("package.json"), from: root)
                     let source = "\(packageRelative)#scripts.\(name)"
                     suggestions.append(ProjectRunSuggestion(
-                        projectID: root.path,
+                        projectID: project.id,
                         name: "Node.js · \(name)",
                         command: "\(manager) run \(name)",
                         workingDirectory: component.relativePath,
@@ -227,7 +240,7 @@ struct ProjectRunSuggestionScanner: Sendable {
                 let relative = relativePath(manifest, from: root)
                 for entry in pythonEntries(at: manifest) {
                     suggestions.append(ProjectRunSuggestion(
-                        projectID: root.path,
+                        projectID: project.id,
                         name: "Python · \(entry)",
                         command: "uv run \(entry)",
                         workingDirectory: component.relativePath,
@@ -244,7 +257,7 @@ struct ProjectRunSuggestionScanner: Sendable {
                         ? ""
                         : " --features \(target.features.joined(separator: ","))"
                     suggestions.append(ProjectRunSuggestion(
-                        projectID: root.path,
+                        projectID: project.id,
                         name: "Cargo · \(target.name)",
                         command: "cargo run --bin \(target.name)\(features)",
                         workingDirectory: component.relativePath,
@@ -257,7 +270,7 @@ struct ProjectRunSuggestionScanner: Sendable {
                isReadable(directory.appendingPathComponent(composeName)) {
                 let relative = relativePath(directory.appendingPathComponent(composeName), from: root)
                 suggestions.append(ProjectRunSuggestion(
-                    projectID: root.path,
+                    projectID: project.id,
                     name: "Compose · \(composeName)",
                     command: "docker compose up",
                     workingDirectory: component.relativePath,
@@ -528,7 +541,7 @@ struct ProjectRunSuggestionScanner: Sendable {
 }
 
 struct ProjectRecordDocument: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
 
     let schemaVersion: Int
     var records: [ProjectRecord]
@@ -556,8 +569,26 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         let storedSchemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        guard (1 ... Self.currentSchemaVersion).contains(storedSchemaVersion) else {
+            throw ProjectRecordStoreError.incompatibleSchema(storedSchemaVersion)
+        }
         schemaVersion = Self.currentSchemaVersion
-        records = try values.decode([ProjectRecord].self, forKey: .records)
+        if storedSchemaVersion < 5 {
+            var legacyRecords = try values.nestedUnkeyedContainer(forKey: .records)
+            records = []
+            while !legacyRecords.isAtEnd {
+                records.append(try ProjectRecord(from: legacyRecords.superDecoder(), legacy: true))
+            }
+            guard Set(records.map(\.path)).count == records.count else {
+                throw ProjectRecordStoreError.corrupt
+            }
+        } else {
+            records = try values.decode([ProjectRecord].self, forKey: .records)
+        }
+        guard Set(records.map(\.id)).count == records.count,
+              records.allSatisfy({ !$0.id.isEmpty && !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+            throw ProjectRecordStoreError.corrupt
+        }
         ignoredProjects = try values.decode([IgnoredProject].self, forKey: .ignoredProjects)
         runConfigurations = storedSchemaVersion == 1
             ? []
@@ -565,6 +596,20 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         trustedProjectRoots = storedSchemaVersion < 3
             ? []
             : try values.decode([String].self, forKey: .trustedProjectRoots)
+        if storedSchemaVersion < 5 {
+            let projectIDs = Dictionary(uniqueKeysWithValues: records.map { ($0.path, $0.id) })
+            runConfigurations = runConfigurations.map { configuration in
+                ProjectRunConfiguration(
+                    id: configuration.id,
+                    projectID: projectIDs[configuration.projectID] ?? configuration.projectID,
+                    name: configuration.name,
+                    command: configuration.command,
+                    workingDirectory: configuration.workingDirectory,
+                    sourceIdentity: configuration.sourceIdentity,
+                    isEnabled: configuration.isEnabled
+                )
+            }
+        }
     }
 
     mutating func mergeDiscovered(
@@ -594,12 +639,7 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
     mutating func addDirect(_ paths: [String], at date: Date = Date()) {
         ignoredProjects.removeAll { paths.contains($0.path) }
         for path in paths {
-            if let index = records.firstIndex(where: { $0.path == path }) {
-                records[index].lastDiscoveredAt = date
-                records[index].boundary = .explicit
-            } else {
-                records.append(ProjectRecord(path: path, discoveredAt: date, boundary: .explicit))
-            }
+            records.append(ProjectRecord(path: path, discoveredAt: date, boundary: .explicit))
         }
         records.removeAll { record in
             record.boundary == .manifest
@@ -625,10 +665,11 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         records.removeAll { projectIDs.contains($0.id) }
         ignoredProjects.removeAll { projectIDs.contains($0.id) }
         runConfigurations.removeAll { projectIDs.contains($0.projectID) }
-        trustedProjectRoots.removeAll { projectIDs.contains($0) }
-        for project in projects where !ignoredPaths.contains(project.id) {
+        let removedPaths = Set(projects.map(\.path)).subtracting(records.map(\.path))
+        trustedProjectRoots.removeAll { removedPaths.contains($0) }
+        for project in projects where !ignoredProjects.contains(where: { $0.path == project.path }) {
             ignoredProjects.append(IgnoredProject(
-                path: project.id,
+                path: project.path,
                 ignoredAt: date,
                 boundary: project.boundary
             ))
@@ -715,11 +756,17 @@ struct ProjectRecordStore: Sendable {
         guard (1 ... ProjectRecordDocument.currentSchemaVersion).contains(header.schemaVersion) else {
             throw ProjectRecordStoreError.incompatibleSchema(header.schemaVersion)
         }
+        let document: ProjectRecordDocument
         do {
-            return try decoder.decode(ProjectRecordDocument.self, from: data)
+            document = try decoder.decode(ProjectRecordDocument.self, from: data)
         } catch {
             throw ProjectRecordStoreError.corrupt
         }
+        // Publish migrated identities only after the atomic write succeeds.
+        if header.schemaVersion < ProjectRecordDocument.currentSchemaVersion {
+            try save(document)
+        }
+        return document
     }
 
     func save(_ document: ProjectRecordDocument) throws {
@@ -1186,10 +1233,23 @@ final class ProjectsViewModel: ObservableObject {
     func addDirect(_ urls: [URL]) {
         guard !mutationsArePaused, !isScanning else { return }
         let paths = discovery.directProjectPaths(urls)
-        document.addDirect(paths)
-        persist()
+        guard applyDocumentChange({ $0.addDirect(paths) }) else { return }
         refreshProjects()
         resultMessage = "已添加 \(paths.count) 个项目"
+    }
+
+    @discardableResult
+    func renameProject(_ projectID: String, title: String) -> Bool {
+        guard !mutationsArePaused,
+              let index = document.records.firstIndex(where: { $0.id == projectID }) else { return false }
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else {
+            operationError = "项目名称不能为空"
+            return false
+        }
+        guard applyDocumentChange({ $0.records[index].title = title }) else { return false }
+        resultMessage = "已重命名项目为“\(title)”"
+        return true
     }
 
     func scan(_ urls: [URL]) {
@@ -1229,19 +1289,20 @@ final class ProjectsViewModel: ObservableObject {
             scanner.recalculate($0, machineSnapshot: machineSnapshot)
         }
         let suggestionScanner = ProjectRunSuggestionScanner()
-        for (path, analysis) in analyses {
-            suggestionStore[path] = suggestionScanner.scan(projectRoot: path, analysis: analysis)
+        for project in document.records {
+            guard let analysis = analyses[project.id] else { continue }
+            suggestionStore[project.id] = suggestionScanner.scan(project: project, analysis: analysis)
         }
     }
 
     func refreshProjects() {
         guard !isScanning else { return }
         cancelProjectRefresh()
-        let paths = document.records.map(\.path)
+        let paths = Array(Set(document.records.map(\.path))).sorted()
         guard !paths.isEmpty else { return }
         let generation = UUID()
         refreshGeneration = generation
-        refreshingProjectIDs = Set(paths)
+        refreshingProjectIDs = Set(document.records.map(\.id))
         let projectBoundaryPaths = Set(paths + document.ignoredProjects.map(\.path))
         let discovery = discovery
         let scanner = ProjectRequirementsScanner()
@@ -1314,8 +1375,7 @@ final class ProjectsViewModel: ObservableObject {
 
     func restore(_ ignoredProject: IgnoredProject) {
         guard !mutationsArePaused, !isScanning else { return }
-        document.restore(path: ignoredProject.path)
-        persist()
+        guard applyDocumentChange({ $0.restore(path: ignoredProject.path) }) else { return }
         refreshProjects()
     }
 
@@ -1343,34 +1403,45 @@ final class ProjectsViewModel: ObservableObject {
         generation: UUID
     ) {
         guard generation == refreshGeneration else { return }
-        guard let index = document.records.firstIndex(where: { $0.path == path }) else { return }
+        for index in document.records.indices where document.records[index].path == path {
+            applyProjectRefresh(index: index, availability: availability, analysis: analysis)
+        }
+    }
+
+    private func applyProjectRefresh(
+        index: Int,
+        availability: ProjectAvailability,
+        analysis: ProjectRequirementsAnalysis?
+    ) {
+        let project = document.records[index]
+        let projectID = project.id
         document.records[index].availability = availability
         if let analysis {
             if analysis.notices.isEmpty {
-                analyses[path] = ProjectRequirementsScanner().recalculate(
+                analyses[projectID] = ProjectRequirementsScanner().recalculate(
                     analysis,
                     machineSnapshot: machineSnapshot
                 )
-                projectNotices.removeValue(forKey: path)
-                staleProjectIDs.remove(path)
+                projectNotices.removeValue(forKey: projectID)
+                staleProjectIDs.remove(projectID)
             } else {
-                projectNotices[path] = analysis.notices
-                if analyses[path] == nil {
-                    analyses[path] = ProjectRequirementsScanner().recalculate(
+                projectNotices[projectID] = analysis.notices
+                if analyses[projectID] == nil {
+                    analyses[projectID] = ProjectRequirementsScanner().recalculate(
                         analysis,
                         machineSnapshot: machineSnapshot
                     )
                 }
-                staleProjectIDs.insert(path)
+                staleProjectIDs.insert(projectID)
             }
-            suggestionStore[path] = ProjectRunSuggestionScanner().scan(projectRoot: path, analysis: analysis)
-        } else if analyses[path] != nil {
-            staleProjectIDs.insert(path)
-            suggestionStore.removeValue(forKey: path)
+            suggestionStore[projectID] = ProjectRunSuggestionScanner().scan(project: project, analysis: analysis)
+        } else if analyses[projectID] != nil {
+            staleProjectIDs.insert(projectID)
+            suggestionStore.removeValue(forKey: projectID)
         } else {
-            suggestionStore[path] = []
+            suggestionStore[projectID] = []
         }
-        refreshingProjectIDs.remove(path)
+        refreshingProjectIDs.remove(projectID)
     }
 
     private func finishProjectRefresh(generation: UUID, cancelled: Bool) {
@@ -1391,11 +1462,13 @@ final class ProjectsViewModel: ObservableObject {
     }
 
     private func finishScan(_ result: ProjectDiscoveryResult) {
-        document.mergeDiscovered(result.projectPaths, gitProjectPaths: result.gitProjectPaths)
-        persist()
+        let saved = applyDocumentChange {
+            $0.mergeDiscovered(result.projectPaths, gitProjectPaths: result.gitProjectPaths)
+        }
         scanProgress = nil
         scanTask = nil
         refreshProjects()
+        guard saved else { return }
         if !result.errors.isEmpty {
             operationError = result.errors.joined(separator: "\n")
         }

@@ -698,6 +698,8 @@ struct ContentView: View {
     @State private var isRunSuggestionsExpanded = false
     @State private var isShowingRunConfigurationEditor = false
     @State private var editingRunConfiguration: ProjectRunConfiguration?
+    @State private var renamingProject: ProjectRecord?
+    @State private var projectNameDraft = ""
     @State private var runConfigurationProjectID = ""
     @State private var runConfigurationName = ""
     @State private var runConfigurationCommand = ""
@@ -802,6 +804,32 @@ struct ContentView: View {
         }
         .sheet(isPresented: $isShowingRunConfigurationEditor) {
             runConfigurationEditor
+        }
+        .sheet(item: $renamingProject) { project in
+            VStack(alignment: .leading, spacing: 16) {
+                Text("重命名项目").font(.headline)
+                TextField("项目名称", text: $projectNameDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("项目名称")
+                Text(project.path).font(.caption).foregroundStyle(.secondary)
+                if let error = projectsModel.operationError {
+                    Text(error).foregroundStyle(.red)
+                }
+                HStack {
+                    Spacer()
+                    Button("取消", role: .cancel) { renamingProject = nil }
+                    Button("保存") {
+                        if projectsModel.renameProject(project.id, title: projectNameDraft) {
+                            renamingProject = nil
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(projectNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || projectsModel.mutationsArePaused)
+                }
+            }
+            .padding(24)
+            .frame(width: 420)
         }
         .alert(
             homebrewServiceConfirmationTitle,
@@ -2813,6 +2841,11 @@ struct ContentView: View {
                 .accessibilityLabel("管理 \(project.title) 的运行配置")
                 .help("在运行页面管理此项目的运行配置")
                 Menu {
+                    Button("重命名项目") {
+                        projectNameDraft = project.title
+                        renamingProject = project
+                    }
+                    .disabled(projectsModel.mutationsArePaused)
                     Button("移除项目记录", role: .destructive) {
                         pendingProjectRemovalIDs = [project.id]
                     }
