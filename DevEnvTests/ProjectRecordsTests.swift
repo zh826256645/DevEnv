@@ -203,7 +203,9 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(Set(model.records.map(\.id)), [first.id, second.id])
         model.remove(first)
         XCTAssertEqual(model.records.map(\.id), [second.id])
-        XCTAssertEqual(model.runConfigurations(), [secondRun])
+        XCTAssertEqual(Set(model.runConfigurations().map(\.id)), [firstRun.id, secondRun.id])
+        XCTAssertEqual(model.runConfigurations(projectID: first.id).first?.projectID, first.id)
+        XCTAssertFalse(model.isSuggestionSourceAvailable(firstRun))
         XCTAssertTrue(model.isSuggestionSourceAvailable(secondRun))
         XCTAssertEqual(try store.load().records.first?.title, "Worker")
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("package.json").path))
@@ -608,6 +610,26 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(document.records.first { $0.path == "/Projects/beta" }?.boundary, .manifest)
         XCTAssertNotEqual(document.records.first { $0.path == "/Projects/beta" }?.id, betaID)
         XCTAssertTrue(document.ignoredProjects.isEmpty)
+    }
+
+    func testRemovalPreservesDirectoryAndStaleAssociationAcrossReload() throws {
+        let project = ProjectRecord(id: "project", path: "/Projects/app", discoveredAt: Date())
+        let cases = [("", "/Projects/app"), ("api", "/Projects/app/api"), ("..", "/Projects"), ("/tmp", "/tmp")]
+        for (path, expected) in cases {
+            let configuration = ProjectRunConfiguration(
+                projectID: project.id, name: "Run", command: "pwd", workingDirectory: path,
+                sourceIdentity: "package.json#scripts.dev", sourceProjectID: project.id, isEnabled: false
+            )
+            var document = ProjectRecordDocument(records: [project], runConfigurations: [configuration])
+            document.remove(projectID: project.id)
+            let reloaded = try JSONDecoder().decode(ProjectRecordDocument.self, from: JSONEncoder().encode(document))
+            var retained = configuration
+            retained.workingDirectory = expected
+            retained.deletedProjectTitle = project.title
+            retained.deletedProjectPath = project.path
+            XCTAssertEqual(reloaded.runConfigurations, [retained])
+            XCTAssertTrue(reloaded.records.isEmpty)
+        }
     }
 
     func testBatchRemovalMovesProjectsAndClearsIgnoredProjects() {

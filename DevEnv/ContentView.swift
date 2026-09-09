@@ -885,10 +885,7 @@ struct ContentView: View {
             let configurations = runCoordinator.runConfigurations().filter {
                 $0.projectID.map(pendingProjectRemovalIDs.contains) == true
             }
-            let activeSessionCount = configurations.filter {
-                runCoordinator.session(for: $0.id)?.state.isLive == true
-            }.count
-            Text("将移除 \(summary.projectCount) 个项目记录并解除 \(configurations.count) 个运行配置的项目关联（\(activeSessionCount) 个活动会话将停止），同时清除 \(summary.ignoredProjectCount) 个忽略记录？不会删除、移动或修改原项目文件。")
+            Text("将移除 \(summary.projectCount) 个项目记录，同时清除 \(summary.ignoredProjectCount) 个忽略记录？\(configurations.count) 个运行配置及当前运行将保留，后续启动需先显式解除失效的项目关联。项目记录会进入 Ignored Projects；不会删除、移动或修改原项目文件。")
         }
         .alert("重新创建项目记录存储？", isPresented: $isConfirmingProjectStoreReset) {
             Button("取消", role: .cancel) {}
@@ -1876,7 +1873,7 @@ struct ContentView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(configuration.isEnabled ? Color.primary : Color.secondary)
                         .lineLimit(1)
-                    Text("\(projectsModel.records.first { $0.id == configuration.projectID }?.title ?? (configuration.projectID == nil ? "独立运行" : "关联项目不存在")) · \(configuration.command)")
+                    Text("\(projectsModel.records.first { $0.id == configuration.projectID }?.title ?? (configuration.projectID == nil ? "独立运行" : configuration.missingProjectTitle)) · \(configuration.command)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -1939,9 +1936,9 @@ struct ContentView: View {
                                     .frame(minHeight: 24, alignment: .center)
                                 projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
                             }
-                            Text(project.map { "\($0.title)" } ?? (configuration.projectID == nil ? "独立运行" : "关联项目记录不存在"))
+                            Text(project.map { "\($0.title)" } ?? (configuration.projectID == nil ? "独立运行" : configuration.missingProjectTitle))
                                 .font(.callout).foregroundStyle(.secondary)
-                            Text(project?.path ?? "").font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                            Text(project?.path ?? configuration.deletedProjectPath ?? "").font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
                         }
                         Spacer()
                         HStack(spacing: 6) {
@@ -2008,7 +2005,7 @@ struct ContentView: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.regular)
                                 .frame(minWidth: 60, minHeight: 36)
-                                .disabled(projectsModel.mutationsArePaused || state.isLive)
+                                .disabled(projectsModel.mutationsArePaused || runCoordinator.activeDeletion?.configurationIDs.contains(configuration.id) == true)
                             Button(configuration.isEnabled ? "禁用" : "启用") {
                                 runCoordinator.setRunConfigurationEnabled(
                                     configuration,
@@ -2356,6 +2353,11 @@ struct ContentView: View {
                     runConfigurationEditorField("项目", systemImage: "folder") {
                         Picker("项目", selection: $runConfigurationProjectID) {
                             Text("不关联项目").tag("")
+                            if let configuration = editingRunConfiguration,
+                               let projectID = configuration.projectID,
+                               !projectsModel.workspaceRecords.contains(where: { $0.id == projectID }) {
+                                Text(configuration.missingProjectTitle).tag(projectID)
+                            }
                             ForEach(projectsModel.workspaceRecords) { project in
                                 Text(project.title).tag(project.id)
                             }
@@ -2363,6 +2365,10 @@ struct ContentView: View {
                         .pickerStyle(.menu)
                         .labelsHidden()
                         .accessibilityLabel("运行配置关联项目（可选）")
+                        if let path = editingRunConfiguration?.deletedProjectPath {
+                            Text("原项目目录：\(path)")
+                                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
                     }
 
                     runConfigurationEditorField("名称", systemImage: "textformat") {

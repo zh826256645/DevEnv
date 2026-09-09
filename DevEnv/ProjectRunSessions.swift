@@ -972,7 +972,8 @@ final class ProjectRunCoordinator: ObservableObject {
         command: String,
         workingDirectory: String
     ) -> Bool {
-        guard let remembered = projectsModel.runConfigurations().first(where: { $0.id == configuration.id }),
+        guard activeDeletion?.configurationIDs.contains(configuration.id) != true,
+              let remembered = projectsModel.runConfigurations().first(where: { $0.id == configuration.id }),
               projectsModel.updateRunConfiguration(
                   configuration,
                   name: name,
@@ -1477,19 +1478,7 @@ final class ProjectRunCoordinator: ObservableObject {
         )
         // Keep the in-flight safe-stop lifecycle owned by the deletion operation.
         guard activeDeletion.map({ $0.configurationIDs.isDisjoint(with: configurationIDs) }) ?? true else { return nil }
-        guard let summary = projectsModel.remove(projectIDs: projectIDs, afterPersist: {
-            var succeeded = true
-            for configurationID in configurationIDs {
-                guard let session = sessions[configurationID], session.state.isLive else { continue }
-                session.state = .stopping
-                if session.engine.signalProcessGroups(SIGKILL) {
-                    session.state = .exited(137)
-                } else {
-                    succeeded = false
-                }
-            }
-            return succeeded
-        }) else { return nil }
+        guard let summary = projectsModel.remove(projectIDs: projectIDs) else { return nil }
         objectWillChange.send()
         return summary
     }

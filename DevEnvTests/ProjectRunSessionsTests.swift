@@ -181,6 +181,49 @@ final class ProjectRunSessionsTests: XCTestCase {
         }
     }
 
+    func testLiveStaleAssociationCanBeEditedDetachedAndRelinkedWithoutChangingExecution() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = directory.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [root])
+        let model = fixture.projectsModel
+        let coordinator = fixture.coordinator
+        XCTAssertTrue(model.renameProject(root.path, title: "旧 API"))
+        let run = try XCTUnwrap(coordinator.createRunConfiguration(
+            projectID: root.path, name: "API", command: "sleep 30", workingDirectory: "",
+            sourceIdentity: "package.json#scripts.dev"
+        ))
+        XCTAssertEqual(coordinator.run(run), .started)
+        let session = try XCTUnwrap(coordinator.session(for: run.id))
+        let execution = session.activeExecution
+        XCTAssertNotNil(coordinator.removeProjects(projectIDs: [root.path]))
+        var stale = try XCTUnwrap(fixture.store.load().runConfigurations.first)
+        XCTAssertEqual(stale.missingProjectTitle, "旧 API（已失效）")
+        XCTAssertEqual(stale.deletedProjectPath, root.path)
+        XCTAssertTrue(coordinator.updateRunConfiguration(stale, name: "编辑后", command: "pwd", workingDirectory: ".."))
+        stale = try XCTUnwrap(coordinator.runConfigurations().first)
+        XCTAssertEqual(stale.deletedProjectTitle, "旧 API")
+        var forged = stale
+        forged.projectID = "不存在的新关联"
+        XCTAssertFalse(coordinator.updateRunConfiguration(forged, name: forged.name, command: forged.command, workingDirectory: ""))
+        stale.projectID = nil
+        XCTAssertTrue(coordinator.updateRunConfiguration(stale, name: stale.name, command: stale.command, workingDirectory: stale.workingDirectory))
+        var detached = try XCTUnwrap(coordinator.runConfigurations().first)
+        XCTAssertNil(detached.deletedProjectTitle)
+        XCTAssertNil(detached.deletedProjectPath)
+        XCTAssertEqual(detached.workingDirectory, directory.path)
+        model.addDirect([root])
+        let replacement = try XCTUnwrap(model.records.first)
+        XCTAssertNotEqual(replacement.id, run.projectID)
+        detached.projectID = replacement.id
+        XCTAssertTrue(coordinator.updateRunConfiguration(detached, name: detached.name, command: detached.command, workingDirectory: ""))
+        XCTAssertEqual(session.activeExecution, execution)
+        XCTAssertEqual(session.state, .running)
+        XCTAssertTrue(fixture.factory.engines[0].signals.isEmpty)
+        XCTAssertEqual(try fixture.store.load().runConfigurations.first?.sourceProjectID, run.sourceProjectID)
+    }
+
     func testDetachingConfigurationKeepsItsOriginalSuggestionSource() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -375,10 +418,11 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(model.renameProject(second.id, title: "Renamed worker"))
         XCTAssertEqual(coordinator.runConfigurations(projectID: second.id), [secondRun])
         XCTAssertNotNil(coordinator.removeProjects(projectIDs: [first.id]))
-        XCTAssertNil(coordinator.session(for: firstRun.id))
+        XCTAssertEqual(coordinator.session(for: firstRun.id)?.state, .running)
         XCTAssertEqual(coordinator.session(for: secondRun.id)?.activeExecution?.id, execution.id)
         XCTAssertEqual(coordinator.session(for: secondRun.id)?.state, .running)
-        XCTAssertEqual(coordinator.runConfigurations(), [secondRun])
+        XCTAssertEqual(Set(coordinator.runConfigurations().map(\.id)), [firstRun.id, secondRun.id])
+        XCTAssertTrue(factory.engines[0].signals.isEmpty)
         XCTAssertTrue(factory.engines[1].signals.isEmpty)
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
     }
@@ -1696,7 +1740,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         coordinator.submitBatchStart(intent)
 
         let removedSession = try XCTUnwrap(coordinator.session(for: removed.id))
-        XCTAssertEqual(removedSession.state, .launchFailed("运行配置不存在"))
+        XCTAssertEqual(removedSession.state, .launchFailed("所属项目记录不存在"))
         XCTAssertEqual(removedSession.currentExecution?.id, removedSession.failureExecution?.id)
         XCTAssertEqual(coordinator.session(for: surviving.id)?.state, .running)
         XCTAssertEqual(factory.engines.count, 2)
@@ -2037,7 +2081,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(session.state, .stopping)
     }
 
-    func testRemovingProjectRecordCommitsStoreBeforeCleaningSessions() throws {
+    func testRemovingProjectRecordPreservesSessionsAndRequiresExplicitDetachmentAfterReload() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let firstRoot = directory.appendingPathComponent("first")
@@ -2078,30 +2122,49 @@ final class ProjectRunSessionsTests: XCTestCase {
         }
         factory.engines[0].signalSucceeds = false
 
-        XCTAssertNil(coordinator.removeProjects(projectIDs: [firstRoot.path]))
-        XCTAssertEqual(factory.engines[0].signals, [SIGKILL])
-        XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopping)
-        XCTAssertEqual(Set(projectsModel.runConfigurations().map(\.id)), [first.id, second.id])
-        XCTAssertEqual(Set(try store.load().runConfigurations.map(\.id)), [first.id, second.id])
-        factory.engines[0].signalSucceeds = true
-
+        let session = try XCTUnwrap(coordinator.session(for: first.id))
+        let executionID = session.activeExecution?.id
         let summary = coordinator.removeProjects(projectIDs: [firstRoot.path])
 
         XCTAssertEqual(summary, ProjectRemovalSummary(projectCount: 1, ignoredProjectCount: 0))
-        XCTAssertEqual(factory.engines[0].signals, [SIGKILL, SIGKILL])
+        XCTAssertTrue(factory.engines[0].signals.isEmpty)
         XCTAssertTrue(factory.engines[1].signals.isEmpty)
-        XCTAssertNil(coordinator.session(for: first.id))
+        XCTAssertTrue(coordinator.session(for: first.id) === session)
+        XCTAssertEqual(session.state, .running)
+        XCTAssertEqual(session.activeExecution?.id, executionID)
         XCTAssertNotNil(coordinator.session(for: second.id))
-        XCTAssertEqual(projectsModel.runConfigurations().map(\.id), [second.id])
-        XCTAssertEqual(try store.load().runConfigurations.map(\.id), [second.id])
+        XCTAssertEqual(Set(projectsModel.runConfigurations().map(\.id)), [first.id, second.id])
+        XCTAssertEqual(Set(try store.load().runConfigurations.map(\.id)), [first.id, second.id])
 
+        let stale = try XCTUnwrap(coordinator.runConfigurations().first { $0.id == first.id })
+        XCTAssertTrue(coordinator.updateRunConfiguration(
+            stale, name: "已删除项目的服务", command: "pwd", workingDirectory: stale.workingDirectory
+        ))
+        XCTAssertEqual(session.activeExecution?.id, executionID)
+        XCTAssertEqual(session.state, .running)
+        XCTAssertEqual(session.activeExecution?.command, first.command)
+        XCTAssertEqual(try store.load().runConfigurations.first { $0.id == first.id }?.name, "已删除项目的服务")
+
+        let reloadedModel = ProjectsViewModel(store: store)
         let relaunchedCoordinator = ProjectRunCoordinator(
-            projectsModel: ProjectsViewModel(store: store),
+            projectsModel: reloadedModel,
             makeEngine: FakeProjectRunEngineFactory().makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
             scheduler: FakeProjectRunScheduler()
         )
-        XCTAssertEqual(relaunchedCoordinator.run(first, projectRoot: firstRoot.path), .rejected("运行配置已禁用"))
+        var retained = try XCTUnwrap(relaunchedCoordinator.runConfigurations().first { $0.id == first.id })
+        XCTAssertEqual(retained.projectID, first.projectID)
+        guard case .rejected = relaunchedCoordinator.run(retained) else { return XCTFail("失效关联不能启动") }
+        reloadedModel.addDirect([firstRoot])
+        guard case .rejected = relaunchedCoordinator.run(retained) else { return XCTFail("同目录新记录不能恢复旧关联") }
+        retained.projectID = nil
+        XCTAssertTrue(reloadedModel.updateRunConfiguration(
+            retained, name: retained.name, command: retained.command, workingDirectory: retained.workingDirectory
+        ))
+        let detached = try XCTUnwrap(reloadedModel.runConfigurations().first { $0.id == first.id })
+        XCTAssertEqual(detached.workingDirectory, firstRoot.path)
+        XCTAssertEqual(relaunchedCoordinator.run(detached), .started)
+        XCTAssertEqual(relaunchedCoordinator.session(for: first.id)?.activeExecution?.workingDirectory, firstRoot.path)
         XCTAssertEqual(relaunchedCoordinator.run(second, projectRoot: secondRoot.path), .started)
     }
 
