@@ -458,10 +458,10 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         XCTAssertEqual(
             appDelegate.statusMenu.items.map(\.title),
-            ["打开面板", "", "全部启动", "全部停止", "", "0 运行 · 0 停止 · 0 异常", "没有活动会话", "", "退出"]
+            ["打开面板", "", "全部工作区启动", "全部工作区停止", "", "0 运行 · 0 停止 · 0 异常", "没有活动会话", "", "退出"]
         )
-        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部启动")?.isEnabled ?? true)
-        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部停止")?.isEnabled ?? true)
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区停止")?.isEnabled ?? true)
     }
 
     func testStatusBarGlobalStartSubmitsAllProjectsToSharedFrozenIntent() async throws {
@@ -515,7 +515,7 @@ final class ProjectRunSessionsTests: XCTestCase {
             }
         )
         appDelegate.rebuildStatusMenu()
-        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部启动"))
+        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区启动"))
 
         XCTAssertTrue(startItem.isEnabled)
         XCTAssertTrue(NSApplication.shared.sendAction(
@@ -563,7 +563,7 @@ final class ProjectRunSessionsTests: XCTestCase {
             statusBarRunPageHandoff: { handoffCount += 1 }
         )
         appDelegate.rebuildStatusMenu()
-        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部启动"))
+        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区启动"))
 
         XCTAssertTrue(NSApplication.shared.sendAction(
             try XCTUnwrap(startItem.action),
@@ -631,9 +631,9 @@ final class ProjectRunSessionsTests: XCTestCase {
             }
         )
         appDelegate.rebuildStatusMenu()
-        let stopItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部停止"))
+        let stopItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区停止"))
 
-        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部启动")?.isEnabled ?? true)
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
         XCTAssertTrue(stopItem.isEnabled)
         XCTAssertTrue(NSApplication.shared.sendAction(
             try XCTUnwrap(stopItem.action),
@@ -651,7 +651,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: first.id)?.activeExecution?.id, replacementExecutionID)
         XCTAssertEqual(coordinator.session(for: first.id)?.state, .running)
         appDelegate.rebuildStatusMenu()
-        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部停止")?.isEnabled ?? false)
+        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部工作区停止")?.isEnabled ?? false)
     }
 
     func testStatusBarMenuRebuildsWhenProjectConfigurationsChange() async throws {
@@ -672,7 +672,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let appDelegate = DevEnvAppDelegate(projectsModel: projectsModel, runCoordinator: coordinator)
         appDelegate.rebuildStatusMenu()
-        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部启动")?.isEnabled ?? true)
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
 
         XCTAssertNotNil(coordinator.createRunConfiguration(
             projectID: projectRoot.path,
@@ -682,7 +682,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         ))
         for _ in 0 ..< 3 { await Task.yield() }
 
-        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部启动")?.isEnabled ?? false)
+        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部工作区启动")?.isEnabled ?? false)
     }
 
     func testReopenedMainWindowUsesFullSizeHiddenTitleBar() {
