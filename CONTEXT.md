@@ -24,76 +24,80 @@ _Avoid_: Database Health Requirement, Database Availability Requirement
 由同时适用于 MySQL 与 MariaDB 的直接客户端依赖推定的 Project Database Requirement；任一类型的 Database Installation 均可满足它，明确声明的 MySQL 或 MariaDB 要求仍保持各自类型。
 _Avoid_: MySQL Requirement, MariaDB Requirement
 
+**Workspace**:
+用户手动创建、具有稳定身份和名称的项目与运行配置组织容器，本身不对应目录；每个项目记录和运行配置各自仅属于一个 Workspace，运行配置不以关联项目为存在前提。DevEnv 可以提供一个默认 Workspace。
+_Avoid_: Project Root, Working Directory, Git Worktree
+
 **Project Root**:
 一个项目的规范目录边界：优先采用包含所选目录的最近 Git 根；没有 Git 时，由项目清单或用户直接选择确定。嵌套 Git 根和用户明确选择的嵌套边界各自形成 Project Root，父项目不吸收其清单。
 _Avoid_: Package Root, Working Directory
 
 **Project Record**:
-DevEnv 对一个已发现 Project Root 保存的轻量身份记录；原目录暂时不可用时记录仍可保留，删除记录不会删除或修改原目录。
-_Avoid_: Project Snapshot, Project Files
+DevEnv 中属于一个 Workspace、指向一个 Project Root 的独立项目身份记录；同一磁盘目录可以对应多个 Project Record，记录身份不等同于目录路径。原目录暂时不可用时记录仍可保留，删除记录不会删除或修改原目录，也不删除关联的运行配置。
+_Avoid_: Project Snapshot, Project Files, Directory Identity
 
-**Project Run Configuration**:
-DevEnv 保存、归属于一个 Project Record 的运行意图，包含稳定身份、名称、命令、Project Root 相对工作目录和可选来源身份；它不是 Project Requirement 或 Project Requirements Summary，不表示项目可运行，也不执行命令。
+**Run Configuration**:
+DevEnv 保存、属于一个 Workspace 且可选关联该工作区内一个 Project Record 的独立运行意图，包含稳定身份、名称、命令、工作目录选择和可选来源身份；工作目录可以是绝对路径、项目相对路径或默认目录。它不以项目记录为存在前提，也不表示项目可运行。
 _Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
 
-**Project Run Batch Intent**:
-用户明确触发批量启动或停止时，从触发入口的当前作用域解析并冻结、仅用于本次提交的一组单项启动请求或 Active Project Run Execution；运行页作用域包含当前项目筛选与搜索结果，状态栏作用域为全部项目。它不是持久化运行组或运行编排，各目标按单项语义独立处理。
+**Run Batch Intent**:
+用户明确触发批量启动或停止时，从触发入口的当前作用域解析并冻结、仅用于本次提交的一组单项启动请求或 Active Run Execution；运行页作用域为当前 Workspace 内的项目筛选与搜索结果，状态栏作用域为全部 Workspace。它不是持久化运行组或运行编排，各目标按单项语义独立处理。
 _Avoid_: Saved Run Group, Live Filter Query, All Configurations, Atomic Run, Run Orchestration, Batch Run History
 
-**Disabled Project Run Configuration**:
-由用户暂时停用、不可通过任何入口启动且持久保留以便后续重新启用的 Project Run Configuration；禁用状态只属于该配置，不改变所属 Project Record 或同项目的其他运行配置。
-_Avoid_: Disabled Project, Deleted Project Run Configuration
+**Disabled Run Configuration**:
+由用户暂时停用、不可通过任何入口启动且持久保留以便后续重新启用的 Run Configuration；禁用状态只属于该配置，不改变关联项目或其他运行配置。
+_Avoid_: Disabled Project, Deleted Run Configuration
 
 **Project Run Suggestion**:
-DevEnv 从项目声明中只读识别、可由用户选择保存为 Project Run Configuration 的候选运行意图；它不会自动执行，也不表示项目可信或可运行。
+DevEnv 从项目声明中只读识别、可由用户选择保存为 Run Configuration 的候选运行意图；它不会自动执行，也不表示项目可信或可运行。
 _Avoid_: Auto Run, Project Requirement, Runnable Status
 
-**Project Run Session**:
-用户从已保存的 Project Run Configuration 显式启动后、仅存在于当前 App 进程中的交互式终端上下文；同一配置后续的启动或重启可以复用该上下文及其内存终端输出，但每次运行属于不同的 Project Run Execution，Session 不持久化为 Project Record 或 Machine Snapshot。
-_Avoid_: Shell Session, Terminal Application, Machine Snapshot, Project Run Execution
+**Run Session**:
+用户从已保存的 Run Configuration 显式启动后、仅存在于当前 App 进程中的交互式终端上下文；同一配置后续的启动或重启可以复用该上下文及其内存终端输出，但每次运行属于不同的 Run Execution，Session 不持久化为 Project Record 或 Machine Snapshot。
+_Avoid_: Shell Session, Terminal Application, Machine Snapshot, Run Execution
 
-**Project Run Execution**:
-Project Run Session 中一次启动或重启的独立运行代次，具有自身稳定身份与冻结的完整命令、Project Root 和解析后的工作目录；它从启动尝试开始，到退出、用户停止或启动失败时结束，同一 Session 的后续运行属于新的 Execution。
-_Avoid_: Project Run Session, Configuration Run State, Process ID
+**Run Execution**:
+Run Session 中一次启动或重启的独立运行代次，具有自身稳定身份与冻结的完整命令、可选项目上下文和解析后的工作目录；它从启动尝试开始，到退出、用户停止或启动失败时结束，同一 Session 的后续运行属于新的 Execution。
+_Avoid_: Run Session, Configuration Run State, Process ID
 
-**Active Project Run Execution**:
-处于“启动中”“运行中”“停止中”“停止失败”“重启中”或“重启失败”的 Project Run Execution；“已结束”“已退出”和“启动失败”的 Execution 不属于活动运行。
-_Avoid_: Running Project, Active Project, Active Project Run Session
+**Active Run Execution**:
+处于“启动中”“运行中”“停止中”“停止失败”“重启中”或“重启失败”的 Run Execution；“已结束”“已退出”和“启动失败”的 Execution 不属于活动运行。
+_Avoid_: Running Project, Active Project, Active Run Session
 
-**Active Project Run Session**:
-当前承载 Active Project Run Execution 的 Project Run Session；没有当前 Execution，或当前 Execution 已结束、已退出或启动失败的 Session 不属于活动会话。
-_Avoid_: Running Project, Active Project, Active Project Run Execution
+**Active Run Session**:
+当前承载 Active Run Execution 的 Run Session；没有当前 Execution，或当前 Execution 已结束、已退出或启动失败的 Session 不属于活动会话。
+_Avoid_: Running Project, Active Project, Active Run Execution
 
-**Project Run Failure**:
-Project Run Execution 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
+**Run Failure**:
+Run Execution 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
 _Avoid_: Project Health, Project Error
 
 **Status Bar Residency**:
-DevEnv 在主窗口关闭后仍保持可访问，并继续保留当前进程中的 Project Run Session，直到用户明确执行完全退出。
+DevEnv 在主窗口关闭后仍保持可访问，并继续保留当前进程中的 Run Session，直到用户明确执行完全退出。
 _Avoid_: Hidden App, Background Project
 
 **Complete Application Exit**:
-用户明确退出 DevEnv 后结束 Status Bar Residency，并清理所有仍活动的 Project Run Session；关闭主窗口本身不构成 Complete Application Exit。
+用户明确退出 DevEnv 后结束 Status Bar Residency，并清理所有仍活动的 Run Session；关闭主窗口本身不构成 Complete Application Exit。
 _Avoid_: Window Close, Session Stop
 
 **Run Session Summary**:
-状态栏对已创建 Project Run Session 的运行中、已停止和异常数量汇总；从未创建会话的 Project Run Configuration 不计入汇总。
+状态栏对已创建 Run Session 的运行中、已停止和异常数量汇总；从未创建会话的 Run Configuration 不计入汇总。
 _Avoid_: Project Health, Configuration Count
 
-**Project Run Listener Binding**:
-监听进程能够被确证属于某个 Project Run Session 的 Listener Binding；无法可靠归属的绑定保持未知，不按 Project Root 或命令文本猜测。
+**Run Listener Binding**:
+监听进程能够被确证属于某个 Run Session 的 Listener Binding；无法可靠归属的绑定保持未知，不按 Project Root 或命令文本猜测。
 _Avoid_: Project Port, Inferred Session Port
 
 **Project Repository State**:
-对 Project Root 所属 Git 仓库当前分支或 detached HEAD 的即时观察结果；它不是 Project Run Session 启动时的仓库快照。
+对 Project Root 所属 Git 仓库当前分支或 detached HEAD 的即时观察结果；它不是 Run Session 启动时的仓库快照。
 _Avoid_: Git Tooling State, Launch Branch
 
 **Overview Attention**:
-与 Active Project Run Session 或尚未清除的 Project Run Failure 相关，或会降低总览可信度与整机安全性的明确风险集合；Active Project Run Session 所属 Project Root 的 Requirement Satisfaction State 为“未满足”“声明冲突”或“无法判断”时均属于该集合，其中“无法判断”只表示证据不足；已匹配的 Database Installation 没有“正在监听”结果时，全部明确“未监听”表示当前未监听，含“监听状态未知”则只表示监听证据不足；处于运行中但无法确证进程所有权的 Project Run Session 也以证据不足进入该集合。未运行项目的要求缺口和普通未安装、未启动状态不属于该集合。
+与 Active Run Session 或尚未清除的 Run Failure 相关，或会降低总览可信度与整机安全性的明确风险集合；Active Run Session 关联项目的 Project Root 的 Requirement Satisfaction State 为“未满足”“声明冲突”或“无法判断”时均属于该集合，其中“无法判断”只表示证据不足；已匹配的 Database Installation 没有“正在监听”结果时，全部明确“未监听”表示当前未监听，含“监听状态未知”则只表示监听证据不足；处于运行中但无法确证进程所有权的 Run Session 也以证据不足进入该集合。未关联项目的运行仍纳入运行与端口风险，但不产生项目要求风险；未运行项目的要求缺口和普通未安装、未启动状态不属于该集合。
 _Avoid_: Machine Health, Environment Issue, All Notices
 
 **Overview Attention Item**:
-Overview Attention 中一个可独立导航的风险：项目要求按 Project Root 与能力唯一，Project Requirements 缺失或过期证据按 Project Root 唯一且不替代上次已知风险，其中刷新中的暂态不算证据缺失；运行失败和运行证据不足各按 Project Run Session 唯一，端口暴露按会话汇总，扫描与磁盘风险各自唯一。Overview Attention Item 依次按运行失败、运行证据不足、全局刷新失败或过期、Project Requirements 证据缺失或过期、要求未满足或声明冲突或无法判断、端口暴露、PATH 冲突和磁盘不足排序；同类风险按发生时间倒序、再按标题稳定排序，无发生时间的项目排在有时间项目之后。
+Overview Attention 中一个可独立导航的风险：项目要求按 Project Root 与能力唯一，Project Requirements 缺失或过期证据按 Project Root 唯一且不替代上次已知风险，其中刷新中的暂态不算证据缺失；运行失败和运行证据不足各按 Run Session 唯一，端口暴露按会话汇总，扫描与磁盘风险各自唯一。Overview Attention Item 依次按运行失败、运行证据不足、全局刷新失败或过期、Project Requirements 证据缺失或过期、要求未满足或声明冲突或无法判断、端口暴露、PATH 冲突和磁盘不足排序；同类风险按发生时间倒序、再按标题稳定排序，无发生时间的项目排在有时间项目之后。
 _Avoid_: Notice Count, Duplicate Session Warning
 
 **Overview Attention Severity**:
@@ -109,7 +113,7 @@ _Avoid_: Dynamic Status Freshness
 _Avoid_: Environment Snapshot Freshness
 
 **Ignored Project**:
-用户从 DevEnv 删除后不再由 Project Search Root 自动恢复的 Project Root；直接重新添加该目录或由用户恢复时解除忽略。
+一个 Workspace 内因用户删除项目而不再由 Project Search Root 自动新增项目记录的目录；它不影响其他 Workspace 或仍指向该目录的项目记录。显式重新添加可以解除忽略，但不会恢复已删除项目的身份或旧配置关联。
 _Avoid_: Deleted Project, Unavailable Project
 
 **Project Component**:

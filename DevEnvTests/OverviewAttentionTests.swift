@@ -11,10 +11,10 @@ final class OverviewAttentionTests: XCTestCase {
         let requirements = analysis(requirements: [requirement("node", .unsatisfied)])
         let result = project(runs: [first, second], analyses: ["api-record": requirements, "worker-record": requirements])
         XCTAssertEqual(result.runs.count, 2)
-        XCTAssertEqual(result.items.filter { $0.kind == .projectRequirement }.count, 2)
+        XCTAssertEqual(result.items.filter { $0.kind == .projectRequirement }.count, 1)
         XCTAssertEqual(result.items.first?.target, .project("api-record", capability: "node"))
         let missing = project(runs: [first, second])
-        XCTAssertEqual(missing.items.filter { $0.kind == .projectRequirementsEvidence }.count, 2)
+        XCTAssertEqual(missing.items.filter { $0.kind == .projectRequirementsEvidence }.count, 1)
         let available = project(runs: [first, second], analyses: ["worker-record": requirements])
         XCTAssertFalse(available.items.contains { $0.kind == .projectRequirementsEvidence })
         XCTAssertEqual(available.items.first?.target, .project("worker-record", capability: "node"))
@@ -38,6 +38,26 @@ final class OverviewAttentionTests: XCTestCase {
         let result = project(runs: [unknown, starting, owned])
 
         XCTAssertEqual(result.items.filter { $0.kind == .runEvidence }.map(\.id), ["run-evidence:unknown"])
+    }
+
+    func testIndependentRunsKeepRunRisksWithoutProjectRequirementRisks() {
+        let failed = run(
+            id: "failed",
+            projectID: nil,
+            state: .exited(1),
+            failure: "退出码 1",
+            failureAt: now.addingTimeInterval(-10)
+        )
+        let exposed = run(id: "exposed", projectID: nil, state: .running, ownedProcessIDs: nil)
+        let listening = run(id: "listening", projectID: nil, state: .running, ownedProcessIDs: [42])
+        let service = LocalServiceSnapshot(processName: "independent", pid: 42, bindings: [
+            ListenerBinding(address: "0.0.0.0", port: 8080, family: .ipv4)
+        ])
+
+        let result = project(snapshot: makeSnapshot(localServices: [service]), runs: [failed, exposed, listening])
+
+        XCTAssertEqual(result.items.map(\.kind), [.runFailure, .runEvidence, .exposedPort])
+        XCTAssertFalse(result.items.contains { $0.kind == .projectRequirement || $0.kind == .projectRequirementsEvidence })
     }
 
     func testFreshnessThresholdsAreStrictlyGreaterThan60SecondsAnd24Hours() {
@@ -152,16 +172,16 @@ final class OverviewAttentionTests: XCTestCase {
 
     private func run(
         id: String,
-        projectID: String = "/tmp/project",
+        projectID: String? = "/tmp/project",
         projectPath: String? = nil,
         state: ProjectRunSessionState,
         ownedProcessIDs: Set<Int32>? = [],
         failure: String? = nil,
         failureAt: Date? = nil
     ) -> OverviewAttentionRunInput {
-        let project = ProjectRecord(id: projectID, path: projectPath ?? projectID, discoveredAt: now)
+        let project = projectID.map { ProjectRecord(id: $0, path: projectPath ?? $0, discoveredAt: now) }
         return OverviewAttentionRunInput(
-            configuration: ProjectRunConfiguration(id: id, projectID: projectID, name: id, command: "run", workingDirectory: projectID),
+            configuration: ProjectRunConfiguration(id: id, projectID: projectID, name: id, command: "run", workingDirectory: projectID ?? "/tmp"),
             project: project, state: state, lastSuccessfulCommand: nil, startedAt: now.addingTimeInterval(-120),
             failureMessage: failure, failureAt: failureAt, ownedProcessIDs: ownedProcessIDs,
             physicalMemoryBytes: nil, repositoryState: .nonGit

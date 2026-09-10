@@ -528,6 +528,49 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(factory.engines.flatMap(\.launches).map(\.workingDirectory), [firstRoot.path, secondWorkingDirectory.path])
     }
 
+    @MainActor
+    func testStatusBarNamesAndStartsIndependentRunsAcrossAllWorkspaces() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let projectsModel = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+        let first = try XCTUnwrap(projectsModel.createRunConfiguration(
+            name: "API", command: "first", workingDirectory: directory.path
+        ))
+        let secondWorkspace = try XCTUnwrap(projectsModel.createWorkspace(name: "后台服务"))
+        XCTAssertTrue(projectsModel.selectWorkspace(secondWorkspace.id))
+        let second = try XCTUnwrap(projectsModel.createRunConfiguration(
+            name: "API", command: "second", workingDirectory: directory.path
+        ))
+        XCTAssertEqual(first.workspaceID, Workspace.defaultWorkspace.id)
+        XCTAssertEqual(second.workspaceID, secondWorkspace.id)
+        XCTAssertNil(first.projectID)
+        XCTAssertNil(second.projectID)
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: projectsModel,
+            makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+        let appDelegate = DevEnvAppDelegate(projectsModel: projectsModel, runCoordinator: coordinator)
+
+        appDelegate.rebuildStatusMenu()
+        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区启动"))
+        XCTAssertTrue(startItem.isEnabled)
+        XCTAssertTrue(NSApplication.shared.sendAction(
+            try XCTUnwrap(startItem.action),
+            to: startItem.target,
+            from: startItem
+        ))
+        appDelegate.rebuildStatusMenu()
+
+        XCTAssertEqual(factory.engines.flatMap(\.launches).map(\.arguments), [["-i", "-c", "first"], ["-i", "-c", "second"]])
+        XCTAssertTrue(appDelegate.statusMenu.items.contains { $0.title == "后台服务 · API" })
+        XCTAssertTrue(appDelegate.statusMenu.items.contains { $0.title == "默认工作区 · API" })
+    }
+
     func testStatusBarTrustedGlobalStartIsImmediateAndRetainsSharedSessions() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
