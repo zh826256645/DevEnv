@@ -41,7 +41,7 @@ DevEnv 保存、属于一个 Workspace 且可选关联该工作区内一个 Proj
 _Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
 
 **Run Batch Intent**:
-用户明确触发批量启动或停止时，从触发入口的当前作用域解析并冻结、仅用于本次提交的一组单项启动请求或 Active Run Execution；运行页作用域为当前 Workspace 内的项目筛选与搜索结果，状态栏作用域为全部 Workspace。它不是持久化运行组或运行编排，各目标按单项语义独立处理。
+用户明确触发批量启动或停止时，从触发入口的当前作用域解析并冻结、仅用于本次提交的一组单项启动请求或 Active Run Execution；运行页作用域为当前 Workspace 内的项目、状态筛选与搜索结果，状态栏作用域为全部 Workspace。它不是持久化运行组或运行编排，各目标按单项语义独立处理。
 _Avoid_: Saved Run Group, Live Filter Query, All Configurations, Atomic Run, Run Orchestration, Batch Run History
 
 **Disabled Run Configuration**:

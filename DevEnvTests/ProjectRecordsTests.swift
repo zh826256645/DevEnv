@@ -1177,6 +1177,12 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(model.records(matching: "ALP").map(\.title), ["Alpha"])
         XCTAssertEqual(model.records(matching: "nested").map(\.title), ["beta"])
         XCTAssertEqual(model.records(matching: "").map(\.title), ["Alpha", "beta"])
+        XCTAssertEqual(model.records(matching: "  ", summary: .undeclared).map(\.title), ["Alpha", "beta"])
+        XCTAssertEqual(model.records(matching: " ALP ", summary: .undeclared).map(\.title), ["Alpha"])
+        XCTAssertTrue(model.records(matching: "Alpha", summary: .satisfied).isEmpty)
+        XCTAssertTrue(model.records(matching: "missing", summary: .undeclared).isEmpty)
+        _ = try XCTUnwrap(model.createWorkspace(name: "Other"))
+        XCTAssertTrue(model.records(matching: "", summary: .undeclared).isEmpty)
     }
 
     @MainActor
@@ -1204,6 +1210,8 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(model.analyses[try XCTUnwrap(model.records.first).id], previous)
         XCTAssertTrue(model.staleProjectIDs.contains(try XCTUnwrap(model.records.first).id))
         XCTAssertEqual(model.summary(for: try XCTUnwrap(model.records.first)), .unavailable)
+        XCTAssertEqual(model.records(matching: "project", summary: .unavailable).map(\.id), model.records.map(\.id))
+        XCTAssertTrue(model.records(matching: "", summary: previous.summary).isEmpty)
         try? FileManager.default.removeItem(at: directory)
     }
 

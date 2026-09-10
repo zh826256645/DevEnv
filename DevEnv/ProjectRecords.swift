@@ -1213,12 +1213,12 @@ final class ProjectsViewModel: ObservableObject {
         }
     }
 
-    func records(matching searchText: String) -> [ProjectRecord] {
+    func records(matching searchText: String, summary: ProjectRequirementsSummary? = nil) -> [ProjectRecord] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return workspaceRecords }
         return workspaceRecords.filter {
-            $0.title.localizedCaseInsensitiveContains(query)
-                || $0.path.localizedCaseInsensitiveContains(query)
+            (summary == nil || self.summary(for: $0) == summary)
+                && (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query)
+                    || $0.path.localizedCaseInsensitiveContains(query))
         }
     }
 

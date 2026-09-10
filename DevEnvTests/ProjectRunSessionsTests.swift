@@ -7,6 +7,36 @@ import XCTest
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+    func testWorkspaceRunFiltersPreserveLifecycleAndSearchProjectNames() {
+        var configuration = ProjectRunConfiguration(name: "Web 前端", command: "npm run dev", workingDirectory: "")
+        let cases: [(ProjectRunSessionState, Set<RunListStatusFilter>)] = [
+            (.inactive, [.all, .inactive]),
+            (.starting, [.all, .active]),
+            (.running, [.all, .active]),
+            (.stopping, [.all, .active]),
+            (.restarting, [.all, .active]),
+            (.stopFailed("busy"), [.all, .active, .failed]),
+            (.restartFailed("busy"), [.all, .active, .failed]),
+            (.stopped(0), [.all, .ended]),
+            (.exited(0), [.all, .ended]),
+            (.exited(1), [.all, .failed]),
+            (.launchFailed("missing directory"), [.all, .failed]),
+        ]
+        for (state, expected) in cases {
+            for filter in RunListStatusFilter.allCases {
+                XCTAssertEqual(filter.includes(configuration, state: state, searchText: "", projectTitle: "收付宝"), expected.contains(filter))
+            }
+        }
+        for query in [" web ", "NPM", "收付宝", "  "] {
+            XCTAssertTrue(RunListStatusFilter.all.includes(configuration, state: .inactive, searchText: query, projectTitle: "收付宝"))
+        }
+        XCTAssertFalse(RunListStatusFilter.all.includes(configuration, state: .inactive, searchText: "不存在", projectTitle: "收付宝"))
+        configuration.isEnabled = false
+        for filter in RunListStatusFilter.allCases {
+            XCTAssertEqual(filter.includes(configuration, state: .exited(1), searchText: "", projectTitle: "收付宝"), filter == .all || filter == .disabled)
+        }
+    }
+
     func testAddingParentPreservesChildRunsAndDetachedDirectoriesAcrossReload() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             .resolvingSymlinksInPath()
@@ -2820,7 +2850,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         ))
         let window = NSWindow(contentViewController: host)
         window.isReleasedWhenClosed = false
-        window.setContentSize(NSSize(width: 640, height: 280))
+        window.setContentSize(NSSize(width: 392, height: 280))
         window.makeKeyAndOrderFront(nil)
         window.contentView?.layoutSubtreeIfNeeded()
         defer { window.close() }
@@ -2856,6 +2886,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         let output = terminalOutput()
         XCTAssertTrue(engine.terminal.window === window)
         XCTAssertNotNil(engine.terminal.superview)
+        XCTAssertLessThanOrEqual(engine.terminal.bounds.width, 392)
         XCTAssertTrue(output.contains("HISTORY:00001"))
         XCTAssertTrue(output.contains("HISTORY:01500"))
         XCTAssertTrue(engine.signalProcessGroups(SIGKILL))
@@ -3178,7 +3209,7 @@ private struct ExpandedTerminalHarness: View {
                 ProjectTerminalView(terminalView: terminalView)
             }
         }
-        .frame(minWidth: 640, minHeight: 280)
+        .frame(minWidth: 392, minHeight: 280)
         .sheet(isPresented: $model.isExpanded) {
             ProjectTerminalView(terminalView: terminalView)
                 .frame(minWidth: 900, minHeight: 500)
