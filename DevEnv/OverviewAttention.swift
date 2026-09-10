@@ -158,13 +158,9 @@ enum OverviewAttention {
             add("environment-snapshot-stale", "环境扫描结果已过期", "超过 24 小时没有完成一次环境扫描", .warning, .refresh, input.snapshot.scannedAt, .environmentRefresh)
         }
 
-        let activeProjects = Dictionary(grouping: runs.filter { $0.state.isLive }.compactMap(\.project), by: { $0.path })
-            .values.compactMap { group in
-                let projects = group.sorted { $0.id < $1.id }
-                return projects.first { input.analyses[$0.id] != nil && !input.staleProjectIDs.contains($0.id) }
-                    ?? projects.first { input.analyses[$0.id] != nil }
-                    ?? projects.first
-            }.sorted { $0.path < $1.path }
+        // Keep project identity scoped to its workspace; equal paths may belong to distinct runs.
+        let activeProjects = Dictionary(uniqueKeysWithValues: runs.filter { $0.state.isLive }.compactMap(\.project).map { ($0.id, $0) })
+            .values.sorted { $0.id < $1.id }
         var requirementRiskIDs: Set<String> = []
         var requirementItemIDs: Set<String> = []
         var pathConflictIDs: Set<String> = []
