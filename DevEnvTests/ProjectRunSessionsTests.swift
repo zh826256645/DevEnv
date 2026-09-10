@@ -389,6 +389,37 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(factory.engines.count, 2)
     }
 
+    @MainActor
+    func testWorkspaceBatchScopeKeepsIndependentRunsInTheirWorkspace() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = ProjectsViewModel(
+            store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        )
+        let first = try XCTUnwrap(model.createRunConfiguration(
+            name: "API", command: "first", workingDirectory: directory.path
+        ))
+        let secondWorkspace = try XCTUnwrap(model.createWorkspace(name: "后台服务"))
+        XCTAssertTrue(model.selectWorkspace(secondWorkspace.id))
+        let second = try XCTUnwrap(model.createRunConfiguration(
+            name: "API", command: "second", workingDirectory: directory.path
+        ))
+        let coordinator = ProjectRunCoordinator(
+            projectsModel: model,
+            makeEngine: { FakeProjectRunEngine() },
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
+            scheduler: FakeProjectRunScheduler()
+        )
+
+        XCTAssertEqual(coordinator.runConfigurations(workspaceID: first.workspaceID).map(\.id), [first.id])
+        XCTAssertEqual(coordinator.runConfigurations(workspaceID: second.workspaceID).map(\.id), [second.id])
+        XCTAssertEqual(
+            coordinator.makeBatchStartIntent(in: coordinator.runConfigurations(workspaceID: second.workspaceID))
+                .startRequests.map(\.configuration.id),
+            [second.id]
+        )
+    }
+
     func testSameDirectoryRecordRemovalKeepsSiblingExecutionAndConfiguration() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

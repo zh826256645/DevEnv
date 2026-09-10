@@ -31,6 +31,30 @@ final class OverviewAttentionTests: XCTestCase {
         XCTAssertEqual(result.items.first?.id, "run-failure:failed")
     }
 
+    func testSameDirectoryRunFailuresKeepRunIdentity() {
+        let first = run(
+            id: "first",
+            projectID: "api-record",
+            projectPath: "/tmp/active",
+            state: .exited(1),
+            failure: "退出码 1",
+            failureAt: now.addingTimeInterval(-1)
+        )
+        let second = run(
+            id: "second",
+            projectID: "worker-record",
+            projectPath: "/tmp/active",
+            state: .exited(1),
+            failure: "退出码 1",
+            failureAt: now.addingTimeInterval(-2)
+        )
+
+        let result = project(runs: [first, second])
+
+        XCTAssertEqual(result.runs.map(\.id), ["first", "second"])
+        XCTAssertEqual(result.items.filter { $0.kind == .runFailure }.map(\.id), ["run-failure:first", "run-failure:second"])
+    }
+
     func testRunEvidenceOnlyAppliesToRunningUnknownOwnership() {
         let unknown = run(id: "unknown", state: .running, ownedProcessIDs: nil)
         let starting = run(id: "starting", state: .starting, ownedProcessIDs: nil)
