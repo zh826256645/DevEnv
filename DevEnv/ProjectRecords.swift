@@ -733,10 +733,11 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         for path in paths {
             records.append(ProjectRecord(path: path, discoveredAt: date, boundary: .explicit, workspaceID: workspaceID))
         }
-        records.removeAll { record in
+        let replacedProjectIDs = Set(records.filter { record in
             record.workspaceID == workspaceID && record.boundary == .manifest
                 && paths.contains(where: { record.path.hasPrefix($0 + "/") })
-        }
+        }.map(\.id))
+        _ = removeRecordsPreservingRunConfigurations(replacedProjectIDs)
         records.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
@@ -752,21 +753,9 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
     }
 
     mutating func remove(projectIDs: Set<String>, at date: Date = Date()) -> ProjectRemovalSummary {
-        let projects = records.filter { projectIDs.contains($0.id) }
+        let projects = removeRecordsPreservingRunConfigurations(projectIDs)
         let ignoredPaths = Set(ignoredProjects.filter { projectIDs.contains($0.id) }.map(\.path))
-        records.removeAll { projectIDs.contains($0.id) }
         ignoredProjects.removeAll { projectIDs.contains($0.id) }
-        // Preserve the directory before losing its base; keep the stale ID until explicit detachment.
-        for index in runConfigurations.indices {
-            guard let project = projects.first(where: { $0.id == runConfigurations[index].projectID }) else { continue }
-            runConfigurations[index].deletedProjectTitle = project.title
-            runConfigurations[index].deletedProjectPath = project.path
-            guard !NSString(string: runConfigurations[index].workingDirectory).isAbsolutePath,
-                  let directory = try? ProjectRunWorkingDirectory.location(
-                    projectRoot: project.path, workingDirectory: runConfigurations[index].workingDirectory
-                  ) else { continue }
-            runConfigurations[index].workingDirectory = directory.path
-        }
         for project in projects where !ignoredProjects.contains(where: { $0.path == project.path && $0.workspaceID == project.workspaceID }) {
             ignoredProjects.append(IgnoredProject(
                 path: project.path,
@@ -780,6 +769,23 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
             projectCount: projects.count,
             ignoredProjectCount: ignoredPaths.count
         )
+    }
+
+    private mutating func removeRecordsPreservingRunConfigurations(_ projectIDs: Set<String>) -> [ProjectRecord] {
+        let projects = records.filter { projectIDs.contains($0.id) }
+        // Preserve the directory before losing its base; keep the stale ID until explicit detachment.
+        for index in runConfigurations.indices {
+            guard let project = projects.first(where: { $0.id == runConfigurations[index].projectID }) else { continue }
+            runConfigurations[index].deletedProjectTitle = project.title
+            runConfigurations[index].deletedProjectPath = project.path
+            guard !NSString(string: runConfigurations[index].workingDirectory).isAbsolutePath,
+                  let directory = try? ProjectRunWorkingDirectory.location(
+                    projectRoot: project.path, workingDirectory: runConfigurations[index].workingDirectory
+                  ) else { continue }
+            runConfigurations[index].workingDirectory = directory.path
+        }
+        records.removeAll { projectIDs.contains($0.id) }
+        return projects
     }
 
     @discardableResult

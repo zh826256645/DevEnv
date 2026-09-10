@@ -7,6 +7,68 @@ import XCTest
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+    func testAddingParentPreservesChildRunsAndDetachedDirectoriesAcrossReload() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let parent = directory.appendingPathComponent("parent")
+        let child = parent.appendingPathComponent("child")
+        let scripts = child.appendingPathComponent("scripts")
+        try FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true)
+        let manifest = child.appendingPathComponent("package.json")
+        try Data("{}".utf8).write(to: manifest)
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [child])
+        let coordinator = fixture.coordinator
+        let cases = [("", child.path), ("scripts", scripts.path), ("..", parent.path), (directory.path, directory.path)]
+        let configurations = try cases.enumerated().map { index, entry in
+            try XCTUnwrap(coordinator.createRunConfiguration(
+                projectID: child.path, name: "运行 \(index)", command: "pwd", workingDirectory: entry.0,
+                sourceIdentity: "source-\(index)", sourceProjectID: child.path
+            ))
+        }
+        XCTAssertEqual(coordinator.run(configurations[0]), .started)
+        let execution = try XCTUnwrap(coordinator.session(for: configurations[0].id)?.activeExecution)
+
+        let before = fixture.projectsModel.document
+        let recordsFile = directory.appendingPathComponent("records.json")
+        try FileManager.default.removeItem(at: recordsFile)
+        try FileManager.default.createDirectory(at: recordsFile, withIntermediateDirectories: false)
+        fixture.projectsModel.addDirect([parent])
+        XCTAssertEqual(fixture.projectsModel.document, before)
+        XCTAssertNotNil(fixture.projectsModel.operationError)
+        try FileManager.default.removeItem(at: recordsFile)
+        try fixture.store.save(before)
+
+        fixture.projectsModel.addDirect([parent])
+        XCTAssertFalse(fixture.projectsModel.records.contains { $0.id == child.path })
+        XCTAssertTrue(fixture.projectsModel.ignoredProjects.isEmpty)
+        XCTAssertEqual(coordinator.session(for: configurations[0].id)?.activeExecution, execution)
+        let reloaded = ProjectsViewModel(store: fixture.store)
+        let factory = FakeProjectRunEngineFactory()
+        let restoredCoordinator = ProjectRunCoordinator(
+            projectsModel: reloaded, makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"), scheduler: FakeProjectRunScheduler()
+        )
+        for (configuration, entry) in zip(configurations, cases) {
+            var retained = try XCTUnwrap(restoredCoordinator.runConfigurations().first { $0.id == configuration.id })
+            XCTAssertEqual(retained.deletedProjectTitle, "child")
+            XCTAssertEqual(retained.deletedProjectPath, child.path)
+            XCTAssertEqual(retained.workingDirectory, entry.1)
+            XCTAssertEqual(retained.sourceIdentity, configuration.sourceIdentity)
+            XCTAssertEqual(retained.sourceProjectID, configuration.sourceProjectID)
+            XCTAssertEqual(restoredCoordinator.run(retained), .rejected(ProjectRunConfigurationError.projectNotFound.localizedDescription))
+            retained.projectID = nil
+            XCTAssertTrue(restoredCoordinator.updateRunConfiguration(
+                retained, name: retained.name, command: retained.command, workingDirectory: retained.workingDirectory
+            ))
+            let detached = try XCTUnwrap(restoredCoordinator.runConfigurations().first { $0.id == configuration.id })
+            XCTAssertEqual(restoredCoordinator.run(detached), .started)
+            XCTAssertEqual(restoredCoordinator.session(for: detached.id)?.activeExecution?.workingDirectory, entry.1)
+            XCTAssertEqual(factory.engines.last?.launches.last?.workingDirectory, entry.1)
+        }
+        XCTAssertEqual(try Data(contentsOf: manifest), Data("{}".utf8))
+    }
+
     func testProjectRemovalCannotInterruptAnAlreadyStoppingConfigurationDeletion() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
