@@ -123,7 +123,7 @@ enum OverviewAttention {
                 return lhs.id < rhs.id
             }
 
-        var items: [OverviewAttentionItem] = []
+        var items: [String: OverviewAttentionItem] = [:]
         func add(
             _ id: String,
             _ title: String,
@@ -133,7 +133,8 @@ enum OverviewAttention {
             _ occurredAt: Date?,
             _ target: OverviewAttentionTarget
         ) {
-            items.append(OverviewAttentionItem(id: id, title: title, detail: detail, severity: severity, kind: kind, occurredAt: occurredAt, target: target))
+            if let existing = items[id], existing.severity == .critical || severity == .warning { return }
+            items[id] = OverviewAttentionItem(id: id, title: title, detail: detail, severity: severity, kind: kind, occurredAt: occurredAt, target: target)
         }
 
         for run in runs {
@@ -158,7 +159,9 @@ enum OverviewAttention {
             add("environment-snapshot-stale", "环境扫描结果已过期", "超过 24 小时没有完成一次环境扫描", .warning, .refresh, input.snapshot.scannedAt, .environmentRefresh)
         }
 
-        let activeProjects = Dictionary(grouping: runs.filter { $0.state.isLive }.compactMap(\.project), by: { $0.path })
+        let activeProjects = Dictionary(grouping: runs.filter { $0.state.isLive }.compactMap(\.project), by: \.id)
+            .values.compactMap(\.first).sorted { $0.id < $1.id }
+        let evidenceProjects = Dictionary(grouping: activeProjects, by: \.path)
             .values.compactMap { group in
                 let projects = group.sorted { $0.id < $1.id }
                 return projects.first { input.analyses[$0.id] != nil && !input.staleProjectIDs.contains($0.id) }
@@ -166,22 +169,23 @@ enum OverviewAttention {
                     ?? projects.first
             }.sorted { $0.path < $1.path }
         var requirementRiskIDs: Set<String> = []
-        var requirementItemIDs: Set<String> = []
-        var pathConflictIDs: Set<String> = []
-        for project in activeProjects {
+        for project in evidenceProjects {
             let projectID = project.id
-            guard let analysis = input.analyses[projectID] else {
+            guard input.analyses[projectID] != nil else {
                 if !input.refreshingProjectIDs.contains(projectID) {
-                add("project-requirements-unavailable:\(project.path)", "\(project.title) 项目要求证据不可用", "尚未取得 Project Requirements 分析结果", .warning, .projectRequirementsEvidence, nil, .project(projectID, capability: nil))
+                    add("project-requirements-unavailable:\(project.path)", "\(project.title) 项目要求证据不可用", "尚未取得 Project Requirements 分析结果", .warning, .projectRequirementsEvidence, nil, .project(projectID, capability: nil))
                 }
                 continue
             }
             if input.staleProjectIDs.contains(projectID) {
                 add("project-requirements-stale:\(project.path)", "\(project.title) 项目要求证据已过期", "当前显示上次成功分析结果，尚未取得最新证据", .warning, .projectRequirementsEvidence, nil, .project(projectID, capability: nil))
             }
+        }
+        for project in activeProjects {
+            let projectID = project.id
+            guard let analysis = input.analyses[projectID] else { continue }
             for requirement in analysis.requirements {
                 let itemID = "project-requirement:\(project.path):\(requirement.capability)"
-                guard requirementItemIDs.insert(itemID).inserted else { continue }
                 if requirement.satisfaction == .unsatisfied, databaseCapabilities.contains(requirement.capability) {
                     requirementRiskIDs.insert(itemID)
                     add(itemID, "\(project.title) 缺少 \(capabilityTitle(requirement.capability))", "未发现满足项目要求的数据库安装", .critical, .projectRequirement, nil, .database(databaseID(for: requirement.capability)))
@@ -217,7 +221,6 @@ enum OverviewAttention {
                 guard !requirementRiskIDs.contains(requirementID),
                       let runtime = input.snapshot.runtimes.first(where: { $0.id == requirement.capability }),
                       runtime.hasPathVersionConflict else { continue }
-                guard pathConflictIDs.insert(requirementID).inserted else { continue }
                 let effectiveVersion = runtime.installations.first(where: \.isEffective)?.version ?? "未知"
                 add("path-conflict:\(project.path):\(requirement.capability)", "\(capabilityTitle(requirement.capability)) PATH 版本冲突", "\(project.title)：要求 \(requirement.expression) · 当前生效 \(effectiveVersion)", .warning, .pathConflict, nil, .runtime(requirement.capability))
             }
@@ -233,14 +236,15 @@ enum OverviewAttention {
             add("low-disk-space", "系统卷可用空间不足", "当前可用 \(ByteCountFormatter.string(fromByteCount: Int64(free), countStyle: .memory))，低于 20 GB", .warning, .disk, input.snapshot.scannedAt, .storage)
         }
 
-        return OverviewAttentionResult(runs: runs, items: items.sorted { lhs, rhs in
+        return OverviewAttentionResult(runs: runs, items: items.values.sorted { lhs, rhs in
             let lhsRank = rank(lhs.kind)
             let rhsRank = rank(rhs.kind)
             if lhsRank != rhsRank { return lhsRank < rhsRank }
             let lhsDate = lhs.occurredAt ?? .distantPast
             let rhsDate = rhs.occurredAt ?? .distantPast
             if lhsDate != rhsDate { return lhsDate > rhsDate }
-            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            let titleOrder = lhs.title.localizedStandardCompare(rhs.title)
+            return titleOrder == .orderedSame ? lhs.id < rhs.id : titleOrder == .orderedAscending
         })
     }
 

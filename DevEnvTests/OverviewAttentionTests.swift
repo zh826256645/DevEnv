@@ -31,6 +31,42 @@ final class OverviewAttentionTests: XCTestCase {
         XCTAssertEqual(result.items.first?.id, "run-failure:failed")
     }
 
+    func testSameDirectoryWorkspacesKeepAllRequirementRisksAndHighestSeverity() {
+        let first = run(id: "first", projectID: "a", projectPath: "/tmp/active", workspaceID: "one", state: .running)
+        let second = run(id: "second", projectID: "b", projectPath: "/tmp/active", workspaceID: "two", state: .running)
+        let runtime = RuntimeSnapshot(id: "node", name: "Node.js", installations: [
+            installation(id: "node18", version: "18", effective: true),
+            installation(id: "node22", version: "22", effective: false)
+        ])
+        let states: [(ProjectRequirementSatisfactionState, ProjectRequirementSatisfactionState)] = [
+            (.satisfied, .declarationConflict), (.undetermined, .declarationConflict),
+            (.declarationConflict, .declarationConflict), (.declarationConflict, .undetermined)
+        ]
+        for (firstState, secondState) in states {
+            let result = project(
+                snapshot: makeSnapshot(runtimes: [runtime]),
+                runs: [second, first],
+                analyses: [
+                    "a": analysis(requirements: [requirement("node", firstState)]),
+                    "b": analysis(requirements: [requirement("node", secondState), requirement("python", .undetermined)])
+                ]
+            )
+            let risks = result.items.filter { $0.kind == .projectRequirement }
+            XCTAssertEqual(risks.count, 2)
+            let node = risks.first { $0.id == "project-requirement:/tmp/active:node" }
+            XCTAssertEqual(node?.severity, .critical)
+            XCTAssertEqual(node?.target, .project(firstState == .declarationConflict ? "a" : "b", capability: "node"))
+            XCTAssertEqual(risks.first { $0.id == "project-requirement:/tmp/active:python" }?.severity, .warning)
+            XCTAssertFalse(result.items.contains { $0.kind == .pathConflict })
+        }
+        let staleRisk = project(
+            runs: [first, second],
+            analyses: ["a": analysis(requirements: []), "b": analysis(requirements: [requirement("node", .unsatisfied)])],
+            stale: ["b"]
+        )
+        XCTAssertEqual(staleRisk.items.filter { $0.kind == .projectRequirement }.count, 1)
+    }
+
     func testSameDirectoryRunFailuresKeepRunIdentity() {
         let first = run(
             id: "first",
@@ -46,10 +82,10 @@ final class OverviewAttentionTests: XCTestCase {
             projectPath: "/tmp/active",
             state: .exited(1),
             failure: "退出码 1",
-            failureAt: now.addingTimeInterval(-2)
+            failureAt: now.addingTimeInterval(-1)
         )
 
-        let result = project(runs: [first, second])
+        let result = project(runs: [second, first])
 
         XCTAssertEqual(result.runs.map(\.id), ["first", "second"])
         XCTAssertEqual(result.items.filter { $0.kind == .runFailure }.map(\.id), ["run-failure:first", "run-failure:second"])
@@ -198,14 +234,15 @@ final class OverviewAttentionTests: XCTestCase {
         id: String,
         projectID: String? = "/tmp/project",
         projectPath: String? = nil,
+        workspaceID: String = Workspace.defaultWorkspace.id,
         state: ProjectRunSessionState,
         ownedProcessIDs: Set<Int32>? = [],
         failure: String? = nil,
         failureAt: Date? = nil
     ) -> OverviewAttentionRunInput {
-        let project = projectID.map { ProjectRecord(id: $0, path: projectPath ?? $0, discoveredAt: now) }
+        let project = projectID.map { ProjectRecord(id: $0, path: projectPath ?? $0, discoveredAt: now, workspaceID: workspaceID) }
         return OverviewAttentionRunInput(
-            configuration: ProjectRunConfiguration(id: id, projectID: projectID, name: id, command: "run", workingDirectory: projectID ?? "/tmp"),
+            configuration: ProjectRunConfiguration(id: id, projectID: projectID, name: id, command: "run", workingDirectory: projectID ?? "/tmp", workspaceID: workspaceID),
             project: project, state: state, lastSuccessfulCommand: nil, startedAt: now.addingTimeInterval(-120),
             failureMessage: failure, failureAt: failureAt, ownedProcessIDs: ownedProcessIDs,
             physicalMemoryBytes: nil, repositoryState: .nonGit
