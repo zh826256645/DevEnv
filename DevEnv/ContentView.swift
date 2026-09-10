@@ -3842,7 +3842,8 @@ struct ContentView: View {
 
     private func overviewRunConfigurationCell(_ run: OverviewRun) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(run.configuration.name)
+            let workspaceName = projectsModel.document.workspaces.first { $0.id == run.configuration.workspaceID }?.name ?? "未知工作区"
+            Text("\(workspaceName) · \(run.configuration.name)")
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
