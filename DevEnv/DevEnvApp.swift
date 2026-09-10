@@ -166,11 +166,11 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(open)
         menu.addItem(.separator())
 
-        let start = NSMenuItem(title: "全部启动", action: #selector(requestRunAll(_:)), keyEquivalent: "")
+        let start = NSMenuItem(title: "全部工作区启动", action: #selector(requestRunAll(_:)), keyEquivalent: "")
         start.target = self
         start.isEnabled = runCoordinator.canStartBatch(in: runCoordinator.runConfigurations())
         menu.addItem(start)
-        let stop = NSMenuItem(title: "全部停止", action: #selector(requestStopAll(_:)), keyEquivalent: "")
+        let stop = NSMenuItem(title: "全部工作区停止", action: #selector(requestStopAll(_:)), keyEquivalent: "")
         stop.target = self
         stop.isEnabled = runCoordinator.canStopBatch(in: runCoordinator.runConfigurations())
         menu.addItem(stop)
@@ -199,8 +199,9 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         } else {
             for configuration in activeConfigurations {
                 let state = runCoordinator.session(for: configuration.id)?.state ?? .inactive
+                let workspaceName = projectsModel.document.workspaces.first { $0.id == configuration.workspaceID }?.name ?? "未知工作区"
                 let item = NSMenuItem(
-                    title: configuration.name,
+                    title: "\(workspaceName) · \(configuration.name)",
                     action: #selector(openSession(_:)),
                     keyEquivalent: ""
                 )

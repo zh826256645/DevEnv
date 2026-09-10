@@ -33,7 +33,7 @@ required_patterns = {
     "full SHA validation": r"TARGET_SHA[^\n]*\^\[0-9a-fA-F\]\{40\}\$",
     "remote master validation": r"git/ref/heads/master[\s\S]*?remote_master_sha[\s\S]*?TARGET_SHA",
     "exact target checkout": r"uses:\s*actions/checkout@[0-9a-f]{40}[\s\S]*?ref:\s*\$\{\{ inputs\.target_sha \}\}[\s\S]*?persist-credentials:\s*false",
-    "locked v0.1.2 metadata": r"EXPECTED_RELEASE_VERSION:\s*0\.1\.2[\s\S]*?EXPECTED_RELEASE_BUILD:\s*[\"']?3[\"']?[\s\S]*?RELEASE_VERSION[\s\S]*?EXPECTED_RELEASE_VERSION[\s\S]*?builds != \{expected_build\}",
+    "locked v0.1.3 metadata": r"EXPECTED_RELEASE_VERSION:\s*0\.1\.3[\s\S]*?EXPECTED_RELEASE_BUILD:\s*[\"']?4[\"']?[\s\S]*?RELEASE_VERSION[\s\S]*?EXPECTED_RELEASE_VERSION[\s\S]*?builds != \{expected_build\}",
     "release runner preflight": r"scripts/release-runner/preflight\.sh",
     "locked dependency resolution": r"xcodebuild -resolvePackageDependencies[\s\S]*?-disableAutomaticPackageResolution[\s\S]*?-onlyUsePackageVersionsFromResolvedFile[\s\S]*?git diff --quiet",
     "all arm64 XCTest": r"scripts/test/run-xctest-suite\.sh[\s\S]*?--destination [\"']platform=macOS,arch=arm64[\"'][\s\S]*?--test-log",

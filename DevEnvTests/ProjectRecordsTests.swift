@@ -2,6 +2,323 @@ import XCTest
 @testable import DevEnv
 
 final class ProjectRecordsTests: XCTestCase {
+    @MainActor
+    func testNestedProjectBoundariesAndIgnoredDirectoriesDoNotLeakBetweenWorkspaces() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let child = root.appendingPathComponent("child")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        try Data(#"{"engines":{"node":">=20"}}"#.utf8).write(to: root.appendingPathComponent("package.json"))
+        try Data(#"{"engines":{"node":"18"}}"#.utf8).write(to: child.appendingPathComponent("package.json"))
+        let model = ProjectsViewModel(store: ProjectRecordStore(fileURL: root.appendingPathComponent("records.json")))
+        model.addDirect([root, child])
+        let firstParent = try XCTUnwrap(model.workspaceRecords.first { $0.path == root.path })
+        let childRecord = try XCTUnwrap(model.workspaceRecords.first { $0.path == child.path })
+        model.remove(childRecord)
+        _ = try XCTUnwrap(model.createWorkspace(name: "包含组件"))
+        model.addDirect([root])
+        let secondParent = try XCTUnwrap(model.workspaceRecords.first)
+        for _ in 0 ..< 200 where model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.analyses[firstParent.id]?.components.map(\.relativePath), ["."])
+        XCTAssertEqual(model.analyses[secondParent.id]?.components.map(\.relativePath), [".", "child"])
+    }
+
+    func testVersionFiveMigratesToDefaultWorkspaceAndInvalidOwnershipNeverOverwritesStore() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("records.json")
+        let legacy = Data(#"""
+        {"schemaVersion":5,"records":[{"id":"project","title":"API","path":"/Projects/app","firstDiscoveredAt":"1970-01-01T00:01:40Z","lastDiscoveredAt":"1970-01-01T00:01:40Z","isNew":false}],"ignoredProjects":[{"path":"/Projects/ignored","ignoredAt":"1970-01-01T00:01:40Z"}],"runConfigurations":[{"id":"run","projectID":"project","name":"API","command":"  serve\n","workingDirectory":"api","sourceIdentity":"api/package.json#scripts.dev","isEnabled":false}],"trustedProjectRoots":[]}
+        """#.utf8)
+        try legacy.write(to: file)
+        let store = ProjectRecordStore(fileURL: file)
+        let migrated = try store.load()
+        XCTAssertEqual(migrated.workspaces, [Workspace.defaultWorkspace])
+        XCTAssertEqual(migrated.records.first?.id, "project")
+        XCTAssertEqual(migrated.records.first?.workspaceID, Workspace.defaultWorkspace.id)
+        XCTAssertEqual(migrated.ignoredProjects.first?.workspaceID, Workspace.defaultWorkspace.id)
+        XCTAssertEqual(migrated.runConfigurations.first?.workspaceID, Workspace.defaultWorkspace.id)
+        XCTAssertEqual(migrated.runConfigurations.first?.projectID, "project")
+        XCTAssertEqual(migrated.runConfigurations.first?.command, "  serve\n")
+        XCTAssertEqual(migrated.runConfigurations.first?.workingDirectory, "api")
+        XCTAssertEqual(migrated.runConfigurations.first?.sourceIdentity, "api/package.json#scripts.dev")
+        XCTAssertEqual(migrated.runConfigurations.first?.isEnabled, false)
+        XCTAssertEqual(try store.load(), migrated)
+        let valid = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        for field in ["records", "ignoredProjects", "runConfigurations"] {
+            for workspaceID: String? in [nil, "unknown"] {
+                var object = valid
+                var rows = try XCTUnwrap(object[field] as? [[String: Any]])
+                rows[0]["workspaceID"] = workspaceID
+                object[field] = rows
+                let corrupt = try JSONSerialization.data(withJSONObject: object)
+                try corrupt.write(to: file)
+                XCTAssertThrowsError(try store.load())
+                XCTAssertEqual(try Data(contentsOf: file), corrupt)
+            }
+        }
+        var crossWorkspace = valid
+        crossWorkspace["workspaces"] = [["id": "default", "name": "默认工作区"], ["id": "other", "name": "其他"]]
+        var runs = try XCTUnwrap(crossWorkspace["runConfigurations"] as? [[String: Any]])
+        runs[0]["workspaceID"] = "other"
+        crossWorkspace["runConfigurations"] = runs
+        let corrupt = try JSONSerialization.data(withJSONObject: crossWorkspace)
+        try corrupt.write(to: file)
+        XCTAssertThrowsError(try store.load())
+        XCTAssertEqual(try Data(contentsOf: file), corrupt)
+    }
+
+    @MainActor
+    func testWorkspaceProjectDiscoverySuggestionsAndConfigurationOwnershipStayIsolated() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"packageManager":"npm@10","scripts":{"dev":"serve"}}"#.utf8).write(to: root.appendingPathComponent("package.json"))
+        let store = ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+        let model = ProjectsViewModel(store: store)
+        let firstWorkspace = model.currentWorkspace.id
+        model.addDirect([root])
+        model.addDirect([root])
+        let first = try XCTUnwrap(model.workspaceRecords.first)
+        let sibling = try XCTUnwrap(model.workspaceRecords.first { $0.id != first.id })
+        for _ in 0 ..< 100 where model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        let suggestion = try XCTUnwrap(model.runSuggestions(projectID: first.id).first)
+        let run = try XCTUnwrap(model.adoptSuggestion(suggestion))
+        let secondWorkspace = try XCTUnwrap(model.createWorkspace(name: "第二工作区"))
+        XCTAssertTrue(model.workspaceRecords.isEmpty)
+        XCTAssertTrue(model.runConfigurations(workspaceID: secondWorkspace.id).isEmpty)
+        XCTAssertNil(model.adoptSuggestion(suggestion))
+        XCTAssertNil(model.createRunConfiguration(projectID: first.id, name: "越界", command: "serve", workingDirectory: "."))
+        model.scan([root])
+        // A scan belongs to the workspace that submitted it, even after selection changes.
+        XCTAssertTrue(model.selectWorkspace(firstWorkspace))
+        for _ in 0 ..< 200 where model.isScanning || model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.workspaceRecords.count, 2)
+        model.remove(first)
+        XCTAssertEqual(model.workspaceRecords.map(\.id), [sibling.id])
+        XCTAssertEqual(model.ignoredProjects.count, 1)
+        XCTAssertTrue(model.selectWorkspace(secondWorkspace.id))
+        XCTAssertTrue(model.ignoredProjects.isEmpty)
+        XCTAssertEqual(model.workspaceRecords.count, 1)
+        let second = try XCTUnwrap(model.workspaceRecords.first)
+        XCTAssertNotEqual(second.id, first.id)
+        XCTAssertNotEqual(second.id, sibling.id)
+        model.scan([root])
+        for _ in 0 ..< 200 where model.isScanning || model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.workspaceRecords.map(\.id), [second.id])
+        let secondRun = try XCTUnwrap(model.createRunConfiguration(projectID: second.id, name: "服务", command: "serve", workingDirectory: "."))
+        XCTAssertEqual(secondRun.workspaceID, secondWorkspace.id)
+        XCTAssertEqual(run.workspaceID, firstWorkspace)
+        let reloaded = try store.load()
+        XCTAssertEqual(reloaded.runConfigurations, model.document.runConfigurations)
+        XCTAssertEqual(reloaded.records.map(\.workspaceID), model.document.records.map(\.workspaceID))
+        XCTAssertTrue(model.selectWorkspace(firstWorkspace))
+        model.scan([root])
+        for _ in 0 ..< 200 where model.isScanning || model.isRefreshingProjects { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.workspaceRecords.map(\.id), [sibling.id])
+    }
+
+    @MainActor
+    func testWorkspacesPersistSelectionNamesAndRejectEmptyNamesWithSaveRollback() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let store = ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+        let model = ProjectsViewModel(store: store)
+        let defaultID = model.currentWorkspace.id
+        XCTAssertNil(model.createWorkspace(name: " \n"))
+        let workspace = try XCTUnwrap(model.createWorkspace(name: "  服务端  "))
+        XCTAssertEqual(model.currentWorkspace.name, "服务端")
+        XCTAssertNotEqual(workspace.id, defaultID)
+        XCTAssertTrue(model.renameWorkspace(workspace.id, name: "API"))
+        XCTAssertFalse(model.renameWorkspace(workspace.id, name: " "))
+        let reloaded = ProjectsViewModel(store: store)
+        XCTAssertEqual(reloaded.currentWorkspace.id, workspace.id)
+        XCTAssertEqual(reloaded.currentWorkspace.name, "API")
+        XCTAssertTrue(model.selectWorkspace(defaultID))
+        let original = try Data(contentsOf: root.appendingPathComponent("records.json"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
+        XCTAssertNil(model.createWorkspace(name: "不能保存"))
+        XCTAssertFalse(model.renameWorkspace(defaultID, name: "不能保存"))
+        XCTAssertFalse(model.selectWorkspace(workspace.id))
+        XCTAssertEqual(model.currentWorkspace.id, defaultID)
+        XCTAssertEqual(model.document.workspaces.count, 2)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("records.json")), original)
+    }
+
+    @MainActor
+    func testExplicitSameDirectoryProjectsKeepIndependentPersistentIdentities() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+        let model = ProjectsViewModel(store: store)
+        model.addDirect([root])
+        let first = try XCTUnwrap(model.records.first)
+        model.addDirect([root])
+        XCTAssertEqual(model.records.count, 2)
+        XCTAssertEqual(Set(model.records.map(\.id)).count, 2)
+        XCTAssertNotEqual(first.id, first.path)
+        XCTAssertEqual(Set(try store.load().records.map(\.id)), Set(model.records.map(\.id)))
+    }
+
+    @MainActor
+    func testSameDirectoryNamesSuggestionsAndRemovalAreRecordScoped() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"{"packageManager":"npm@10","scripts":{"dev":"serve"}}"#.utf8)
+            .write(to: root.appendingPathComponent("package.json"))
+        let store = ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+        let model = ProjectsViewModel(store: store)
+        model.addDirect([root])
+        let first = try XCTUnwrap(model.records.first)
+        model.addDirect([root])
+        let second = try XCTUnwrap(model.records.first { $0.id != first.id })
+        XCTAssertTrue(model.renameProject(first.id, title: "API"))
+        XCTAssertTrue(model.renameProject(second.id, title: "Worker"))
+        for _ in 0 ..< 100 where model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.records.map(\.title), ["API", "Worker"])
+        XCTAssertTrue(model.records.allSatisfy { $0.availability == .available })
+        XCTAssertEqual(Set(model.analyses.keys), [first.id, second.id])
+        let firstSuggestion = try XCTUnwrap(model.runSuggestions(projectID: first.id).first)
+        let secondSuggestion = try XCTUnwrap(model.runSuggestions(projectID: second.id).first)
+        XCTAssertNotEqual(firstSuggestion.id, secondSuggestion.id)
+        let firstRun = try XCTUnwrap(model.adoptSuggestion(firstSuggestion))
+        XCTAssertTrue(model.runSuggestions(projectID: first.id).isEmpty)
+        XCTAssertEqual(model.runSuggestions(projectID: second.id), [secondSuggestion])
+        let secondRun = try XCTUnwrap(model.adoptSuggestion(secondSuggestion))
+        model.refreshRequirements(machineSnapshot: nil)
+        XCTAssertTrue(model.isSuggestionSourceAvailable(firstRun))
+        XCTAssertTrue(model.isSuggestionSourceAvailable(secondRun))
+        model.scan([root])
+        for _ in 0 ..< 100 where model.isScanning || model.isRefreshingProjects {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(Set(model.records.map(\.id)), [first.id, second.id])
+        model.remove(first)
+        XCTAssertEqual(model.records.map(\.id), [second.id])
+        XCTAssertEqual(Set(model.runConfigurations().map(\.id)), [firstRun.id, secondRun.id])
+        XCTAssertEqual(model.runConfigurations(projectID: first.id).first?.projectID, first.id)
+        XCTAssertFalse(model.isSuggestionSourceAvailable(firstRun))
+        XCTAssertTrue(model.isSuggestionSourceAvailable(secondRun))
+        XCTAssertEqual(try store.load().records.first?.title, "Worker")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("package.json").path))
+    }
+
+    @MainActor
+    func testRestoringSameDirectoryProjectCreatesNewIdentityWithoutChangingSurvivor() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+        let first = ProjectRecord(path: root.path, discoveredAt: Date(timeIntervalSince1970: 100), boundary: .git)
+        let survivor = ProjectRecord(path: root.path, discoveredAt: Date(timeIntervalSince1970: 200), boundary: .explicit)
+        try store.save(ProjectRecordDocument(records: [first, survivor]))
+        let model = ProjectsViewModel(store: store)
+        model.remove(first)
+        let ignored = try XCTUnwrap(model.ignoredProjects.first)
+        let restoredSelection = try XCTUnwrap(model.restore(ignored))
+        XCTAssertEqual(model.records.count, 2)
+        let restored = try XCTUnwrap(model.records.first { $0.id != survivor.id })
+        XCTAssertEqual(restoredSelection.id, restored.id)
+        XCTAssertNotEqual(restored.id, first.id)
+        XCTAssertEqual(restored.boundary, .git)
+        XCTAssertEqual(model.records.first { $0.id == survivor.id }, survivor)
+        XCTAssertTrue(model.ignoredProjects.isEmpty)
+        XCTAssertEqual(Set(try store.load().records.map(\.id)), [restored.id, survivor.id])
+    }
+
+    func testLegacyProjectAssociationsMigrateOnceWithoutChangingRunIntent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("records.json")
+        try Data(#"""
+        {"schemaVersion":4,"records":[{"path":"/Projects/app","firstDiscoveredAt":"1970-01-01T00:01:40Z","lastDiscoveredAt":"1970-01-01T00:03:20Z","isNew":false,"boundary":"explicit"}],"ignoredProjects":[],"runConfigurations":[{"id":"original-run","projectID":"/Projects/app","name":"API","command":"  npm run dev\n","workingDirectory":"services/api","sourceIdentity":"services/api/package.json#scripts.dev","isEnabled":false}],"trustedProjectRoots":["/Projects/app"]}
+        """#.utf8).write(to: file)
+        let store = ProjectRecordStore(fileURL: file)
+        let migrated = try store.load()
+        let project = try XCTUnwrap(migrated.records.first)
+        let run = try XCTUnwrap(migrated.runConfigurations.first)
+        XCTAssertNotEqual(project.id, project.path)
+        XCTAssertEqual(project.title, "app")
+        XCTAssertEqual(project.lastDiscoveredAt, Date(timeIntervalSince1970: 200))
+        XCTAssertEqual(run.projectID, project.id)
+        XCTAssertEqual(run.id, "original-run")
+        XCTAssertEqual(run.command, "  npm run dev\n")
+        XCTAssertEqual(run.workingDirectory, "services/api")
+        XCTAssertEqual(run.sourceIdentity, "services/api/package.json#scripts.dev")
+        XCTAssertFalse(run.isEnabled)
+        XCTAssertEqual(try store.load(), migrated)
+        XCTAssertFalse(try String(contentsOf: file, encoding: .utf8).contains("trustedProjectRoots"))
+    }
+
+    @MainActor
+    func testProjectSaveAndMigrationFailuresPreserveOriginalData() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appendingPathComponent("records.json")
+        let store = ProjectRecordStore(fileURL: file)
+        let model = ProjectsViewModel(store: store)
+        model.addDirect([root])
+        let project = try XCTUnwrap(model.records.first)
+        let original = try Data(contentsOf: file)
+        XCTAssertFalse(model.renameProject(project.id, title: " \n"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
+        XCTAssertFalse(model.renameProject(project.id, title: "Cannot save"))
+        model.addDirect([root])
+        XCTAssertEqual(model.records.map(\.id), [project.id])
+        XCTAssertEqual(model.records.first?.title, project.title)
+        XCTAssertNotNil(model.operationError)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        let legacy = Data(#"{"schemaVersion":1,"records":[{"path":"/Projects/app","firstDiscoveredAt":"1970-01-01T00:01:40Z","lastDiscoveredAt":"1970-01-01T00:01:40Z","isNew":false}],"ignoredProjects":[]}"#.utf8)
+        try legacy.write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
+        XCTAssertThrowsError(try store.load())
+        let blocked = ProjectsViewModel(store: store)
+        XCTAssertTrue(blocked.mutationsArePaused)
+        blocked.addDirect([root])
+        XCTAssertEqual(try Data(contentsOf: file), legacy)
+    }
+
+    @MainActor
+    func testCurrentSchemaRejectsMissingOrDuplicateProjectIdentityWithoutOverwriting() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("records.json")
+        let store = ProjectRecordStore(fileURL: file)
+        let record = ProjectRecord(path: "/Projects/app", discoveredAt: Date())
+        try store.save(ProjectRecordDocument(records: [record]))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        let valid = try XCTUnwrap((object["records"] as? [[String: Any]])?.first)
+        var missingID = valid
+        missingID.removeValue(forKey: "id")
+        var missingTitle = valid
+        missingTitle.removeValue(forKey: "title")
+        for records in [[missingID], [missingTitle], [valid, valid]] {
+            object["records"] = records
+            let corrupt = try JSONSerialization.data(withJSONObject: object)
+            try corrupt.write(to: file)
+            XCTAssertThrowsError(try store.load())
+            let model = ProjectsViewModel(store: store)
+            model.addDirect([root])
+            XCTAssertTrue(model.mutationsArePaused)
+            XCTAssertEqual(try Data(contentsOf: file), corrupt)
+        }
+    }
+
     func testProjectRepositoryStateReadsBranchDetachedHeadAndWorktreeMarker() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -114,7 +431,7 @@ final class ProjectRecordsTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let suggestions = coordinator.runSuggestions(projectID: project.path)
+        let suggestions = coordinator.runSuggestions(projectID: try XCTUnwrap(model.records.first { $0.path == project.path }).id)
         XCTAssertEqual(Set(suggestions.map(\.command)), [
             "uv run serve-api", "uv run inline", "uv run dotted",
             "cargo run --bin gated --features server",
@@ -131,13 +448,13 @@ final class ProjectRecordsTests: XCTestCase {
         for _ in 0 ..< 100 where coordinator.isRefreshingProjects {
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertEqual(coordinator.runSuggestions(projectID: project.path).map(\.id), firstIDs)
+        XCTAssertEqual(coordinator.runSuggestions(projectID: try XCTUnwrap(model.records.first { $0.path == project.path }).id).map(\.id), firstIDs)
 
-        let pythonSuggestion = try XCTUnwrap(coordinator.runSuggestions(projectID: project.path).first {
+        let pythonSuggestion = try XCTUnwrap(coordinator.runSuggestions(projectID: try XCTUnwrap(model.records.first { $0.path == project.path }).id).first {
             $0.command == "uv run serve-api"
         })
         let adopted = try XCTUnwrap(coordinator.adoptSuggestion(pythonSuggestion))
-        XCTAssertFalse(coordinator.runSuggestions(projectID: project.path).contains {
+        XCTAssertFalse(coordinator.runSuggestions(projectID: try XCTUnwrap(model.records.first { $0.path == project.path }).id).contains {
             $0.sourceIdentity == adopted.sourceIdentity
         })
         XCTAssertTrue(coordinator.updateRunConfiguration(
@@ -152,7 +469,7 @@ final class ProjectRecordsTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let saved = try XCTUnwrap(coordinator.runConfigurations(projectID: project.path).first)
+        let saved = try XCTUnwrap(coordinator.runConfigurations(projectID: try XCTUnwrap(model.records.first { $0.path == project.path }).id).first)
         XCTAssertEqual(saved.command, "uv run serve-api")
         XCTAssertFalse(coordinator.isSuggestionSourceAvailable(saved))
     }
@@ -174,7 +491,7 @@ final class ProjectRecordsTests: XCTestCase {
         for _ in 0 ..< 100 where coordinator.isRefreshingProjects {
             try await Task.sleep(for: .milliseconds(10))
         }
-        let suggestions = coordinator.runSuggestions(projectID: root.path)
+        let suggestions = coordinator.runSuggestions(projectID: try XCTUnwrap(model.records.first { $0.path == root.path }).id)
 
         XCTAssertEqual(suggestions.map(\.command), ["docker compose up", "pnpm run dev", "pnpm run start:web"])
         XCTAssertEqual(Set(suggestions.map(\.workingDirectory)), ["."])
@@ -271,7 +588,8 @@ final class ProjectRecordsTests: XCTestCase {
 
         document.mergeDiscovered(["/Projects/alpha", "/Projects/beta"], at: firstDiscovery)
         document.mergeDiscovered(["/Projects/alpha", "/Projects/gamma"], at: laterDiscovery)
-        document.clearNew(displayedProjectIDs: ["/Projects/alpha", "/Projects/beta"])
+        let betaID = document.records[1].id
+        document.clearNew(displayedProjectIDs: Set(document.records.prefix(2).map(\.id)))
 
         XCTAssertEqual(document.records.map(\.path), ["/Projects/alpha", "/Projects/beta", "/Projects/gamma"])
         XCTAssertEqual(document.records[0].firstDiscoveredAt, firstDiscovery)
@@ -280,27 +598,48 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertFalse(document.records[1].isNew)
         XCTAssertTrue(document.records[2].isNew)
 
-        document.remove(projectID: "/Projects/beta", at: laterDiscovery)
-        XCTAssertFalse(document.records.contains { $0.id == "/Projects/beta" })
+        document.remove(projectID: betaID, at: laterDiscovery)
+        XCTAssertFalse(document.records.contains { $0.id == betaID })
         XCTAssertEqual(document.ignoredProjects.map(\.path), ["/Projects/beta"])
         XCTAssertEqual(document.ignoredProjects.first?.boundary, .manifest)
 
         document.mergeDiscovered(["/Projects/beta"], at: laterDiscovery)
-        XCTAssertFalse(document.records.contains { $0.id == "/Projects/beta" })
+        XCTAssertFalse(document.records.contains { $0.path == "/Projects/beta" })
         document.restore(path: "/Projects/beta", at: laterDiscovery)
-        XCTAssertTrue(document.records.first { $0.id == "/Projects/beta" }?.isNew == true)
-        XCTAssertEqual(document.records.first { $0.id == "/Projects/beta" }?.boundary, .manifest)
+        XCTAssertTrue(document.records.first { $0.path == "/Projects/beta" }?.isNew == true)
+        XCTAssertEqual(document.records.first { $0.path == "/Projects/beta" }?.boundary, .manifest)
+        XCTAssertNotEqual(document.records.first { $0.path == "/Projects/beta" }?.id, betaID)
         XCTAssertTrue(document.ignoredProjects.isEmpty)
+    }
+
+    func testRemovalPreservesDirectoryAndStaleAssociationAcrossReload() throws {
+        let project = ProjectRecord(id: "project", path: "/Projects/app", discoveredAt: Date())
+        let cases = [("", "/Projects/app"), ("api", "/Projects/app/api"), ("..", "/Projects"), ("/tmp", "/tmp")]
+        for (path, expected) in cases {
+            let configuration = ProjectRunConfiguration(
+                projectID: project.id, name: "Run", command: "pwd", workingDirectory: path,
+                sourceIdentity: "package.json#scripts.dev", sourceProjectID: project.id, isEnabled: false
+            )
+            var document = ProjectRecordDocument(records: [project], runConfigurations: [configuration])
+            document.remove(projectID: project.id)
+            let reloaded = try JSONDecoder().decode(ProjectRecordDocument.self, from: JSONEncoder().encode(document))
+            var retained = configuration
+            retained.workingDirectory = expected
+            retained.deletedProjectTitle = project.title
+            retained.deletedProjectPath = project.path
+            XCTAssertEqual(reloaded.runConfigurations, [retained])
+            XCTAssertTrue(reloaded.records.isEmpty)
+        }
     }
 
     func testBatchRemovalMovesProjectsAndClearsIgnoredProjects() {
         let date = Date(timeIntervalSince1970: 200)
         var document = ProjectRecordDocument()
         document.mergeDiscovered(["/Projects/alpha", "/Projects/beta"])
-        document.remove(projectID: "/Projects/beta")
+        document.remove(projectID: document.records[1].id)
 
         let summary = document.remove(
-            projectIDs: ["/Projects/alpha", "/Projects/beta"],
+            projectIDs: [document.records[0].id, "/Projects/beta"],
             at: date
         )
 
@@ -384,7 +723,6 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(document.records.map(\.path), ["/Projects/alpha"])
         XCTAssertEqual(document.ignoredProjects.map(\.path), ["/Projects/beta"])
         XCTAssertTrue(document.runConfigurations.isEmpty)
-        XCTAssertTrue(document.trustedProjectRoots.isEmpty)
     }
 
     func testVersionTwoStoreMigratesProjectTrustIntoTheApplicationSupportDocument() throws {
@@ -404,7 +742,6 @@ final class ProjectRecordsTests: XCTestCase {
         let document = try ProjectRecordStore(fileURL: fileURL).load()
 
         XCTAssertEqual(document.schemaVersion, ProjectRecordDocument.currentSchemaVersion)
-        XCTAssertTrue(document.trustedProjectRoots.isEmpty)
     }
 
     @MainActor
@@ -427,21 +764,21 @@ final class ProjectRecordsTests: XCTestCase {
         let model = ProjectsViewModel(store: store)
 
         let alphaRun = try XCTUnwrap(model.createRunConfiguration(
-            projectID: alpha.path,
+            projectID: try XCTUnwrap(model.records.first { $0.path == alpha.path }).id,
             name: "开发服务器",
             command: "  npm run dev\n",
             workingDirectory: "scripts",
             sourceIdentity: "package.json#scripts.dev"
         ))
         let betaRun = try XCTUnwrap(model.createRunConfiguration(
-            projectID: beta.path,
+            projectID: try XCTUnwrap(model.records.first { $0.path == beta.path }).id,
             name: "测试",
             command: "swift test",
             workingDirectory: "."
         ))
 
-        XCTAssertEqual(model.runConfigurations(projectID: alpha.path).map(\.id), [alphaRun.id])
-        XCTAssertEqual(model.runConfigurations().map(\.id), [alphaRun.id, betaRun.id])
+        XCTAssertEqual(model.runConfigurations(projectID: try XCTUnwrap(model.records.first { $0.path == alpha.path }).id).map(\.id), [alphaRun.id])
+        XCTAssertEqual(Set(model.runConfigurations().map(\.id)), [alphaRun.id, betaRun.id])
         XCTAssertEqual(alphaRun.command, "  npm run dev\n")
         XCTAssertTrue(model.updateRunConfiguration(
             alphaRun,
@@ -449,7 +786,7 @@ final class ProjectRecordsTests: XCTestCase {
             command: "npm run start",
             workingDirectory: "scripts"
         ))
-        let updated = try XCTUnwrap(model.runConfigurations(projectID: alpha.path).first)
+        let updated = try XCTUnwrap(model.runConfigurations(projectID: try XCTUnwrap(model.records.first { $0.path == alpha.path }).id).first)
         XCTAssertEqual(updated.id, alphaRun.id)
         XCTAssertEqual(updated.name, "开发")
         XCTAssertEqual(updated.sourceIdentity, "package.json#scripts.dev")
@@ -461,8 +798,8 @@ final class ProjectRecordsTests: XCTestCase {
             command: "npm run start -- --offline",
             workingDirectory: updated.workingDirectory
         ))
-        let unavailableUpdated = try XCTUnwrap(model.runConfigurations(projectID: alpha.path).first)
-        XCTAssertTrue(model.deleteRunConfiguration(betaRun))
+        let unavailableUpdated = try XCTUnwrap(model.runConfigurations(projectID: try XCTUnwrap(model.records.first { $0.path == alpha.path }).id).first)
+        XCTAssertTrue(model.deleteSavedContent(configurationIDs: [betaRun.id], workspaceID: nil))
         XCTAssertEqual(try store.load().runConfigurations, [unavailableUpdated])
 
         try FileManager.default.createDirectory(at: alphaScripts, withIntermediateDirectories: true)
@@ -472,7 +809,7 @@ final class ProjectRecordsTests: XCTestCase {
         try Data().write(to: storageDirectory)
 
         XCTAssertNil(model.createRunConfiguration(
-            projectID: alpha.path,
+            projectID: try XCTUnwrap(model.records.first { $0.path == alpha.path }).id,
             name: "不会保存",
             command: "false",
             workingDirectory: "."
@@ -515,7 +852,7 @@ final class ProjectRecordsTests: XCTestCase {
     }
 
     @MainActor
-    func testRunConfigurationWorkingDirectoryCannotEscapeProjectRoot() throws {
+    func testRunConfigurationPreservesDirectoryIntentUntilExecution() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let project = directory.appendingPathComponent("project")
@@ -541,30 +878,30 @@ final class ProjectRecordsTests: XCTestCase {
         )
 
         let rootRun = try XCTUnwrap(loadedModel.createRunConfiguration(
-            projectID: project.path,
+            projectID: try XCTUnwrap(loadedModel.records.first { $0.path == project.path }).id,
             name: "根目录",
             command: "true",
             workingDirectory: ""
         ))
         let childRun = try XCTUnwrap(loadedModel.createRunConfiguration(
-            projectID: project.path,
+            projectID: try XCTUnwrap(loadedModel.records.first { $0.path == project.path }).id,
             name: "子目录",
             command: "true",
             workingDirectory: "inside-link"
         ))
 
-        XCTAssertEqual(rootRun.workingDirectory, ".")
-        XCTAssertEqual(childRun.workingDirectory, "Sources")
+        XCTAssertEqual(rootRun.workingDirectory, "")
+        XCTAssertEqual(childRun.workingDirectory, "inside-link")
         try FileManager.default.removeItem(at: project.appendingPathComponent("inside-link"))
         try FileManager.default.removeItem(at: child)
         try FileManager.default.createSymbolicLink(at: child, withDestinationURL: outside)
-        XCTAssertFalse(loadedModel.updateRunConfiguration(
+        XCTAssertTrue(loadedModel.updateRunConfiguration(
             childRun,
-            name: "不能保留逃逸目录",
+            name: "保留工作目录意图",
             command: "true",
             workingDirectory: childRun.workingDirectory
         ))
-        for invalidPath in [
+        for path in [
             outside.path,
             "../outside",
             "Sources/../Sources",
@@ -572,14 +909,14 @@ final class ProjectRecordsTests: XCTestCase {
             "README.md",
             "escape-link",
         ] {
-            XCTAssertNil(loadedModel.createRunConfiguration(
-                projectID: project.path,
-                name: invalidPath,
+            XCTAssertNotNil(loadedModel.createRunConfiguration(
+                projectID: try XCTUnwrap(loadedModel.records.first { $0.path == project.path }).id,
+                name: path,
                 command: "true",
-                workingDirectory: invalidPath
+                workingDirectory: path
             ))
         }
-        XCTAssertEqual(loadedModel.runConfigurations().count, 2)
+        XCTAssertEqual(loadedModel.runConfigurations().count, 8)
     }
 
     func testIgnoredProjectIsAnExclusionBoundaryAndDirectAddResolvesItsSymlink() throws {
@@ -645,7 +982,7 @@ final class ProjectRecordsTests: XCTestCase {
     func testIgnoredProjectRestoresItsOriginalBoundary() {
         var document = ProjectRecordDocument()
         document.addDirect(["/Projects/explicit"], at: Date(timeIntervalSince1970: 1))
-        document.remove(projectID: "/Projects/explicit", at: Date(timeIntervalSince1970: 2))
+        document.remove(projectID: document.records[0].id, at: Date(timeIntervalSince1970: 2))
 
         document.restore(path: "/Projects/explicit", at: Date(timeIntervalSince1970: 3))
 
@@ -739,7 +1076,7 @@ final class ProjectRecordsTests: XCTestCase {
     func testRecoveredUnavailableProjectDoesNotBecomeNewAgain() {
         var document = ProjectRecordDocument()
         document.mergeDiscovered(["/Projects/alpha"], at: Date(timeIntervalSince1970: 1))
-        document.clearNew(displayedProjectIDs: ["/Projects/alpha"])
+        document.clearNew(displayedProjectIDs: [document.records[0].id])
         document.records[0].availability = .unavailable("项目根目录不存在")
 
         document.records[0].availability = .available
@@ -803,14 +1140,14 @@ final class ProjectRecordsTests: XCTestCase {
         let store = ProjectRecordStore(fileURL: fileURL)
         var document = ProjectRecordDocument()
         document.mergeDiscovered(["/Projects/alpha", "/Projects/beta"])
-        document.remove(projectID: "/Projects/beta")
+        document.remove(projectID: document.records[1].id)
         try store.save(document)
         let model = ProjectsViewModel(store: store)
         let previousDocument = model.document
         try FileManager.default.removeItem(at: directory)
         try Data().write(to: directory)
 
-        let result = model.remove(projectIDs: ["/Projects/alpha", "/Projects/beta"])
+        let result = model.remove(projectIDs: [model.records[0].id, "/Projects/beta"])
 
         XCTAssertNil(result)
         XCTAssertEqual(model.document, previousDocument)
@@ -856,7 +1193,7 @@ final class ProjectRecordsTests: XCTestCase {
         for _ in 0 ..< 100 where model.isRefreshingProjects {
             try await Task.sleep(for: .milliseconds(10))
         }
-        let previous = try XCTUnwrap(model.analyses[project.path])
+        let previous = try XCTUnwrap(model.analyses[try XCTUnwrap(model.records.first).id])
 
         try FileManager.default.removeItem(at: project)
         model.refreshProjects()
@@ -864,8 +1201,8 @@ final class ProjectRecordsTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        XCTAssertEqual(model.analyses[project.path], previous)
-        XCTAssertTrue(model.staleProjectIDs.contains(project.path))
+        XCTAssertEqual(model.analyses[try XCTUnwrap(model.records.first).id], previous)
+        XCTAssertTrue(model.staleProjectIDs.contains(try XCTUnwrap(model.records.first).id))
         XCTAssertEqual(model.summary(for: try XCTUnwrap(model.records.first)), .unavailable)
         try? FileManager.default.removeItem(at: directory)
     }
@@ -888,7 +1225,7 @@ final class ProjectRecordsTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        XCTAssertNil(model.analyses[project.path])
+        XCTAssertTrue(model.analyses.isEmpty)
         XCTAssertTrue(model.records.isEmpty)
     }
 
@@ -907,7 +1244,7 @@ final class ProjectRecordsTests: XCTestCase {
         for _ in 0 ..< 100 where model.isRefreshingProjects {
             try await Task.sleep(for: .milliseconds(10))
         }
-        let previous = try XCTUnwrap(model.analyses[project.path])
+        let previous = try XCTUnwrap(model.analyses[try XCTUnwrap(model.records.first).id])
 
         try Data("{".utf8).write(to: manifest)
         model.refreshProjects()
@@ -915,8 +1252,8 @@ final class ProjectRecordsTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        XCTAssertEqual(model.analyses[project.path], previous)
-        XCTAssertTrue(model.staleProjectIDs.contains(project.path))
-        XCTAssertEqual(model.projectNotices[project.path]?.first?.message, "package.json 格式无效")
+        XCTAssertEqual(model.analyses[try XCTUnwrap(model.records.first).id], previous)
+        XCTAssertTrue(model.staleProjectIDs.contains(try XCTUnwrap(model.records.first).id))
+        XCTAssertEqual(model.projectNotices[try XCTUnwrap(model.records.first).id]?.first?.message, "package.json 格式无效")
     }
 }

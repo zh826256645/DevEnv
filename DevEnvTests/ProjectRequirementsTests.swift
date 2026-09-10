@@ -458,11 +458,12 @@ final class ProjectRequirementsTests: XCTestCase {
         model.refreshRequirements(machineSnapshot: snapshot())
 
         model.addDirect([root])
-        for _ in 0 ..< 100 where model.analyses[root.path] == nil {
+        let projectID = try XCTUnwrap(model.records.first).id
+        for _ in 0 ..< 100 where model.analyses[projectID] == nil {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        XCTAssertEqual(model.analyses[root.path]?.summary, .satisfied)
+        XCTAssertEqual(model.analyses[projectID]?.summary, .satisfied)
     }
 
     @MainActor
@@ -481,12 +482,14 @@ final class ProjectRequirementsTests: XCTestCase {
         )
 
         model.addDirect([parent, child])
+        let parentID = try XCTUnwrap(model.records.first { $0.path == parent.path }).id
+        let childID = try XCTUnwrap(model.records.first { $0.path == child.path }).id
         for _ in 0 ..< 100 where model.isRefreshingProjects {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        XCTAssertEqual(model.analyses[parent.path]?.components.map(\.relativePath), ["."])
-        XCTAssertEqual(model.analyses[child.path]?.components.map(\.relativePath), ["."])
+        XCTAssertEqual(model.analyses[parentID]?.components.map(\.relativePath), ["."])
+        XCTAssertEqual(model.analyses[childID]?.components.map(\.relativePath), ["."])
 
         model.remove(try XCTUnwrap(model.records.first { $0.path == child.path }))
         model.refreshProjects()
@@ -494,7 +497,7 @@ final class ProjectRequirementsTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        XCTAssertEqual(model.analyses[parent.path]?.components.map(\.relativePath), ["."])
+        XCTAssertEqual(model.analyses[parentID]?.components.map(\.relativePath), ["."])
     }
 
     func testMachineSnapshotRecalculationDoesNotRereadProjectFiles() throws {
