@@ -1941,7 +1941,7 @@ struct ContentView: View {
         return VStack(alignment: .leading, spacing: 0) {
             runInspectorHeader(configuration)
             Divider().opacity(0.6)
-            HStack(spacing: 24) {
+            HStack(spacing: 0) {
                 ForEach(["终端", "详情", "关联项目"], id: \.self) { tab in
                     Button { runDetailTab = tab } label: {
                         Label(tab, systemImage: tab == "终端" ? "terminal" : (tab == "详情" ? "doc.text" : "folder"))
@@ -1951,13 +1951,15 @@ struct ContentView: View {
                             .overlay(alignment: .bottom) {
                                 if runDetailTab == tab { Rectangle().fill(AppTheme.accent).frame(height: 2) }
                             }
+                            .padding(.horizontal, 12)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(runDetailTab == tab ? .isSelected : [])
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 8)
             Divider().opacity(0.6)
             if runDetailTab == "终端" {
                 runTerminalPanel(configuration)
@@ -2893,7 +2895,7 @@ struct ContentView: View {
                 }
                 .padding(20)
                 Divider().opacity(0.6)
-                HStack(spacing: 24) {
+                HStack(spacing: 0) {
                     ForEach(["运行配置", "详情"], id: \.self) { tab in
                         Button { projectDetailTab = tab } label: {
                             Label(tab, systemImage: tab == "详情" ? "doc.text" : "play.rectangle")
@@ -2903,13 +2905,15 @@ struct ContentView: View {
                                 .overlay(alignment: .bottom) {
                                     if projectDetailTab == tab { Rectangle().fill(AppTheme.accent).frame(height: 2) }
                                 }
+                                .padding(.horizontal, 12)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityAddTraits(projectDetailTab == tab ? .isSelected : [])
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 8)
                 Divider().opacity(0.6)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
