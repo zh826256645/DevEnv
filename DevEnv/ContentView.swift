@@ -42,13 +42,13 @@ enum RunListStatusFilter: String, CaseIterable {
     case failed = "异常"
     case disabled = "已禁用"
 
-    func includes(_ configuration: ProjectRunConfiguration, state: ProjectRunSessionState, searchText: String, projectTitle: String) -> Bool {
+    func includes(_ configuration: ProjectRunConfiguration, state: ProjectRunSessionState, searchText: String, projectTitle: String, hasFailure: Bool = false) -> Bool {
         let matchesStatus: Bool = switch self {
         case .all: true
         case .active: configuration.isEnabled && state.isLive
         case .inactive: configuration.isEnabled && state == .inactive
         case .ended: configuration.isEnabled && state.summaryCategory == .stopped
-        case .failed: configuration.isEnabled && state.summaryCategory == .exceptional
+        case .failed: configuration.isEnabled && (hasFailure || state.summaryCategory == .exceptional)
         case .disabled: !configuration.isEnabled
         }
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -103,6 +103,12 @@ final class ProjectTerminalContainerView: NSView {
         guard terminalView.superview !== self else { return }
         addSubview(terminalView)
         resizeTerminalIfPossible()
+        window?.makeFirstResponder(terminalView)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let terminalView { window?.makeFirstResponder(terminalView) }
     }
 
     func unmount() {
@@ -1604,14 +1610,18 @@ struct ContentView: View {
             }
         }
         .alert(
-            "停止全部活动会话？",
+            runCoordinator.pendingBatchStopIntent?.closesTerminals == true ? "关闭全部就绪终端？" : "停止全部活动会话？",
             isPresented: isConfirmingStopAll,
             presenting: runCoordinator.pendingBatchStopIntent
-        ) { _ in
+        ) { intent in
             Button("取消", role: .cancel) { runCoordinator.cancelBatchStop() }
-            Button("全部停止", role: .destructive) { runCoordinator.confirmBatchStop() }
+            Button(intent.closesTerminals ? "全部关闭" : "全部停止", role: .destructive) { runCoordinator.confirmBatchStop() }
         } message: { intent in
-            Text("将停止 \(intent.executionIDs.count) 个活动会话，包括取消正在进行的重启。")
+            if intent.closesTerminals {
+                Text("将关闭 \(intent.executionIDs.count) 个就绪终端；运行配置将保留。")
+            } else {
+                Text("将向 \(intent.executionIDs.count) 个活动会话发送 Ctrl+C，并取消等待中的重启；终端会话将保留。")
+            }
         }
     }
 
@@ -1662,7 +1672,8 @@ struct ContentView: View {
                 configuration,
                 state: runCoordinator.session(for: configuration.id)?.state ?? .inactive,
                 searchText: runSearchText,
-                projectTitle: configuration.associatedProject(in: projectsModel.records)?.title ?? (configuration.projectID == nil ? "" : configuration.missingProjectTitle)
+                projectTitle: configuration.associatedProject(in: projectsModel.records)?.title ?? (configuration.projectID == nil ? "" : configuration.missingProjectTitle),
+                hasFailure: runCoordinator.session(for: configuration.id)?.failureMessage != nil
             )
         }
     }
@@ -1679,7 +1690,7 @@ struct ContentView: View {
     }
 
     private func requestStopAll() {
-        runCoordinator.requestBatchStop(in: visibleRunConfigurations)
+        runCoordinator.requestBatchStop(in: visibleRunConfigurations, closeReadyTerminals: true)
     }
 
     private func selectFirstRunConfigurationIfNeeded() {
@@ -1693,20 +1704,6 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 workspaceTabs
                 Spacer(minLength: 0)
-                Menu {
-                    Picker("筛选项目", selection: $runProjectFilterID) {
-                        Text("全部项目").tag(Optional<String>.none)
-                        ForEach(projectsModel.workspaceRecords) { Text($0.title).tag(Optional($0.id)) }
-                    }
-                    Divider()
-                    Button("启动筛选结果", action: requestRunAll)
-                        .disabled(!runCoordinator.canStartBatch(in: visibleRunConfigurations))
-                    Button("停止筛选结果…", role: .destructive, action: requestStopAll)
-                        .disabled(!runCoordinator.canStopBatch(in: visibleRunConfigurations))
-                } label: { Image(systemName: "ellipsis") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden)
-                .fixedSize().padding(.trailing, 14)
-                .accessibilityLabel("项目筛选与批量操作")
             }
             .padding(.horizontal, 14).padding(.top, 10)
             Divider().opacity(0.6)
@@ -1765,7 +1762,7 @@ struct ContentView: View {
             HStack {
                 Text("共 \(visibleRunConfigurations.count) 个运行配置")
                 Spacer()
-                Text("\(visibleRunConfigurations.filter { runCoordinator.session(for: $0.id)?.state.isLive == true }.count) 个活动运行")
+                Text("\(visibleRunConfigurations.filter { runCoordinator.session(for: $0.id)?.state.isLive == true }.count) 个活动会话")
             }
             .font(.caption).foregroundStyle(.secondary)
             .padding(18)
@@ -1775,47 +1772,70 @@ struct ContentView: View {
     }
 
     private var runListFilters: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("搜索配置名称、命令、项目…", text: $runSearchText)
-                        .textFieldStyle(.plain)
-                        .focused($runSearchIsFocused)
-                        .accessibilityLabel("搜索运行配置")
-                    if !runSearchText.isEmpty {
-                        Button { runSearchText = "" } label: { Image(systemName: "xmark.circle.fill") }
-                            .buttonStyle(.plain).foregroundStyle(.secondary)
-                            .accessibilityLabel("清除搜索")
-                    }
-                }
-                .padding(.horizontal, 10).frame(height: 34)
-                .background(AppTheme.innerCard.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.08)))
-                Picker("状态", selection: $runStatusFilter) {
-                    ForEach(RunListStatusFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .labelsHidden().frame(width: 142)
-                .accessibilityLabel("按状态筛选运行配置")
-            }
-
-            if let projectID = runProjectFilterID,
-               let project = projectsModel.workspaceRecords.first(where: { $0.id == projectID }) {
-                HStack {
-                    Button { runProjectFilterID = nil } label: {
-                        Label(project.title, systemImage: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.plain).font(.caption).foregroundStyle(AppTheme.accent)
-                    .accessibilityLabel("清除项目筛选：\(project.title)")
-                    Spacer()
-                }
-            }
+        HStack(spacing: 4) {
+            runSearchAndStatusFilters
+            runListActions
+            Spacer(minLength: 0)
         }
-        .controlSize(.large)
+        .font(.system(size: 11))
+        .controlSize(.mini)
+        .lineLimit(1)
         .background {
             Button("搜索运行配置") { runSearchIsFocused = true }
                 .keyboardShortcut("f", modifiers: .command).hidden()
         }
+    }
+
+    private var runSearchAndStatusFilters: some View {
+        HStack(spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("搜索…", text: $runSearchText)
+                    .textFieldStyle(.plain)
+                    .focused($runSearchIsFocused)
+                    .accessibilityLabel("搜索运行配置")
+                if !runSearchText.isEmpty {
+                    Button { runSearchText = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .accessibilityLabel("清除搜索")
+                }
+            }
+            .padding(.horizontal, 6).frame(minWidth: 44, maxWidth: 160).frame(height: 22)
+            .background(AppTheme.innerCard.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.08)))
+            .help("搜索配置名称、命令、项目")
+            Picker("状态", selection: $runStatusFilter) {
+                ForEach(RunListStatusFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .labelsHidden().frame(width: 72)
+            .accessibilityLabel("按状态筛选运行配置")
+        }
+    }
+
+    private var runListActions: some View {
+        let closesTerminals = runCoordinator.canCloseBatch(in: visibleRunConfigurations)
+        return HStack(spacing: 4) {
+            Picker("筛选项目", selection: $runProjectFilterID) {
+                Text("全部项目").tag(Optional<String>.none)
+                ForEach(projectsModel.workspaceRecords) { Text($0.title).tag(Optional($0.id)) }
+            }
+            .labelsHidden().frame(width: 72)
+            .accessibilityLabel("按项目筛选运行配置")
+            Button(action: requestRunAll) {
+                Label("全部启动", systemImage: "play.fill")
+            }
+            .tint(AppTheme.accent)
+            .disabled(!runCoordinator.canStartBatch(in: visibleRunConfigurations))
+            .help("启动当前筛选结果中的运行配置")
+            Button(role: .destructive, action: requestStopAll) {
+                Label(closesTerminals ? "全部关闭" : "全部暂停", systemImage: closesTerminals ? "xmark" : "pause.fill")
+            }
+            .tint(.red)
+            .disabled(!runCoordinator.canStopBatch(in: visibleRunConfigurations))
+            .help(closesTerminals ? "关闭当前筛选结果中的全部就绪终端" : "向当前筛选结果中的活动会话发送 Ctrl+C，保留终端会话")
+        }
+        .labelStyle(.titleOnly)
+        .buttonStyle(.bordered).fixedSize()
     }
 
     private func runTableHeader(detailColumnCount: Int) -> some View {
@@ -1881,10 +1901,10 @@ struct ContentView: View {
             .accessibilityAddTraits(isSelected ? .isSelected : [])
             HStack(spacing: 6) {
                 Button {
-                    if state.isLive { runCoordinator.stop(configurationID: configuration.id) }
+                    if state.isLive { runCoordinator.stopOrCloseTerminal(configurationID: configuration.id) }
                     else { run(configuration, project: project) }
                 } label: {
-                    Label(state.isLive ? "停止" : "启动", systemImage: state.isLive ? "stop.fill" : "play.fill")
+                    Label(state.isLive ? state.stopActionTitle : "启动", systemImage: state.isLive ? state.stopActionSymbol : "play.fill")
                         .font(.system(size: 11, weight: .medium)).frame(width: 62, height: 28)
                         .foregroundStyle(state.isLive ? Color.red : AppTheme.accent)
                         .background((state.isLive ? Color.red : AppTheme.accent).opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
@@ -1892,8 +1912,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(state == .stopping || (!state.isLive && (!configuration.isEnabled || (configuration.projectID != nil && project == nil) || project?.availability.isUnavailable == true)))
-                .help(state.isLive ? "停止运行" : "启动运行")
-                .accessibilityLabel("\(state.isLive ? "停止" : "启动") \(configuration.name)")
+                .help(state == .ready ? "关闭终端" : (state.isLive ? "停止运行" : "启动运行"))
+                .accessibilityLabel("\(state.isLive ? state.stopActionTitle : "启动") \(configuration.name)")
                 Menu { runConfigurationMenu(configuration) } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden)
                     .frame(width: 26, height: 28)
@@ -1928,7 +1948,7 @@ struct ContentView: View {
     }
 
     private func runPortsText(_ configuration: ProjectRunConfiguration) -> String {
-        guard let session = runCoordinator.session(for: configuration.id), session.state == .running else { return "—" }
+        guard let session = runCoordinator.session(for: configuration.id), session.state == .running || session.state == .ready else { return "—" }
         guard let ids = session.ownedProcessIDs, let snapshot = model.snapshot else { return "未知" }
         let ports = Set(snapshot.localServices.filter { ids.contains($0.pid) }.flatMap(\.bindings).map(\.port)).sorted()
         return ports.isEmpty ? "无监听" : ports.map(String.init).joined(separator: ", ")
@@ -2090,20 +2110,21 @@ struct ContentView: View {
             }
             .font(.system(size: 12))
             HStack(spacing: 10) {
-                Button {
-                    if state.isLive { runCoordinator.stop(configurationID: configuration.id) }
-                    else { run(configuration, project: project) }
-                } label: {
-                    Label(state == .stopping ? "正在停止" : (state.isLive ? "停止运行" : "启动运行"), systemImage: state.isLive ? "stop.fill" : "play.fill")
-                        .frame(maxWidth: .infinity)
+                Button { run(configuration, project: project) } label: {
+                    Label("启动", systemImage: "play.fill").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
-                .tint(state.isLive ? .red : AppTheme.accent)
-                .disabled(state == .stopping || (!state.isLive && (!configuration.isEnabled || projectUnavailable)))
+                .tint(AppTheme.accent)
+                .disabled(!state.canStart || !configuration.isEnabled || projectUnavailable)
+                Button { runCoordinator.stopOrCloseTerminal(configurationID: configuration.id) } label: {
+                    Label(state.stopActionTitle, systemImage: state.stopActionSymbol).frame(maxWidth: .infinity)
+                }
+                .tint(.red)
+                .disabled(!state.isLive || session?.isClosing == true)
+                .help(state == .ready ? "关闭终端" : "发送 Ctrl+C，中断当前命令并保留终端")
                 Button {
                     runCoordinator.restart(configuration, project: project)
                 } label: { Label("重启", systemImage: "arrow.clockwise").frame(maxWidth: .infinity) }
-                .disabled(!configuration.isEnabled || !state.canRestart || projectUnavailable)
+                .disabled(!configuration.isEnabled || !state.canRestart || session?.isClosing == true || projectUnavailable)
                 Button { beginEditingRunConfiguration(configuration) } label: {
                     Label("编辑", systemImage: "pencil").frame(maxWidth: .infinity)
                 }
@@ -2122,16 +2143,19 @@ struct ContentView: View {
         return TimelineView(.periodic(from: .now, by: 2)) { _ in
             HStack(spacing: 8) {
                 Circle().fill(configuration.isEnabled ? overviewRunColor(state) : Color.secondary).frame(width: 7, height: 7)
-                if state.isLive, let startedAt = session?.startedAt {
+                if state == .running, let startedAt = session?.startedAt {
                     Text("运行时间").foregroundStyle(.secondary)
                     Text(startedAt, style: .timer).monospacedDigit().fixedSize()
                 } else {
                     Text(configuration.isEnabled ? state.statusTitle : "已禁用").foregroundStyle(.secondary)
                 }
+                if let exitCode = session?.lastExitCode {
+                    Text("配置退出码 \(exitCode)").monospacedDigit().foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 0)
                 Divider().frame(height: 12)
                 Text("内存").foregroundStyle(.secondary)
-                Text(state == .running ? session?.physicalMemoryBytes.map(byteCount) ?? "未知" : "—").monospacedDigit()
+                Text(state.isLive ? session?.physicalMemoryBytes.map(byteCount) ?? "未知" : "—").monospacedDigit()
                 Divider().frame(height: 12)
                 Text("端口").foregroundStyle(.secondary)
                 Text(runPortsText(configuration)).monospacedDigit().lineLimit(1)
@@ -2148,6 +2172,7 @@ struct ContentView: View {
         Button("打开终端") {
             selectedRunConfigurationID = configuration.id
             runDetailTab = "终端"
+            runCoordinator.openTerminal(configuration)
         }
         Button("编辑配置") { beginEditingRunConfiguration(configuration) }
             .disabled(projectsModel.mutationsArePaused || runCoordinator.activeDeletion?.configurationIDs.contains(configuration.id) == true)
@@ -2175,7 +2200,7 @@ struct ContentView: View {
     private func runTerminalPanel(_ configuration: ProjectRunConfiguration) -> some View {
         let session = runCoordinator.session(for: configuration.id)
         let terminal = session?.terminalView as? AdaptiveProjectRunTerminalView
-        let hasOutput = session?.lastSuccessfulCommand != nil
+        let hasOutput = session?.hasTerminal == true
         return VStack(spacing: 0) {
             HStack(spacing: 14) {
                 Text("\(configuration.name) · 终端").font(.callout).lineLimit(1)
@@ -2196,7 +2221,7 @@ struct ContentView: View {
                 }
                 .disabled(!hasOutput)
                 .help("清空终端输出").accessibilityLabel("清空终端输出")
-                if hasOutput, session?.state.isLive != true {
+                if hasOutput {
                     Button { runCoordinator.closeTerminal(configurationID: configuration.id) } label: { Image(systemName: "xmark") }
                         .help("关闭终端").accessibilityLabel("关闭终端")
                 }
@@ -2216,9 +2241,13 @@ struct ContentView: View {
                         .foregroundStyle(.white.opacity(0.5))
                     Text(hasOutput ? "终端已在独立窗口打开" : "终端会话尚未启动")
                         .font(.headline).foregroundStyle(.white.opacity(0.9))
-                    Text(hasOutput ? "关闭放大窗口后，终端会回到这里" : "启动运行后，在这里查看输出并与进程交互")
+                    Text(hasOutput ? "关闭放大窗口后，终端会回到这里" : "打开终端后可直接输入命令，或点击启动执行配置命令")
                         .font(.callout).foregroundStyle(.white.opacity(0.5))
                         .multilineTextAlignment(.center)
+                    if !hasOutput {
+                        Button("打开终端") { runCoordinator.openTerminal(configuration) }
+                            .disabled(!configuration.isEnabled || (configuration.projectID != nil && configuration.associatedProject(in: projectsModel.records) == nil))
+                    }
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
@@ -2235,11 +2264,11 @@ struct ContentView: View {
                 Text(configuration.name).font(.title2.bold())
                 Spacer()
                 Button("清空") { runCoordinator.clearTerminal(configurationID: configuration.id) }
-                    .disabled(runCoordinator.session(for: configuration.id)?.lastSuccessfulCommand == nil)
+                    .disabled(runCoordinator.session(for: configuration.id)?.hasTerminal != true)
                 Button("关闭") { expandedTerminalConfiguration = nil }
                     .keyboardShortcut(.cancelAction)
             }
-            if let session = runCoordinator.session(for: configuration.id), session.lastSuccessfulCommand != nil {
+            if let session = runCoordinator.session(for: configuration.id), session.hasTerminal {
                 ProjectTerminalView(terminalView: session.terminalView)
                     .frame(minWidth: 780, minHeight: 480)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -2308,7 +2337,8 @@ struct ContentView: View {
             switch state {
             case .inactive: ("未启动", "circle.fill", .secondary)
             case .starting: ("正在启动", "hourglass", .blue)
-            case .running: ("运行中", "checkmark.circle.fill", .green)
+            case .running: ("执行中", "checkmark.circle.fill", .green)
+            case .ready: ("终端就绪", "terminal", .blue)
             case .stopping: ("正在停止", "stop.circle.fill", .orange)
             case .stopFailed: ("停止失败", "exclamationmark.triangle.fill", .orange)
             case .restarting: ("正在重启", "arrow.clockwise.circle.fill", .blue)
@@ -2336,6 +2366,8 @@ struct ContentView: View {
         case .starting:
             Label("正在启动", systemImage: "hourglass")
                 .foregroundStyle(.secondary)
+        case .ready:
+            Label("终端就绪", systemImage: "terminal").foregroundStyle(.blue)
         case .running:
             Label("正在运行", systemImage: "play.circle.fill")
                 .foregroundStyle(.green)
@@ -4097,9 +4129,9 @@ struct ContentView: View {
                 .accessibilityLabel("打开 \(run.configuration.name) 的终端")
 
                 Button(role: .destructive) {
-                    runCoordinator.stop(configurationID: run.configuration.id)
+                    runCoordinator.stopOrCloseTerminal(configurationID: run.configuration.id)
                 } label: {
-                    Image(systemName: run.session.state == .stopping ? "hourglass" : "stop.fill")
+                    Image(systemName: run.session.state == .stopping ? "hourglass" : run.session.state.stopActionSymbol)
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(canStop ? Color.red : Color.secondary)
                         .frame(width: 30, height: 32)
@@ -4110,8 +4142,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!canStop)
-                .help(run.session.state == .stopping ? "正在停止" : "停止")
-                .accessibilityLabel("停止 \(run.configuration.name)")
+                .help(run.session.state == .stopping ? "正在停止" : (run.session.state == .ready ? "关闭终端" : "停止"))
+                .accessibilityLabel("\(run.session.state.stopActionTitle) \(run.configuration.name)")
             }
             .frame(width: columns.actions)
         }
@@ -4567,6 +4599,7 @@ struct ContentView: View {
         switch state {
         case .starting: .blue
         case .running: .green
+        case .ready: .blue
         case .stopping: .orange
         case .stopFailed: .red
         case .restarting: .blue
@@ -4582,7 +4615,8 @@ struct ContentView: View {
         switch state {
         case .inactive: "未启动"
         case .starting: "启动中"
-        case .running: "运行中"
+        case .running: "执行中"
+        case .ready: "终端就绪"
         case .stopping: "停止中"
         case .stopFailed: "停止失败"
         case .restarting: "重启中"
@@ -4603,14 +4637,14 @@ struct ContentView: View {
     }
 
     private func overviewPortsText(_ run: OverviewRun) -> String {
-        guard run.session.state == .running else { return "—" }
+        guard run.session.state == .running || run.session.state == .ready else { return "—" }
         guard let bindings = run.bindings else { return "未知" }
         let ports = Set(bindings.map(\.port)).sorted()
         return ports.isEmpty ? "无监听端口" : ports.map { ":\($0)" }.joined(separator: " · ")
     }
 
     private func overviewMemoryText(_ run: OverviewRun) -> String {
-        guard run.session.state == .running else { return "—" }
+        guard run.session.state == .running || run.session.state == .ready else { return "—" }
         guard let bytes = run.session.physicalMemoryBytes else { return "未知" }
         return byteCount(bytes)
     }

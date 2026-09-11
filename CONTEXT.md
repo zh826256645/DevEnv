@@ -43,7 +43,7 @@ DevEnv 保存、属于一个 Workspace 且可选关联该工作区内一个 Proj
 _Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
 
 **Run Batch Intent**:
-用户明确触发批量启动或停止时，从触发入口的当前作用域解析并冻结、仅用于本次提交的一组单项启动请求或 Active Run Execution；运行页作用域为当前 Workspace 内的项目、状态筛选与搜索结果，状态栏作用域为全部 Workspace。它不是持久化运行组或运行编排，各目标按单项语义独立处理。
+用户明确触发批量启动、停止或关闭时，从触发入口的当前作用域解析并冻结、仅用于本次提交的一组单项启动请求或会话活动；停止目标可为配置命令、手动命令或就绪会话，全部目标均就绪时入口切换为关闭终端。之后开始的新命令不被旧停止或关闭请求追溯处理。运行页作用域为当前 Workspace 内的项目、状态筛选与搜索结果，状态栏作用域为全部 Workspace；它不是持久化运行组或运行编排，各目标按单项语义独立处理。
 _Avoid_: Saved Run Group, Live Filter Query, All Configurations, Atomic Run, Run Orchestration, Batch Run History
 
 **Disabled Run Configuration**:
@@ -55,11 +55,15 @@ DevEnv 从项目声明中只读识别、可由用户选择保存为 Run Configur
 _Avoid_: Auto Run, Project Requirement, Runnable Status
 
 **Run Session**:
-用户从已保存的 Run Configuration 显式启动后、仅存在于当前 App 进程中的交互式终端上下文；同一配置后续的启动或重启可以复用该上下文及其内存终端输出，但每次运行属于不同的 Run Execution，Session 不持久化为 Project Record 或 Machine Snapshot。
+用户围绕一个已保存的 Run Configuration 显式建立、仅存在于当前 App 进程中的终端上下文，承载 Interactive Shell Session 并保留终端输出；切换页面、工作区或关闭主窗口不结束该上下文，用户显式结束会话或完全退出 DevEnv 时才结束，重新打开 App 不自动恢复执行。
 _Avoid_: Shell Session, Terminal Application, Machine Snapshot, Run Execution
 
+**Interactive Shell Session**:
+Run Session 中可连续手动输入命令的交互上下文；单条命令结束或被 Ctrl+C 中断后仍可接受后续命令，当前目录和会话环境保留至会话结束。
+_Avoid_: Run Execution, Terminal Application
+
 **Run Execution**:
-Run Session 中一次启动或重启的独立运行代次，具有自身稳定身份与冻结的完整命令、可选项目上下文和解析后的工作目录；它从启动尝试开始，到退出、用户停止或启动失败时结束，同一 Session 的后续运行属于新的 Execution。
+Run Session 中一次显式启动或重启配置命令的独立运行代次，具有自身稳定身份与冻结的完整命令、可选项目上下文和实际工作目录；它从启动尝试开始，到命令退出、被用户中断或启动失败时结束，但 Interactive Shell Session 可以继续存在，手动输入的命令不构成 Run Execution。
 _Avoid_: Run Session, Configuration Run State, Process ID
 
 **Active Run Execution**:
@@ -67,11 +71,11 @@ _Avoid_: Run Session, Configuration Run State, Process ID
 _Avoid_: Running Project, Active Project, Active Run Session
 
 **Active Run Session**:
-当前承载 Active Run Execution 的 Run Session；没有当前 Execution，或当前 Execution 已结束、已退出或启动失败的 Session 不属于活动会话。
+当前承载尚未结束的 Interactive Shell Session 的 Run Session，包含等待输入的就绪会话；会话活动不等同于配置命令或服务正在运行。
 _Avoid_: Running Project, Active Project, Active Run Execution
 
 **Run Failure**:
-Run Execution 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出和用户主动停止不属于运行失败。
+Run Execution 未能启动、无法安全停止或重启，或启动后并非由用户主动停止却以非零状态码退出；正常退出、用户主动停止和手动输入命令的失败不属于运行失败。
 _Avoid_: Project Health, Project Error
 
 **Status Bar Residency**:
@@ -83,7 +87,7 @@ _Avoid_: Hidden App, Background Project
 _Avoid_: Window Close, Session Stop
 
 **Run Session Summary**:
-状态栏对已创建 Run Session 的运行中、已停止和异常数量汇总；从未创建会话的 Run Configuration 不计入汇总。
+状态栏对已创建 Run Session 的状态数量汇总，区分命令执行中与终端就绪；从未创建会话的 Run Configuration 不计入汇总，终端就绪也不表示配置命令或服务仍在运行。
 _Avoid_: Project Health, Configuration Count
 
 **Run Listener Binding**:

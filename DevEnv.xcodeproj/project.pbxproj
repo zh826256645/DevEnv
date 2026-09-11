@@ -22,6 +22,7 @@
 		10000000000000000000000D /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000095 /* SwiftTerm */; };
 		10000000000000000000000E /* OverviewAttention.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000001E /* OverviewAttention.swift */; };
 		10000000000000000000000F /* OverviewAttentionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000001F /* OverviewAttentionTests.swift */; };
+		1000000000000000000000A1 /* ProjectRunShellIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1000000000000000000000A2 /* ProjectRunShellIntegration.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +42,7 @@
 		10000000000000000000001D /* ProjectRunSessions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectRunSessions.swift; sourceTree = "<group>"; };
 		10000000000000000000001E /* OverviewAttention.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewAttention.swift; sourceTree = "<group>"; };
 		10000000000000000000001F /* OverviewAttentionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewAttentionTests.swift; sourceTree = "<group>"; };
+		1000000000000000000000A2 /* ProjectRunShellIntegration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectRunShellIntegration.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -81,6 +83,7 @@
 				100000000000000000000019 /* ProjectRecords.swift */,
 				10000000000000000000001A /* ProjectRequirements.swift */,
 				10000000000000000000001D /* ProjectRunSessions.swift */,
+				1000000000000000000000A2 /* ProjectRunShellIntegration.swift */,
 				10000000000000000000001E /* OverviewAttention.swift */,
 				100000000000000000000013 /* Assets.xcassets */,
 			);
@@ -212,6 +215,7 @@
 				100000000000000000000008 /* ProjectRecords.swift in Sources */,
 				100000000000000000000009 /* ProjectRequirements.swift in Sources */,
 				10000000000000000000000C /* ProjectRunSessions.swift in Sources */,
+				1000000000000000000000A1 /* ProjectRunShellIntegration.swift in Sources */,
 				10000000000000000000000E /* OverviewAttention.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -8,6 +8,246 @@ import XCTest
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
 
+    func testTerminalUsesInstalledNerdFontForPromptIcons() throws {
+        let promptIcons = ""
+        guard NSFontManager.shared.availableFontFamilies.contains(where: { family in
+            guard family.hasSuffix("Nerd Font Mono"), let font = NSFont(name: family, size: NSFont.systemFontSize) else { return false }
+            return promptIcons.unicodeScalars.allSatisfy { font.coveredCharacterSet.contains($0) }
+        }) else { throw XCTSkip("Requires an installed Nerd Font Mono with prompt icons") }
+
+        let terminal = SwiftTermProjectRunEngine().terminal
+        for scalar in promptIcons.unicodeScalars {
+            XCTAssertTrue(terminal.font.coveredCharacterSet.contains(scalar), "Missing prompt icon: \(scalar)")
+        }
+    }
+
+    func testPersistentTerminalSeparatesManualCommandsConfigurationRunsAndClosure() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(id: "interactive", projectID: directory.path, name: "终端", command: "false", workingDirectory: ".")
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [configuration], projectRoots: [directory])
+        let coordinator = fixture.coordinator
+        XCTAssertEqual(coordinator.openTerminal(configuration), .started)
+        let session = try XCTUnwrap(coordinator.session(for: configuration.id))
+        let engine = try XCTUnwrap(fixture.factory.engines.first)
+        XCTAssertEqual(session.state, .ready)
+        XCTAssertTrue(session.hasTerminal)
+        XCTAssertNil(session.activeExecution)
+        XCTAssertEqual(coordinator.sessionSummary.ready, 1)
+        XCTAssertTrue(coordinator.canStopBatch(in: [configuration]))
+
+        engine.onShellState?(false, nil)
+        XCTAssertEqual(session.state, .running)
+        XCTAssertFalse(coordinator.canStartBatch(in: [configuration]))
+        engine.prompt(exitCode: 9)
+        XCTAssertNil(session.failureMessage)
+        XCTAssertNil(session.lastExitCode)
+
+        engine.returnsToPromptOnInterrupt = true
+        XCTAssertEqual(coordinator.run(configuration, projectRoot: directory.path), .started)
+        XCTAssertEqual(engine.commands.count, 1)
+        engine.prompt(exitCode: 7)
+        XCTAssertEqual(session.state, .ready)
+        XCTAssertEqual(session.lastExitCode, 7)
+        XCTAssertEqual(session.failureMessage, "命令以状态码 7 退出")
+        XCTAssertNil(session.activeExecution)
+
+        coordinator.restart(configuration, projectRoot: directory.path)
+        XCTAssertEqual(engine.launches.count, 1, "重启必须复用原 Shell")
+        XCTAssertEqual(engine.commands.count, 2)
+        XCTAssertEqual(session.state.stopActionTitle, "停止")
+        XCTAssertEqual(session.state.stopActionSymbol, "stop.fill")
+        coordinator.stopOrCloseTerminal(configurationID: configuration.id)
+        XCTAssertEqual(session.state, .ready)
+        XCTAssertFalse(session.isClosing)
+        XCTAssertNotNil(coordinator.session(for: configuration.id))
+        XCTAssertNil(session.failureMessage)
+        XCTAssertFalse(engine.signals.contains(SIGTERM))
+        XCTAssertFalse(engine.signals.contains(SIGKILL))
+
+        XCTAssertEqual(session.state.stopActionTitle, "关闭")
+        XCTAssertEqual(session.state.stopActionSymbol, "xmark")
+        coordinator.stopOrCloseTerminal(configurationID: configuration.id)
+        XCTAssertTrue(session.isClosing)
+        while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
+        XCTAssertTrue(engine.signals.contains(SIGKILL))
+        XCTAssertNil(coordinator.session(for: configuration.id))
+    }
+
+    func testRestartTimeoutNeverInjectsIntoAnUnresponsiveCommand() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(id: "unresponsive", projectID: directory.path, name: "终端", command: "read value", workingDirectory: ".")
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [configuration], projectRoots: [directory])
+        XCTAssertEqual(fixture.coordinator.run(configuration, projectRoot: directory.path), .started)
+        let engine = try XCTUnwrap(fixture.factory.engines.first)
+        let session = try XCTUnwrap(fixture.coordinator.session(for: configuration.id))
+        fixture.coordinator.restart(configuration, projectRoot: directory.path)
+        while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
+        XCTAssertEqual(engine.commands.count, 1)
+        XCTAssertEqual(engine.signals, [SIGINT])
+        XCTAssertEqual(session.state, .restartFailed("中断未完成，未发送配置命令"))
+        engine.prompt(exitCode: 130)
+        XCTAssertEqual(session.state, .ready)
+        XCTAssertEqual(engine.commands.count, 1, "超时后收到提示符也不得恢复已取消的重启")
+    }
+
+    func testBatchStopPreservesStartingExecutionIdentityAndDoesNotInterruptLaterManualCommands() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(id: "starting", projectID: directory.path, name: "终端", command: "sleep 30", workingDirectory: ".")
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [configuration], projectRoots: [directory])
+        fixture.factory.becomesReadyOnStart = false
+        XCTAssertEqual(fixture.coordinator.run(configuration, projectRoot: directory.path), .started)
+        let session = try XCTUnwrap(fixture.coordinator.session(for: configuration.id))
+        let engine = try XCTUnwrap(fixture.factory.engines.first)
+        let executionID = try XCTUnwrap(session.activeExecution?.id)
+        fixture.coordinator.requestBatchStop(in: [configuration])
+        engine.prompt(exitCode: 0)
+        XCTAssertEqual(session.activeExecution?.id, executionID)
+        fixture.coordinator.confirmBatchStop()
+        XCTAssertEqual(engine.signals, [SIGINT])
+
+        engine.prompt(exitCode: 130)
+        fixture.coordinator.requestBatchStop(in: [configuration])
+        engine.isShellReady = false
+        engine.onShellState?(false, nil)
+        fixture.coordinator.confirmBatchStop()
+        XCTAssertEqual(engine.signals, [SIGINT], "冻结的就绪会话不能中断后来输入的新命令")
+        XCTAssertEqual(session.state, .running)
+    }
+
+    func testBatchCloseRequiresOnlyReadyTargetsAndSkipsLaterActivity() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let configurations = ["first", "second", "outside", "inactive"].map {
+            ProjectRunConfiguration(id: $0, projectID: directory.path, name: $0, command: "sleep 30", workingDirectory: ".")
+        }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: configurations, projectRoots: [directory])
+        let coordinator = fixture.coordinator
+        let scope = [configurations[0], configurations[1], configurations[1], configurations[3]]
+        XCTAssertFalse(coordinator.canCloseBatch(in: []))
+        XCTAssertFalse(coordinator.canCloseBatch(in: scope))
+        XCTAssertEqual(coordinator.openTerminal(configurations[0]), .started)
+        XCTAssertEqual(coordinator.run(configurations[1]), .started)
+        XCTAssertEqual(coordinator.run(configurations[2]), .started)
+        XCTAssertFalse(coordinator.canCloseBatch(in: scope))
+        coordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, false)
+        coordinator.cancelBatchStop()
+
+        fixture.factory.engines[1].prompt(exitCode: 0)
+        XCTAssertTrue(coordinator.canCloseBatch(in: scope), "未启动配置和筛选范围外的运行不影响全部关闭")
+        coordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, true)
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs.count, 2)
+        coordinator.cancelBatchStop()
+        XCTAssertTrue(fixture.factory.engines.allSatisfy { $0.signals.isEmpty })
+
+        coordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
+        let firstEngine = fixture.factory.engines[0]
+        firstEngine.isShellReady = false
+        firstEngine.onShellState?(false, nil)
+        firstEngine.prompt(exitCode: 0)
+        coordinator.confirmBatchStop()
+        while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
+        XCTAssertNil(coordinator.pendingBatchStopIntent)
+        XCTAssertNil(coordinator.session(for: configurations[1].id))
+        XCTAssertTrue(fixture.factory.engines[1].signals.contains(SIGKILL))
+        XCTAssertEqual(coordinator.session(for: configurations[0].id)?.state, .ready)
+        XCTAssertTrue(firstEngine.signals.isEmpty, "确认前出现过新命令的终端不能被旧关闭请求关闭")
+        XCTAssertEqual(coordinator.session(for: configurations[2].id)?.state, .running)
+        XCTAssertTrue(fixture.factory.engines[2].signals.isEmpty)
+
+        coordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
+        coordinator.confirmBatchStop()
+        while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
+        XCTAssertNil(coordinator.session(for: configurations[0].id))
+        XCTAssertFalse(coordinator.canStopBatch(in: scope))
+        XCTAssertFalse(coordinator.canCloseBatch(in: scope))
+    }
+
+    func testUnsupportedShellFailsExplicitlyInsteadOfGuessingPromptReadiness() {
+        XCTAssertThrowsError(try ProjectRunShellIntegration(executable: "/bin/ksh")) {
+            XCTAssertEqual($0 as? ProjectRunLaunchError, .unsupportedInteractiveShell("ksh"))
+        }
+    }
+
+    func testKeyboardInterruptCancelsRestartAndIsNotReportedAsCommandFailure() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let configuration = ProjectRunConfiguration(id: "keyboard", projectID: directory.path, name: "终端", command: "sleep 30", workingDirectory: ".")
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [configuration], projectRoots: [directory])
+        XCTAssertEqual(fixture.coordinator.run(configuration), .started)
+        let engine = try XCTUnwrap(fixture.factory.engines.first)
+        fixture.coordinator.restart(configuration)
+        engine.onUserInterrupt?()
+        engine.prompt(exitCode: 130)
+        while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
+        XCTAssertEqual(engine.commands.count, 1)
+        XCTAssertEqual(engine.signals, [SIGINT], "键盘已经发送 Ctrl+C，协调器不能再次发送")
+        XCTAssertEqual(fixture.coordinator.session(for: configuration.id)?.state, .ready)
+        XCTAssertNil(fixture.coordinator.session(for: configuration.id)?.failureMessage)
+    }
+
+    func testRealInteractiveShellsPreserveEnvironmentAndWaitForPromptAfterInterrupt() async throws {
+        for shell in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+            let engine = SwiftTermProjectRunEngine()
+            defer { _ = engine.signalProcessGroups(SIGKILL) }
+            var codes: [Int32] = []
+            var keyboardInterrupts = 0
+            engine.onUserInterrupt = { keyboardInterrupts += 1 }
+            engine.onShellState = { ready, code in if ready, let code { codes.append(code) } }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("shell-'\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            try engine.startShell(executable: shell, workingDirectory: directory.path)
+            try await waitForTerminal("\(shell) startup", engine: engine) { engine.isShellReady }
+
+            let input = "export DEVENV_TEST_VALUE=retained; cd /tmp\n"
+            engine.terminal.send(source: engine.terminal, data: Array(input.utf8)[...])
+            try await waitForTerminal("\(shell) prompt \(codes.count)", engine: engine) { engine.isShellReady && codes.count >= 2 }
+            try engine.execute(command: "printf 'ENV:%s\\nDIR:%s\\n' \"$DEVENV_TEST_VALUE\" \"$PWD\"; false", workingDirectory: directory.path)
+            try await waitForTerminal("\(shell) prompt \(codes.count)", engine: engine) { engine.isShellReady && codes.count >= 3 }
+            XCTAssertEqual(codes.last, 1, shell)
+            let output = String(decoding: engine.terminal.terminal.getBufferAsData(), as: UTF8.self)
+            XCTAssertTrue(output.contains("ENV:retained"), "\(shell): \(output)")
+            XCTAssertTrue(output.contains("DIR:\(directory.path)"), "\(shell): \(output)")
+
+            try engine.execute(command: "read value", workingDirectory: directory.path)
+            XCTAssertFalse(engine.isShellReady)
+            XCTAssertThrowsError(try engine.execute(command: "echo MUST_NOT_RUN", workingDirectory: directory.path))
+            try await Task.sleep(for: .milliseconds(150))
+            engine.terminal.send(source: engine.terminal, data: [3][...])
+            try await waitForTerminal("\(shell) prompt \(codes.count)", engine: engine) { engine.isShellReady && codes.count >= 4 }
+            XCTAssertEqual(keyboardInterrupts, 1)
+            XCTAssertTrue(engine.terminal.process.running, shell)
+            try engine.execute(command: "printf 'AFTER_INTERRUPT\\n'", workingDirectory: directory.path)
+            try await waitForTerminal("\(shell) prompt \(codes.count)", engine: engine) { engine.isShellReady && codes.count >= 5 }
+            XCTAssertTrue(String(decoding: engine.terminal.terminal.getBufferAsData(), as: UTF8.self).contains("AFTER_INTERRUPT"))
+
+            try engine.execute(command: #"/bin/sh -c 'trap "" INT; printf "IGNORING_INTERRUPT\n"; read value'"#, workingDirectory: directory.path)
+            try await waitForTerminal("\(shell) ignoring SIGINT", engine: engine) {
+                String(decoding: engine.terminal.terminal.getBufferAsData(), as: UTF8.self).contains("IGNORING_INTERRUPT")
+            }
+            XCTAssertTrue(engine.interrupt())
+            try await Task.sleep(for: .milliseconds(150))
+            XCTAssertFalse(engine.isShellReady)
+            XCTAssertThrowsError(try engine.execute(command: "echo MUST_NOT_RUN", workingDirectory: directory.path))
+        }
+    }
+
+    private func waitForTerminal(_ label: String, engine: SwiftTermProjectRunEngine, _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        guard condition() else { throw NSError(domain: "\(label): \(String(decoding: engine.terminal.terminal.getBufferAsData(), as: UTF8.self))", code: 1) }
+    }
+
     func testWorkspaceMovesPreserveSessionsAndSubmittedRestartsButRejectLaterInvalidStarts() throws {
         for moveProject in [true, false] {
             for includeRelated in [true, false] {
@@ -50,25 +290,23 @@ final class ProjectRunSessionsTests: XCTestCase {
                 let moved = try XCTUnwrap(coordinator.runConfigurations().first { $0.id == configuration.id })
                 XCTAssertEqual(moved.workspaceID, !moveProject || includeRelated ? target.id : configuration.workspaceID)
                 XCTAssertEqual(coordinator.runConfigurations(workspaceID: target.id).count, includeRelated ? 2 : (moveProject ? 0 : 1))
-                fixture.scheduler.runNext()
-                fixture.scheduler.runNext()
+                engine.prompt(exitCode: 130)
                 XCTAssertEqual(session.state, .running)
-                XCTAssertEqual(engine.launches.count, 2)
-                XCTAssertEqual(engine.launches.first, engine.launches.last)
+                XCTAssertEqual(engine.launches.count, 1)
+                XCTAssertEqual(engine.commands.count, 2)
                 XCTAssertNotEqual(session.activeExecution?.id, execution?.id)
                 XCTAssertTrue(session.terminalView === terminal)
                 if !includeRelated {
                     coordinator.restart(moved, projectRoot: root.path)
-                    XCTAssertEqual(engine.launches.count, 2)
+                    XCTAssertEqual(engine.launches.count, 1)
                     XCTAssertTrue(coordinator.batchStartCandidates(in: [moved]).isEmpty)
                 }
                 coordinator.stop(configurationID: moved.id)
-                fixture.scheduler.runNext()
-                fixture.scheduler.runNext()
-                XCTAssertEqual(session.state, .stopped(137))
+                engine.prompt(exitCode: 130)
+                XCTAssertEqual(session.state, .ready)
                 if !includeRelated {
                     guard case .rejected = coordinator.run(moved) else { return XCTFail("失效关联不能再次启动") }
-                    XCTAssertEqual(engine.launches.count, 2)
+                    XCTAssertEqual(engine.launches.count, 1)
                 } else {
                     XCTAssertEqual(coordinator.run(moved), .started)
                 }
@@ -88,11 +326,10 @@ final class ProjectRunSessionsTests: XCTestCase {
         coordinator.restart(independent)
         XCTAssertTrue(coordinator.move(.configuration(independent.id), to: target.id, includingRelated: true))
         XCTAssertTrue(coordinator.move(.configuration(independent.id), to: independent.workspaceID, includingRelated: true))
-        fixture.scheduler.runNext()
-        fixture.scheduler.runNext()
+        fixture.factory.engines[0].prompt(exitCode: 130)
         XCTAssertEqual(coordinator.session(for: independent.id)?.state, .running)
-        XCTAssertEqual(fixture.factory.engines.first?.launches.count, 2)
-        XCTAssertEqual(fixture.factory.engines.first?.launches.last?.workingDirectory, root.path)
+        XCTAssertEqual(fixture.factory.engines.first?.commands.count, 2)
+        XCTAssertEqual(fixture.factory.engines.first?.commands.last?.workingDirectory, root.path)
     }
     func testWorkspaceRunFiltersPreserveLifecycleAndSearchProjectNames() {
         var configuration = ProjectRunConfiguration(name: "Web 前端", command: "npm run dev", workingDirectory: "")
@@ -199,8 +436,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         coordinator.requestDeletion(configurationID: configuration.id)
         coordinator.confirmDeletion()
         XCTAssertNil(coordinator.removeProjects(projectIDs: [directory.path]))
-        fixture.scheduler.runNext()
-        fixture.scheduler.runNext()
+        while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
         XCTAssertNil(coordinator.activeDeletion)
         XCTAssertTrue(coordinator.runConfigurations().isEmpty)
         XCTAssertEqual(fixture.projectsModel.records.count, 1)
@@ -241,8 +477,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.run(configuration), .started)
         coordinator.requestDeletion(configurationID: configuration.id)
         coordinator.restart(configuration)
-        fixture.scheduler.runNext()
-        fixture.scheduler.runNext()
+        fixture.factory.engines[0].prompt(exitCode: 130)
         fixture.factory.engines[0].ownedProcessIDs = [42]
         coordinator.confirmDeletion()
         XCTAssertNotNil(coordinator.deletionError)
@@ -252,11 +487,10 @@ final class ProjectRunSessionsTests: XCTestCase {
         coordinator.confirmDeletion()
         XCTAssertEqual(coordinator.run(configuration), .rejected("正在删除运行配置"))
         coordinator.restart(configuration)
-        fixture.scheduler.runNext()
-        fixture.scheduler.runNext()
+        while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
         XCTAssertTrue(coordinator.runConfigurations().isEmpty)
         XCTAssertNil(coordinator.session(for: configuration.id))
-        XCTAssertEqual(fixture.factory.engines[0].launches.count, 2)
+        XCTAssertEqual(fixture.factory.engines[0].commands.count, 2)
     }
 
     func testWorkspaceDeletionFailureKeepsAllRecordsAndOtherWorkspaceRunThenRetries() throws {
@@ -440,17 +674,15 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertNil(first.projectRoot)
         XCTAssertEqual(first.command, "  printf hello\n")
         XCTAssertEqual(first.workingDirectory, FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().standardizedFileURL.path)
-        XCTAssertEqual(coordinator.run(configuration), .rejected("该运行配置已有活动会话"))
+        XCTAssertEqual(coordinator.run(configuration), .rejected("终端正忙，请停止或重启当前命令"))
         XCTAssertFalse(coordinator.setRunConfigurationEnabled(configuration, isEnabled: false))
         coordinator.restart(configuration)
-        fixture.scheduler.runNext()
-        fixture.scheduler.runNext()
+        fixture.factory.engines[0].prompt(exitCode: 130)
         XCTAssertEqual(session.state, .running)
         XCTAssertNotEqual(session.activeExecution?.id, first.id)
         XCTAssertEqual(session.activeExecution?.workingDirectory, first.workingDirectory)
-        coordinator.stop(configurationID: configuration.id)
-        fixture.scheduler.runNext()
-        fixture.scheduler.runNext()
+        coordinator.closeTerminal(configurationID: configuration.id)
+        while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
         XCTAssertFalse(session.state.isLive)
         XCTAssertTrue(coordinator.setRunConfigurationEnabled(configuration, isEnabled: false))
         XCTAssertEqual(coordinator.run(configuration), .rejected("运行配置已禁用"))
@@ -668,7 +900,7 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         XCTAssertEqual(
             appDelegate.statusMenu.items.map(\.title),
-            ["打开面板", "", "全部工作区启动", "全部工作区停止", "", "0 运行 · 0 停止 · 0 异常", "没有活动会话", "", "退出"]
+            ["打开面板", "", "全部工作区启动", "全部工作区停止", "", "0 执行中 · 0 就绪 · 0 已结束 · 0 异常", "没有活动会话", "", "退出"]
         )
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区停止")?.isEnabled ?? true)
@@ -758,11 +990,12 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertNil(first.projectID)
         XCTAssertNil(second.projectID)
         let factory = FakeProjectRunEngineFactory()
+        let scheduler = FakeProjectRunScheduler()
         let coordinator = ProjectRunCoordinator(
             projectsModel: projectsModel,
             makeEngine: factory.makeEngine,
             shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"),
-            scheduler: FakeProjectRunScheduler()
+            scheduler: scheduler
         )
         let appDelegate = DevEnvAppDelegate(projectsModel: projectsModel, runCoordinator: coordinator)
 
@@ -776,9 +1009,32 @@ final class ProjectRunSessionsTests: XCTestCase {
         ))
         appDelegate.rebuildStatusMenu()
 
-        XCTAssertEqual(factory.engines.flatMap(\.launches).map(\.arguments), [["-i", "-c", "first"], ["-i", "-c", "second"]])
+        XCTAssertEqual(factory.engines.flatMap(\.commands).map(\.command), ["first", "second"])
         XCTAssertTrue(appDelegate.statusMenu.items.contains { $0.title == "后台服务 · API" })
         XCTAssertTrue(appDelegate.statusMenu.items.contains { $0.title == "默认工作区 · API" })
+
+        factory.engines[0].prompt(exitCode: 0)
+        appDelegate.rebuildStatusMenu()
+        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部工作区停止")?.isEnabled ?? false)
+        XCTAssertNil(appDelegate.statusMenu.item(withTitle: "全部工作区关闭"))
+
+        factory.engines[1].prompt(exitCode: 0)
+        appDelegate.rebuildStatusMenu()
+        let closeItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区关闭"))
+        XCTAssertTrue(closeItem.isEnabled)
+        XCTAssertNil(appDelegate.statusMenu.item(withTitle: "全部工作区停止"))
+        XCTAssertTrue(NSApplication.shared.sendAction(
+            try XCTUnwrap(closeItem.action), to: closeItem.target, from: closeItem
+        ))
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, true)
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs.count, 2)
+        coordinator.confirmBatchStop()
+        while !scheduler.actions.isEmpty { scheduler.runNext() }
+        XCTAssertNil(coordinator.session(for: first.id))
+        XCTAssertNil(coordinator.session(for: second.id))
+        appDelegate.rebuildStatusMenu()
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区停止")?.isEnabled ?? true)
+        XCTAssertNil(appDelegate.statusMenu.item(withTitle: "全部工作区关闭"))
     }
 
     func testStatusBarTrustedGlobalStartIsImmediateAndRetainsSharedSessions() async throws {
@@ -898,9 +1154,9 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(handoffCount, 1)
         XCTAssertNotEqual(replacementExecutionID, executionIDs[0])
         XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs, executionIDs)
-        XCTAssertEqual(factory.engines.map(\.signals), [[SIGKILL], []])
+        XCTAssertEqual(factory.engines.map(\.signals), [[SIGKILL, 0], []])
         coordinator.confirmBatchStop()
-        XCTAssertEqual(factory.engines.map(\.signals), [[SIGKILL], [SIGINT]])
+        XCTAssertEqual(factory.engines.map(\.signals), [[SIGKILL, 0], [SIGINT]])
         XCTAssertEqual(coordinator.session(for: first.id)?.activeExecution?.id, replacementExecutionID)
         XCTAssertEqual(coordinator.session(for: first.id)?.state, .running)
         appDelegate.rebuildStatusMenu()
@@ -1385,7 +1641,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: outside.id)?.state, .running)
     }
 
-    func testBatchStopIntentIncludesAnExecutionAlreadyStoppingWithoutResendingSignals() throws {
+    func testBatchStopIncludesStoppingCommandsAndCanResendInterrupt() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1413,7 +1669,7 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         fixture.coordinator.confirmBatchStop()
 
-        XCTAssertEqual(fixture.factory.engines[0].signals, [SIGINT])
+        XCTAssertEqual(fixture.factory.engines[0].signals, [SIGINT, SIGINT])
         XCTAssertEqual(fixture.coordinator.session(for: configuration.id)?.state, .stopping)
     }
 
@@ -1530,11 +1786,11 @@ final class ProjectRunSessionsTests: XCTestCase {
         coordinator.confirmBatchStop()
 
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopping)
-        XCTAssertEqual(factory.engines[0].signals, [SIGINT])
+        XCTAssertEqual(factory.engines[0].signals, [SIGINT, SIGINT])
         XCTAssertTrue(coordinator.canStopBatch(in: [configuration]))
-        scheduler.runNext()
-        scheduler.runNext()
-        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(137))
+        factory.engines[0].prompt(exitCode: 130)
+        while !scheduler.actions.isEmpty { scheduler.runNext() }
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .ready)
         XCTAssertNil(coordinator.session(for: configuration.id)?.activeExecution)
         XCTAssertEqual(factory.engines[0].launches.count, 1)
     }
@@ -1571,27 +1827,25 @@ final class ProjectRunSessionsTests: XCTestCase {
         factory.engines[0].signalSucceeds = false
 
         coordinator.requestBatchStop(in: [first, second])
+        factory.engines[1].returnsToPromptOnInterrupt = true
         coordinator.confirmBatchStop()
 
         XCTAssertEqual(factory.engines[0].signals, [SIGINT])
         XCTAssertEqual(factory.engines[1].signals, [SIGINT])
-        scheduler.runNext()
-        scheduler.runNext()
-        scheduler.runNext()
-        scheduler.runNext()
+        while !scheduler.actions.isEmpty { scheduler.runNext() }
         XCTAssertEqual(
             coordinator.session(for: first.id)?.state,
-            .stopFailed("仍有进程未退出")
+            .stopFailed("中断未完成，可再次停止或关闭终端")
         )
         XCTAssertEqual(
             coordinator.session(for: first.id)?.failureMessage,
-            "停止失败：仍有进程未退出"
+            "停止失败：中断未完成，可再次停止或关闭终端"
         )
         XCTAssertTrue(coordinator.canStopBatch(in: [first]))
-        XCTAssertEqual(coordinator.session(for: second.id)?.state, .stopped(137))
+        XCTAssertEqual(coordinator.session(for: second.id)?.state, .ready)
         XCTAssertNil(coordinator.session(for: second.id)?.failureMessage)
-        XCTAssertEqual(factory.engines[0].signals, [SIGINT, SIGTERM, SIGKILL])
-        XCTAssertEqual(factory.engines[1].signals, [SIGINT, SIGTERM, SIGKILL, 0])
+        XCTAssertEqual(factory.engines[0].signals, [SIGINT])
+        XCTAssertEqual(factory.engines[1].signals, [SIGINT])
     }
 
     func testBatchStartCandidateSelectionTracksActiveExecutionLifecycleStates() throws {
@@ -1636,9 +1890,9 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         XCTAssertEqual(coordinator.run(stopped, projectRoot: projectRoot.path), .started)
         coordinator.stop(configurationID: stopped.id)
-        scheduler.runNext()
-        scheduler.runNext()
-        XCTAssertEqual(coordinator.session(for: stopped.id)?.state, .stopped(137))
+        factory.engines[0].prompt(exitCode: 130)
+        while !scheduler.actions.isEmpty { scheduler.runNext() }
+        XCTAssertEqual(coordinator.session(for: stopped.id)?.state, .ready)
 
         XCTAssertEqual(coordinator.run(exited, projectRoot: projectRoot.path), .started)
         factory.engines[1].finish(exitCode: 0)
@@ -1659,10 +1913,9 @@ final class ProjectRunSessionsTests: XCTestCase {
         factory.engines[4].signalSucceeds = false
         coordinator.stop(configurationID: stopFailed.id)
         scheduler.runNext()
-        scheduler.runNext()
         XCTAssertEqual(
             coordinator.session(for: stopFailed.id)?.state,
-            .stopFailed("仍有进程未退出")
+            .stopFailed("中断未完成，可再次停止或关闭终端")
         )
 
         XCTAssertEqual(coordinator.run(restartFailed, projectRoot: projectRoot.path), .started)
@@ -1673,7 +1926,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         }
         XCTAssertEqual(
             coordinator.session(for: restartFailed.id)?.state,
-            .restartFailed("上一次运行仍有进程未退出")
+            .restartFailed("中断未完成，未发送配置命令")
         )
 
         XCTAssertEqual(coordinator.run(restarting, projectRoot: projectRoot.path), .started)
@@ -1765,7 +2018,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         fixture.coordinator.submitBatchStart(intent)
 
         XCTAssertEqual(fixture.coordinator.session(for: valid.id)?.state, .running)
-        XCTAssertEqual(fixture.factory.engines.last?.launches.first?.arguments, ["-i", "-c", valid.command])
+        XCTAssertEqual(fixture.factory.engines.last?.commands.first?.command, valid.command)
         let validExecutionID = fixture.coordinator.session(for: valid.id)?.currentExecution?.id
         fixture.coordinator.submitBatchStart(intent)
         XCTAssertEqual(fixture.coordinator.session(for: valid.id)?.currentExecution?.id, validExecutionID)
@@ -1838,7 +2091,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         coordinator.submitBatchStart(intent)
 
         let launch = try XCTUnwrap(factory.engines.flatMap(\.launches).first)
-        XCTAssertEqual(launch.arguments, ["-i", "-c", draftCommand])
+        XCTAssertEqual(factory.engines.flatMap(\.commands).first?.command, draftCommand)
         XCTAssertEqual(launch.workingDirectory, firstDirectory.path)
         XCTAssertEqual(coordinator.session(for: drafted.id)?.currentExecution?.command, draftCommand)
         let disabledSession = try XCTUnwrap(coordinator.session(for: disabledAfterReview.id))
@@ -1888,7 +2141,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(session.activeExecution?.id, runningExecutionID)
         XCTAssertEqual(session.currentExecution?.id, runningExecutionID)
         XCTAssertNotEqual(session.failureExecution?.id, runningExecutionID)
-        XCTAssertEqual(session.failureMessage, "该运行配置已有活动会话")
+        XCTAssertEqual(session.failureMessage, "终端正忙，请停止或重启当前命令")
         XCTAssertEqual(fixture.factory.engines[0].launches.count, 1)
     }
 
@@ -1946,7 +2199,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         XCTAssertEqual(coordinator.session(for: changed.id)?.currentExecution?.workingDirectory, firstTarget.path)
         XCTAssertEqual(coordinator.session(for: sibling.id)?.state, .running)
-        XCTAssertEqual(factory.engines.last?.launches.first?.arguments, ["-i", "-c", sibling.command])
+        XCTAssertEqual(factory.engines.last?.commands.first?.command, sibling.command)
     }
 
     func testBatchStartRejectsRemovedProjectRootWithoutBlockingSibling() async throws {
@@ -1998,7 +2251,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: surviving.id)?.state, .running)
         XCTAssertEqual(factory.engines.count, 2)
         XCTAssertTrue(factory.engines[0].launches.isEmpty)
-        XCTAssertEqual(factory.engines[1].launches.first?.arguments, ["-i", "-c", surviving.command])
+        XCTAssertEqual(factory.engines[1].commands.first?.command, surviving.command)
     }
 
     func testBatchStartPersistsSuccessfulDraftsWithoutBlockingOnSiblingLaunchFailure() async throws {
@@ -2498,7 +2751,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(engine.launches, [
             .init(
                 executable: "/bin/zsh",
-                arguments: ["-i", "-c", configuration.command],
+                arguments: ["-i"],
                 loginName: "-zsh",
                 workingDirectory: workingDirectory.path
             ),
@@ -2564,7 +2817,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.runConfigurations().first?.command, draft)
     }
 
-    func testStopEscalatesTheProcessGroupAndApplicationExitKillsLiveSessions() throws {
+    func testClosingTerminalEscalatesAndApplicationExitKillsLiveSessions() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let projectRoot = directory.appendingPathComponent("project")
@@ -2593,25 +2846,26 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
 
         XCTAssertEqual(coordinator.run(first, projectRoot: projectRoot.path), .started)
-        XCTAssertEqual(coordinator.run(first, projectRoot: projectRoot.path), .rejected("该运行配置已有活动会话"))
+        XCTAssertEqual(coordinator.run(first, projectRoot: projectRoot.path), .rejected("终端正忙，请停止或重启当前命令"))
 
-        coordinator.stop(configurationID: first.id)
+        let retainedSession = try XCTUnwrap(coordinator.session(for: first.id))
+        coordinator.closeTerminal(configurationID: first.id)
 
         let firstEngine = try XCTUnwrap(factory.engines.first)
         firstEngine.clearsOwnedProcessesOnKill = false
-        XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopping)
+        XCTAssertEqual(retainedSession.state, .stopping)
         XCTAssertEqual(firstEngine.signals, [SIGINT])
         firstEngine.finish(exitCode: 130)
-        XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopping)
+        XCTAssertEqual(retainedSession.state, .stopping)
         scheduler.runNext()
         XCTAssertEqual(firstEngine.signals, [SIGINT, SIGTERM])
         scheduler.runNext()
         XCTAssertEqual(firstEngine.signals, [SIGINT, SIGTERM, SIGKILL, 0])
-        XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopping)
+        XCTAssertEqual(retainedSession.state, .stopping)
         firstEngine.ownedProcessIDs = []
         scheduler.runNext()
-        XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopped(130))
-        XCTAssertNil(coordinator.session(for: first.id)?.failureMessage)
+        XCTAssertEqual(retainedSession.state, .stopped(130))
+        XCTAssertNil(retainedSession.failureMessage)
 
         XCTAssertEqual(coordinator.run(second, projectRoot: projectRoot.path), .started)
         let secondEngine = try XCTUnwrap(factory.engines.last)
@@ -2626,7 +2880,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(coordinator.sessions.isEmpty)
     }
 
-    func testRestartWaitsForCleanupCanBeCancelledAndDoesNotLaunchWhenProcessesRemain() throws {
+    func testRestartWaitsForPromptAndCanBeCancelled() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -2657,20 +2911,18 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .restarting)
         XCTAssertEqual(engine.launches.count, 1)
         scheduler.runNext()
-        scheduler.runNext()
         XCTAssertEqual(
             coordinator.session(for: configuration.id)?.state,
-            .restartFailed("上一次运行仍有进程未退出")
+            .restartFailed("中断未完成，未发送配置命令")
         )
         XCTAssertEqual(engine.launches.count, 1)
         XCTAssertEqual(session.activeExecution?.id, firstExecutionID)
 
         engine.signalSucceeds = true
         coordinator.restart(configuration, projectRoot: directory.path)
-        scheduler.runNext()
-        scheduler.runNext()
+        engine.prompt(exitCode: 130)
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .running)
-        XCTAssertEqual(engine.launches.count, 2)
+        XCTAssertEqual(engine.commands.count, 2)
         let restartedExecutionID = try XCTUnwrap(session.currentExecution?.id)
         XCTAssertNotEqual(restartedExecutionID, firstExecutionID)
         XCTAssertEqual(session.activeExecution?.id, restartedExecutionID)
@@ -2680,15 +2932,14 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .restarting)
         coordinator.stop(configurationID: configuration.id)
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopping)
-        scheduler.runNext()
-        scheduler.runNext()
-        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(137))
+        engine.prompt(exitCode: 130)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .ready)
         XCTAssertNil(session.activeExecution)
         XCTAssertEqual(session.currentExecution?.id, restartedExecutionID)
-        XCTAssertEqual(engine.launches.count, 2)
+        XCTAssertEqual(engine.commands.count, 2)
     }
 
-    func testStopFailureRemainsActiveAndNeedsAttention() throws {
+    func testClosingFailureRetainsTerminalUntilOwnedProcessesExit() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -2715,7 +2966,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         let engine = try XCTUnwrap(factory.engines.first)
         engine.signalSucceeds = false
 
-        coordinator.stop(configurationID: configuration.id)
+        coordinator.closeTerminal(configurationID: configuration.id)
         scheduler.runNext()
         scheduler.runNext()
 
@@ -2729,13 +2980,16 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         XCTAssertTrue(coordinator.session(for: configuration.id)?.state.isLive == true)
 
+        coordinator.restart(configuration)
+        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopFailed("仍有进程未退出"))
+        XCTAssertEqual(engine.commands.count, 1, "清理失败的终端不能重新执行命令")
         engine.signalSucceeds = true
         engine.ownedProcessIDs = []
         // The shell exit notification may already have arrived before the timeout.
         XCTAssertFalse(scheduler.actions.isEmpty, "停止失败后必须继续只读复查")
         if !scheduler.actions.isEmpty { scheduler.runNext() }
 
-        XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopped(137))
+        XCTAssertNil(coordinator.session(for: configuration.id))
         XCTAssertNil(coordinator.session(for: configuration.id)?.failureMessage)
     }
 
@@ -3120,7 +3374,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(output(secondTerminal).contains("SECOND"))
         XCTAssertTrue(coordinator.session(for: first.id) === firstSession)
         XCTAssertTrue(coordinator.session(for: second.id) === secondSession)
-        let processIDs = [firstTerminal.process.shellPid, secondTerminal.process.shellPid]
+        var processIDs = [firstTerminal.process.shellPid, secondTerminal.process.shellPid]
         let backgroundOutput = output(backgroundTerminal)
         let backgroundRange = try XCTUnwrap(
             backgroundOutput.range(of: #"BACKGROUND:\d+"#, options: .regularExpression)
@@ -3131,14 +3385,12 @@ final class ProjectRunSessionsTests: XCTestCase {
         var backgroundNeedsCleanup = true
         defer { if backgroundNeedsCleanup { Darwin.kill(backgroundPID, SIGKILL) } }
         let backgroundExitDeadline = clock.now.advanced(by: .seconds(5))
-        while backgroundSession.state.isLive, clock.now < backgroundExitDeadline {
+        while backgroundSession.state != .ready, clock.now < backgroundExitDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        while Darwin.kill(backgroundPID, 0) == 0, clock.now < backgroundExitDeadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        backgroundNeedsCleanup = Darwin.kill(backgroundPID, 0) == 0
-        XCTAssertFalse(backgroundNeedsCleanup, "根 Shell 退出时必须清理同一会话的后台进程")
+        XCTAssertEqual(backgroundSession.state, .ready)
+        XCTAssertEqual(Darwin.kill(backgroundPID, 0), 0, "配置命令结束后 Shell 和后台任务应继续保留")
+        processIDs.append(backgroundPID)
 
         let appDelegate = DevEnvAppDelegate(
             projectsModel: projectsModel,
@@ -3149,6 +3401,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         while processIDs.contains(where: { Darwin.kill($0, 0) == 0 }), clock.now < exitDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
+        backgroundNeedsCleanup = Darwin.kill(backgroundPID, 0) == 0
         reopenedWindow.close()
         XCTAssertTrue(coordinator.sessions.isEmpty)
         XCTAssertTrue(processIDs.allSatisfy { Darwin.kill($0, 0) != 0 })
@@ -3309,10 +3562,12 @@ private final class FakeProjectRunEngineFactory {
     private(set) var engines: [FakeProjectRunEngine] = []
     var startError: Error?
     var startErrors: [Error?] = []
+    var becomesReadyOnStart = true
 
     func makeEngine() -> any ProjectRunProcessEngine {
         let engine = FakeProjectRunEngine()
         engine.startError = startErrors.isEmpty ? startError : startErrors.removeFirst()
+        engine.becomesReadyOnStart = becomesReadyOnStart
         engines.append(engine)
         return engine
     }
@@ -3329,6 +3584,37 @@ private final class FakeProjectRunEngine: ProjectRunProcessEngine {
 
     let terminalView = NSView()
     var onExit: ((Int32?) -> Void)?
+    var onShellState: ((Bool, Int32?) -> Void)?
+    var onUserInterrupt: (() -> Void)?
+    var isShellReady = false
+    private(set) var commands: [(command: String, workingDirectory: String)] = []
+    var returnsToPromptOnInterrupt = false
+    var becomesReadyOnStart = true
+
+    func startShell(executable: String, workingDirectory: String) throws {
+        try start(executable: executable, arguments: ["-i"], loginName: "-" + URL(fileURLWithPath: executable).lastPathComponent, workingDirectory: workingDirectory)
+        ownedProcessIDs = [42]
+        if becomesReadyOnStart { prompt(exitCode: 0) }
+    }
+
+    func execute(command: String, workingDirectory: String) throws {
+        guard isShellReady else { throw ProjectRunLaunchError.shellNotReady }
+        commands.append((command, workingDirectory))
+        isShellReady = false
+        onShellState?(false, nil)
+    }
+
+    func interrupt() -> Bool {
+        signals.append(SIGINT)
+        isShellReady = false
+        if returnsToPromptOnInterrupt { prompt(exitCode: 130) }
+        return signalSucceeds
+    }
+
+    func prompt(exitCode: Int32) {
+        isShellReady = true
+        onShellState?(true, exitCode)
+    }
     var ownedProcessIDs: Set<pid_t>? = [42]
     var physicalMemoryBytes: UInt64? = 128 * 1_024 * 1_024
     private(set) var launches: [Launch] = []
@@ -3402,6 +3688,7 @@ private final class FakeProjectRunScheduler: ProjectRunScheduling {
     }
 
     func runNext() {
+        guard !actions.isEmpty else { XCTFail("没有待执行的计时器"); return }
         actions.removeFirst()()
     }
 }
