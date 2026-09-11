@@ -91,13 +91,14 @@ final class OverviewAttentionTests: XCTestCase {
         XCTAssertEqual(result.items.filter { $0.kind == .runFailure }.map(\.id), ["run-failure:first", "run-failure:second"])
     }
 
-    func testRunEvidenceOnlyAppliesToRunningUnknownOwnership() {
+    func testRunEvidenceIncludesReadyShellsWithUnknownOwnership() {
         let unknown = run(id: "unknown", state: .running, ownedProcessIDs: nil)
+        let ready = run(id: "ready", state: .ready, ownedProcessIDs: nil)
         let starting = run(id: "starting", state: .starting, ownedProcessIDs: nil)
         let owned = run(id: "owned", state: .running, ownedProcessIDs: [42])
-        let result = project(runs: [unknown, starting, owned])
+        let result = project(runs: [unknown, ready, starting, owned])
 
-        XCTAssertEqual(result.items.filter { $0.kind == .runEvidence }.map(\.id), ["run-evidence:unknown"])
+        XCTAssertEqual(Set(result.items.filter { $0.kind == .runEvidence }.map(\.id)), ["run-evidence:unknown", "run-evidence:ready"])
     }
 
     func testIndependentRunsKeepRunRisksWithoutProjectRequirementRisks() {
@@ -109,7 +110,7 @@ final class OverviewAttentionTests: XCTestCase {
             failureAt: now.addingTimeInterval(-10)
         )
         let exposed = run(id: "exposed", projectID: nil, state: .running, ownedProcessIDs: nil)
-        let listening = run(id: "listening", projectID: nil, state: .running, ownedProcessIDs: [42])
+        let listening = run(id: "listening", projectID: nil, state: .ready, ownedProcessIDs: [42])
         let service = LocalServiceSnapshot(processName: "independent", pid: 42, bindings: [
             ListenerBinding(address: "0.0.0.0", port: 8080, family: .ipv4)
         ])

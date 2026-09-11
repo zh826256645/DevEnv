@@ -8,6 +8,7 @@ enum ProjectRunSessionState: Equatable, Sendable {
     case inactive
     case starting
     case running
+    case ready
     case stopping
     case stopFailed(String)
     case restarting
@@ -18,7 +19,7 @@ enum ProjectRunSessionState: Equatable, Sendable {
 
     var isLive: Bool {
         switch self {
-        case .starting, .running, .stopping, .stopFailed, .restarting, .restartFailed: true
+        case .starting, .running, .ready, .stopping, .stopFailed, .restarting, .restartFailed: true
         case .inactive, .stopped, .exited, .launchFailed: false
         }
     }
@@ -32,16 +33,22 @@ enum ProjectRunSessionState: Equatable, Sendable {
 
     var canRestart: Bool {
         switch self {
-        case .running, .restartFailed: true
+        case .running, .ready, .stopFailed, .restartFailed: true
         default: false
         }
     }
+
+    var canStart: Bool { self == .ready || !isLive }
+
+    var stopActionTitle: String { self == .ready ? "关闭" : "停止" }
+    var stopActionSymbol: String { self == .ready ? "xmark" : "stop.fill" }
 
     var statusTitle: String {
         switch self {
         case .inactive: "未启动"
         case .starting: "正在启动"
         case .running: "运行中"
+        case .ready: "终端就绪"
         case .stopping: "正在停止"
         case .stopFailed: "停止失败"
         case .restarting: "正在重启"
@@ -55,6 +62,7 @@ enum ProjectRunSessionState: Equatable, Sendable {
     var summaryCategory: ProjectRunSessionSummaryCategory {
         switch self {
         case .starting, .running, .stopping, .restarting: .running
+        case .ready: .ready
         case .stopped, .exited(0): .stopped
         case .inactive: .ignored
         case .stopFailed, .restartFailed, .launchFailed, .exited: .exceptional
@@ -63,9 +71,10 @@ enum ProjectRunSessionState: Equatable, Sendable {
 }
 
 struct ProjectRunSessionSummary: Equatable, Sendable {
-    let running: Int
-    let stopped: Int
-    let exceptional: Int
+    var running: Int
+    var stopped: Int
+    var exceptional: Int
+    var ready: Int = 0
 }
 
 struct ProjectRunExecution: Identifiable, Equatable, Sendable {
@@ -92,13 +101,15 @@ struct ProjectRunExecution: Identifiable, Equatable, Sendable {
 
 enum ProjectRunSessionSummaryCategory: Equatable, Sendable {
     case running
+    case ready
     case stopped
     case exceptional
     case ignored
 }
 
 struct ProjectRunFrozenStartRequest: Equatable, Sendable {
-    let configuration: ProjectRunConfiguration
+    var configuration: ProjectRunConfiguration
+    var preservesProjectContextAfterMove = false
     let projectRoot: String?
     let command: String
     let workingDirectory: String
@@ -125,6 +136,7 @@ struct ProjectRunBatchIntent: Equatable, Sendable {
 
 struct ProjectRunBatchStopIntent: Equatable, Sendable {
     let executionIDs: [ProjectRunExecution.ID]
+    let closesTerminals: Bool
 }
 
 enum ProjectRunActionResult: Equatable, Sendable {
@@ -369,6 +381,13 @@ protocol ProjectRunProcessEngine: AnyObject {
     var onExit: ((Int32?) -> Void)? { get set }
     var ownedProcessIDs: Set<pid_t>? { get }
     var physicalMemoryBytes: UInt64? { get }
+    var onShellState: ((Bool, Int32?) -> Void)? { get set }
+    var onUserInterrupt: (() -> Void)? { get set }
+    var isShellReady: Bool { get }
+
+    func startShell(executable: String, workingDirectory: String) throws
+    func execute(command: String, workingDirectory: String) throws
+    func interrupt() -> Bool
 
     func start(
         executable: String,
@@ -395,6 +414,9 @@ enum ProjectRunLaunchError: LocalizedError, Equatable {
     case processCouldNotBeContained
     case previousProcessesStillRunning
     case reviewedWorkingDirectoryChanged
+    case unsupportedInteractiveShell(String)
+    case shellNotReady
+    case configurationDisabled
 
     var errorDescription: String? {
         switch self {
@@ -403,6 +425,9 @@ enum ProjectRunLaunchError: LocalizedError, Equatable {
         case .processCouldNotBeContained: "PTY 所有权建立失败，启动进程未能安全终止"
         case .previousProcessesStillRunning: "上一次运行仍有进程未退出"
         case .reviewedWorkingDirectoryChanged: "工作目录已变化，需要重新确认"
+        case let .unsupportedInteractiveShell(shell): "暂不支持 \(shell) 的交互状态检测，请使用 zsh、bash、fish 或 sh"
+        case .shellNotReady: "终端尚未就绪，未发送配置命令"
+        case .configurationDisabled: "运行配置已禁用"
         }
     }
 }
@@ -446,11 +471,17 @@ private func projectRunOwnershipMonitorHandler(
 
 @MainActor
 final class AdaptiveProjectRunTerminalView: LocalProcessTerminalView {
+    var onInput: ((ArraySlice<UInt8>) -> Void)?
     private static let historyGrowthLines = TerminalOptions.default.scrollback
     private static let maximumHistoryLines = 10_000
     private var historyLines = TerminalOptions.default.scrollback
     private var estimatedOutputRows = 0
     private var currentOutputColumn = 0
+
+    override func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        onInput?(data)
+        super.send(source: source, data: data)
+    }
 
     override func dataReceived(slice: ArraySlice<UInt8>) {
         growHistory(for: slice)
@@ -507,6 +538,10 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
     let terminal = AdaptiveProjectRunTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
     var terminalView: NSView { terminal }
     var onExit: ((Int32?) -> Void)?
+    var onShellState: ((Bool, Int32?) -> Void)?
+    var onUserInterrupt: (() -> Void)?
+    private(set) var isShellReady = false
+    private var shellIntegration: ProjectRunShellIntegration?
     private(set) var ownedProcessIDs: Set<pid_t>?
     var physicalMemoryBytes: UInt64? {
         guard ownedProcessIDs != nil else { return nil }
@@ -535,7 +570,57 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
 
     override init() {
         super.init()
+        let fontFamilies = NSFontManager.shared.availableFontFamilies
+            .filter { $0.hasSuffix("Nerd Font Mono") }.sorted() + ["MesloLGS NF"]
+        terminal.font = fontFamilies.lazy.compactMap { NSFont(name: $0, size: NSFont.systemFontSize) }.first
+            ?? terminal.font
         terminal.processDelegate = self
+        terminal.onInput = { [weak self] data in
+            guard data.contains(10) || data.contains(13) || data.contains(3) || data.contains(4) else { return }
+            if data.elementsEqual([3]) { self?.onUserInterrupt?() }
+            self?.markShellBusy()
+        }
+        terminal.terminal.registerOscHandler(code: ProjectRunShellIntegration.oscCode) { [weak self] data in
+            guard let self, let integration = self.shellIntegration else { return }
+            let fields = String(decoding: data, as: UTF8.self).split(separator: ";")
+            guard let token = fields.first, token == integration.token else { return }
+            if fields.count == 2, fields[1] == "C" {
+                self.markShellBusy()
+            } else if fields.count == 3, fields[1] == "P", let code = Int32(fields[2]), (0...255).contains(code) {
+                guard tcgetpgrp(self.terminal.process.childfd) == self.terminal.process.shellPid else { return }
+                self.isShellReady = true
+                self.onShellState?(true, code)
+            }
+        }
+    }
+
+    func startShell(executable: String, workingDirectory: String) throws {
+        shellIntegration = try ProjectRunShellIntegration(executable: executable)
+        guard let integration = shellIntegration else { return }
+        isShellReady = false
+        try start(executable: executable, arguments: integration.arguments,
+                  loginName: integration.loginName, workingDirectory: workingDirectory)
+    }
+
+    func execute(command: String, workingDirectory: String) throws {
+        guard isShellReady, tcgetpgrp(terminal.process.childfd) == terminal.process.shellPid,
+              let shellIntegration else { throw ProjectRunLaunchError.shellNotReady }
+        let input = try shellIntegration.commandInput(command, workingDirectory: workingDirectory)
+        markShellBusy()
+        terminal.process.send(data: Array(input.utf8)[...])
+    }
+
+    func interrupt() -> Bool {
+        guard terminal.process.running else { return false }
+        markShellBusy()
+        terminal.process.send(data: [3][...])
+        return true
+    }
+
+    private func markShellBusy() {
+        guard shellIntegration != nil else { return }
+        isShellReady = false
+        onShellState?(false, nil)
     }
 
     func start(
@@ -569,9 +654,18 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
             ownedGroupWitnesses.removeAll()
         }
         let previousPID = terminal.process.shellPid
+        // forkpty inherits this thread's signal mask. Dispatch/XCTest may block SIGINT;
+        // Bash builtins then ignore terminal Ctrl+C unless the child starts unblocked.
+        var emptyMask = sigset_t(0)
+        var previousMask = sigset_t(0)
+        guard pthread_sigmask(SIG_SETMASK, &emptyMask, &previousMask) == 0 else {
+            throw ProjectRunLaunchError.processDidNotStart
+        }
+        defer { pthread_sigmask(SIG_SETMASK, &previousMask, nil) }
         terminal.startProcess(
             executable: executable,
             args: arguments,
+            environment: shellIntegration?.environment,
             execName: loginName,
             currentDirectory: workingDirectory
         )
@@ -788,6 +882,8 @@ final class SwiftTermProjectRunEngine: NSObject, ProjectRunProcessEngine, @preco
         ownershipMonitorGeneration = UUID()
         ownershipMonitor?.cancel()
         ownershipMonitor = nil
+        isShellReady = false
+        shellIntegration = nil
         guard let rawWaitStatus else {
             onExit?(nil)
             return
@@ -808,9 +904,18 @@ final class ProjectRunSession: ObservableObject, Identifiable {
     @Published fileprivate(set) var startedAt: Date?
     @Published fileprivate(set) var failureMessage: String?
     @Published fileprivate(set) var failureAt: Date?
+    @Published fileprivate(set) var lastExitCode: Int32?
+    @Published fileprivate(set) var hasTerminal = false
+    fileprivate var shellID = UUID()
+    fileprivate var activityID = UUID()
+    fileprivate var executionIsRunning = false
+    fileprivate var pendingLaunch: ProjectRunFrozenStartRequest?
+    fileprivate var interruptID: UUID?
+    fileprivate(set) var isClosing = false
+    fileprivate var removeAfterClose = false
 
     var activeExecution: ProjectRunExecution? {
-        state.isLive ? currentExecution : nil
+        state.isLive && (executionIsRunning || pendingLaunch != nil) ? currentExecution : nil
     }
 
     var ownedProcessIDs: Set<pid_t>? { engine.ownedProcessIDs }
@@ -970,7 +1075,8 @@ final class ProjectRunCoordinator: ObservableObject {
         _ configuration: ProjectRunConfiguration,
         name: String,
         command: String,
-        workingDirectory: String
+        workingDirectory: String,
+        reassociateProject: Bool = false
     ) -> Bool {
         guard activeDeletion?.configurationIDs.contains(configuration.id) != true,
               let remembered = projectsModel.runConfigurations().first(where: { $0.id == configuration.id }),
@@ -979,7 +1085,8 @@ final class ProjectRunCoordinator: ObservableObject {
                   name: name,
                   command: command,
                   workingDirectory: workingDirectory,
-                  rememberCommand: false
+                  rememberCommand: false,
+                  reassociateProject: reassociateProject
               ) else { return false }
         if command == remembered.command {
             commandDrafts.removeValue(forKey: configuration.id)
@@ -1000,6 +1107,34 @@ final class ProjectRunCoordinator: ObservableObject {
         return true
     }
 
+    @discardableResult
+    func move(_ target: WorkspaceMoveTarget, to workspaceID: String, includingRelated: Bool) -> Bool {
+        guard activeDeletion == nil else { return false }
+        let restarts = sessions.values.compactMap { session -> ProjectRunFrozenStartRequest? in
+            guard let request = session.pendingRestart ?? session.pendingLaunch,
+                  (try? validateProjectContext(
+                      request.configuration, projectRoot: request.projectRoot,
+                      preservesProjectContextAfterMove: request.preservesProjectContextAfterMove
+                  )) != nil else { return nil }
+            return request
+        }
+        guard projectsModel.move(target, to: workspaceID, includingRelated: includingRelated) else { return false }
+        for var request in restarts {
+            guard let current = projectsModel.document.runConfigurations.first(where: { $0.id == request.configuration.id }),
+                  current.workspaceID != request.configuration.workspaceID
+                    || current.deletedProjectPath != request.configuration.deletedProjectPath else { continue }
+            // Only ownership changes; the submitted command and directory remain frozen.
+            request.configuration.workspaceID = current.workspaceID
+            request.configuration.deletedProjectTitle = current.deletedProjectTitle
+            request.configuration.deletedProjectPath = current.deletedProjectPath
+            request.preservesProjectContextAfterMove = true
+            if sessions[current.id]?.pendingRestart != nil { sessions[current.id]?.pendingRestart = request }
+            else { sessions[current.id]?.pendingLaunch = request }
+        }
+        objectWillChange.send()
+        return true
+    }
+
     func requestDeletion(configurationID: String? = nil, workspaceID: String? = nil) {
         guard activeDeletion == nil, !projectsModel.mutationsArePaused else { return }
         let configurations = projectsModel.runConfigurations().filter {
@@ -1011,7 +1146,7 @@ final class ProjectRunCoordinator: ObservableObject {
         pendingDeletion = ProjectRunDeletionIntent(
             workspaceID: workspaceID, configurations: configurations,
             executionIDs: Dictionary(uniqueKeysWithValues: configurations.compactMap { configuration in
-                sessions[configuration.id]?.activeExecution.map { (configuration.id, $0.id) }
+                sessions[configuration.id].flatMap { $0.state.isLive ? (configuration.id, $0.activityID) : nil }
             }),
             title: workspace?.name ?? configurations[0].name,
             projectIDs: Set(projectsModel.records.filter { $0.workspaceID == workspaceID }.map(\.id))
@@ -1024,13 +1159,15 @@ final class ProjectRunCoordinator: ObservableObject {
         guard let intent = pendingDeletion, activeDeletion == nil else { return }
         pendingDeletion = nil
         guard deletionContentsMatch(intent), intent.configurations.allSatisfy({
-            sessions[$0.id]?.activeExecution?.id == intent.executionIDs[$0.id]
+            (sessions[$0.id].flatMap { $0.state.isLive ? $0.activityID : nil }) == intent.executionIDs[$0.id]
         }) else {
             deletionError = "保存内容或运行已变化，请重新确认删除。"
             return
         }
         activeDeletion = intent
-        for executionID in intent.executionIDs.values { stop(executionID: executionID) }
+        for configurationID in intent.executionIDs.keys {
+            if let session = sessions[configurationID] { beginClosing(session) }
+        }
         finishDeletionIfReady()
     }
 
@@ -1053,7 +1190,7 @@ final class ProjectRunCoordinator: ObservableObject {
                 return
             }
         }
-        guard intent.configurationIDs.allSatisfy({ sessions[$0]?.activeExecution == nil }) else { return }
+        guard intent.configurationIDs.allSatisfy({ sessions[$0]?.state.isLive != true }) else { return }
         defer { activeDeletion = nil }
         guard deletionContentsMatch(intent) else {
             deletionError = "保存内容已变化，已保留记录，请重新确认删除。"
@@ -1085,54 +1222,50 @@ final class ProjectRunCoordinator: ObservableObject {
 
     var sessionSummary: ProjectRunSessionSummary {
         sessions.values.reduce(into: ProjectRunSessionSummary(running: 0, stopped: 0, exceptional: 0)) { summary, session in
+            if session.failureMessage != nil { summary.exceptional += 1; return }
             switch session.state.summaryCategory {
-            case .running:
-                summary = ProjectRunSessionSummary(
-                    running: summary.running + 1,
-                    stopped: summary.stopped,
-                    exceptional: summary.exceptional
-                )
-            case .stopped:
-                summary = ProjectRunSessionSummary(
-                    running: summary.running,
-                    stopped: summary.stopped + 1,
-                    exceptional: summary.exceptional
-                )
-            case .ignored:
-                break
-            case .exceptional:
-                summary = ProjectRunSessionSummary(
-                    running: summary.running,
-                    stopped: summary.stopped,
-                    exceptional: summary.exceptional + 1
-                )
+            case .running: summary.running += 1
+            case .ready: summary.ready += 1
+            case .stopped: summary.stopped += 1
+            case .exceptional: summary.exceptional += 1
+            case .ignored: break
             }
         }
     }
 
-    private func batchStopExecutionIDs(
+    private func batchStopSessions(
         in scope: [ProjectRunConfiguration]
-    ) -> [ProjectRunExecution.ID] {
+    ) -> [ProjectRunSession] {
         var includedExecutionIDs: Set<ProjectRunExecution.ID> = []
         return scope.compactMap { configuration in
             guard let session = sessions[configuration.id],
-                  let executionID = session.activeExecution?.id,
+                  session.state.isLive,
+                  !session.isClosing,
+                  case let executionID = session.activityID,
                   includedExecutionIDs.insert(executionID).inserted else {
                 return nil
             }
-            return executionID
+            return session
         }
     }
 
     func canStopBatch(in scope: [ProjectRunConfiguration]) -> Bool {
-        !batchStopExecutionIDs(in: scope).isEmpty
+        !batchStopSessions(in: scope).isEmpty
     }
 
-    func requestBatchStop(in scope: [ProjectRunConfiguration]) {
-        let executionIDs = batchStopExecutionIDs(in: scope)
-        pendingBatchStopIntent = executionIDs.isEmpty
+    func canCloseBatch(in scope: [ProjectRunConfiguration]) -> Bool {
+        let targets = batchStopSessions(in: scope)
+        return !targets.isEmpty && targets.allSatisfy { $0.state == .ready }
+    }
+
+    func requestBatchStop(in scope: [ProjectRunConfiguration], closeReadyTerminals: Bool = false) {
+        let targets = batchStopSessions(in: scope)
+        pendingBatchStopIntent = targets.isEmpty
             ? nil
-            : ProjectRunBatchStopIntent(executionIDs: executionIDs)
+            : ProjectRunBatchStopIntent(
+                executionIDs: targets.map(\.activityID),
+                closesTerminals: closeReadyTerminals && targets.allSatisfy { $0.state == .ready }
+            )
     }
 
     func cancelBatchStop() {
@@ -1143,7 +1276,14 @@ final class ProjectRunCoordinator: ObservableObject {
         guard let intent = pendingBatchStopIntent else { return }
         pendingBatchStopIntent = nil
         for executionID in intent.executionIDs {
-            stop(executionID: executionID)
+            if intent.closesTerminals {
+                guard let session = sessions.values.first(where: {
+                    $0.activityID == executionID && $0.state == .ready && !$0.isClosing
+                }) else { continue }
+                closeTerminal(configurationID: session.id)
+            } else {
+                stop(executionID: executionID)
+            }
         }
     }
 
@@ -1158,11 +1298,11 @@ final class ProjectRunCoordinator: ObservableObject {
             guard includedConfigurationIDs.insert(scopedConfiguration.id).inserted,
                   let configuration = effectiveConfigurations[scopedConfiguration.id],
                   configuration.isEnabled,
-                  sessions[configuration.id]?.activeExecution == nil else {
+                  sessions[configuration.id]?.state.canStart != false else {
                 return nil
             }
-            if let projectID = configuration.projectID {
-                guard let project = projectsModel.records.first(where: { $0.id == projectID }),
+            if configuration.projectID != nil {
+                guard let project = configuration.associatedProject(in: projectsModel.records),
                       !project.availability.isUnavailable else { return nil }
             }
             return configuration
@@ -1177,7 +1317,7 @@ final class ProjectRunCoordinator: ObservableObject {
         in scope: [ProjectRunConfiguration]
     ) -> ProjectRunBatchIntent {
         let requests: [ProjectRunFrozenStartRequest] = batchStartCandidates(in: scope).compactMap { configuration in
-            let project = projectsModel.records.first { $0.id == configuration.projectID }
+            let project = configuration.associatedProject(in: projectsModel.records)
             do {
                 try validateProjectContext(configuration, projectRoot: project?.path)
                 let directory = try ProjectRunWorkingDirectory.resolve(
@@ -1206,7 +1346,7 @@ final class ProjectRunCoordinator: ObservableObject {
 
     func submitBatchStart(_ intent: ProjectRunBatchIntent) {
         for request in intent.startRequests {
-            if let project = projectsModel.records.first(where: { $0.id == request.configuration.projectID }),
+            if let project = request.configuration.associatedProject(in: projectsModel.records),
                let message = availabilityMessage(project) {
                 _ = rejectStartRequest(request, message: message)
                 continue
@@ -1235,14 +1375,14 @@ final class ProjectRunCoordinator: ObservableObject {
         if let project, let message = availabilityMessage(project) {
             return rejectStartAttempt(configuration: configuration, projectRoot: project.path, workingDirectory: nil, message: message)
         }
-        return run(configuration, projectRoot: project?.path ?? projectsModel.records.first { $0.id == configuration.projectID }?.path)
+        return run(configuration, projectRoot: project?.path ?? configuration.associatedProject(in: projectsModel.records)?.path)
     }
 
     func run(_ configuration: ProjectRunConfiguration, projectRoot: String?) -> ProjectRunActionResult {
         guard activeDeletion?.configurationIDs.contains(configuration.id) != true else { return .rejected("正在删除运行配置") }
         guard isRunConfigurationEnabled(configuration) else { return .rejected("运行配置已禁用") }
-        guard sessions[configuration.id]?.state.isLive != true else {
-            return .rejected("该运行配置已有活动会话")
+        guard sessions[configuration.id]?.state.canStart != false else {
+            return .rejected("终端正忙，请停止或重启当前命令")
         }
         do {
             try validateProjectContext(configuration, projectRoot: projectRoot)
@@ -1269,25 +1409,39 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     func stop(executionID: ProjectRunExecution.ID) {
-        guard let session = sessions.values.first(where: { $0.activeExecution?.id == executionID }),
-              session.state != .stopping else { return }
-        stopCurrentExecution(in: session)
+        guard let session = sessions.values.first(where: { $0.state.isLive && $0.activityID == executionID }) else { return }
+        stop(configurationID: session.id)
     }
 
     func stop(configurationID: String) {
-        guard let executionID = sessions[configurationID]?.activeExecution?.id else { return }
-        stop(executionID: executionID)
+        guard let session = sessions[configurationID], session.state.isLive, !session.isClosing else { return }
+        session.pendingRestart = nil
+        session.pendingLaunch = nil
+        beginInterrupt(session, restarting: false)
     }
 
-    private func stopCurrentExecution(in session: ProjectRunSession) {
-        session.pendingRestart = nil
-        if session.state == .restarting {
-            session.stopRequestedByUser = true
-            session.state = .stopping
-            objectWillChange.send()
-            return
+    func stopOrCloseTerminal(configurationID: String) {
+        if sessions[configurationID]?.state == .ready {
+            closeTerminal(configurationID: configurationID)
+        } else {
+            stop(configurationID: configurationID)
         }
-        beginStopping(session, restarting: false)
+    }
+
+    private func beginInterrupt(_ session: ProjectRunSession, restarting: Bool, sendInput: Bool = true) {
+        let interruptID = UUID()
+        session.interruptID = interruptID
+        session.stopRequestedByUser = true
+        session.state = restarting ? .restarting : .stopping
+        if sendInput { _ = session.engine.interrupt() }
+        objectWillChange.send()
+        scheduler.schedule(after: .seconds(3)) { [weak self, weak session] in
+            guard let self, let session, session.interruptID == interruptID, !session.isClosing else { return }
+            session.interruptID = nil
+            session.pendingLaunch = nil
+            if restarting { self.failRestart(session, message: "中断未完成，未发送配置命令") }
+            else { self.failStop(session, message: "中断未完成，可再次停止或关闭终端") }
+        }
     }
 
     func restart(_ configuration: ProjectRunConfiguration, project: ProjectRecord? = nil) {
@@ -1296,12 +1450,12 @@ final class ProjectRunCoordinator: ObservableObject {
             failRestartAttempt(configuration: configuration, projectRoot: project.path, workingDirectory: nil, message: message)
             return
         }
-        restart(configuration, projectRoot: project?.path ?? projectsModel.records.first { $0.id == configuration.projectID }?.path)
+        restart(configuration, projectRoot: project?.path ?? configuration.associatedProject(in: projectsModel.records)?.path)
     }
 
     func restart(_ configuration: ProjectRunConfiguration, projectRoot: String?) {
         guard activeDeletion?.configurationIDs.contains(configuration.id) != true else { return }
-        guard let session = sessions[configuration.id], session.state.canRestart else { return }
+        guard let session = sessions[configuration.id], session.state.canRestart, !session.isClosing else { return }
         do {
             guard isRunConfigurationEnabled(configuration) else { throw ProjectRunConfigurationError.configurationNotFound }
             try validateProjectContext(configuration, projectRoot: projectRoot)
@@ -1319,7 +1473,7 @@ final class ProjectRunCoordinator: ObservableObject {
             session.failureExecution = nil
             session.failureMessage = nil
             session.failureAt = nil
-            beginStopping(session, restarting: true)
+            beginInterrupt(session, restarting: true)
         } catch {
             failRestart(
                 session,
@@ -1333,33 +1487,27 @@ final class ProjectRunCoordinator: ObservableObject {
         }
     }
 
-    private func beginStopping(_ session: ProjectRunSession, restarting: Bool) {
-        let executionID = session.currentExecution?.id
-        let isRetry = session.state.isStopping
-        session.state = restarting ? .restarting : .stopping
-        if !isRetry {
-            session.pendingStopExitCode = nil
-            session.stopRequestedByUser = !restarting
-        }
-        if !restarting {
-            session.failureExecution = nil
-            session.failureMessage = nil
-            session.failureAt = nil
-        }
+    private func beginClosing(_ session: ProjectRunSession) {
+        session.isClosing = true
+        session.interruptID = nil
+        session.pendingLaunch = nil
+        session.pendingRestart = nil
+        session.pendingStopExitCode = nil
+        session.stopRequestedByUser = true
+        session.state = .stopping
+        session.failureExecution = nil
+        session.failureMessage = nil
+        session.failureAt = nil
+        let shellID = session.shellID
         _ = session.engine.signalProcessGroups(SIGINT)
         objectWillChange.send()
         scheduler.schedule(after: .seconds(2)) { [weak self, weak session] in
-            guard let self, let session, session.currentExecution?.id == executionID, session.state.isStopping else { return }
+            guard let self, let session, session.shellID == shellID, session.isClosing else { return }
             _ = session.engine.signalProcessGroups(SIGTERM)
             self.scheduler.schedule(after: .seconds(2)) { [weak self, weak session] in
-                guard let self, let session, session.currentExecution?.id == executionID, session.state.isStopping else { return }
-                if session.engine.signalProcessGroups(SIGKILL) {
-                    self.finishStopping(session)
-                } else if session.state == .restarting {
-                    self.failRestart(session, message: "上一次运行仍有进程未退出")
-                } else {
-                    self.failStop(session, message: "仍有进程未退出")
-                }
+                guard let self, let session, session.shellID == shellID, session.isClosing else { return }
+                if session.engine.signalProcessGroups(SIGKILL) { self.finishStopping(session) }
+                else { self.failStop(session, message: "仍有进程未退出") }
                 self.objectWillChange.send()
             }
         }
@@ -1375,14 +1523,13 @@ final class ProjectRunCoordinator: ObservableObject {
         exitCode: Int32,
         checksRemaining: Int
     ) {
-        guard session.state.isStopping else { return }
+        guard session.isClosing, session.state.isStopping else { return }
         if session.engine.signalProcessGroups(0), session.ownedProcessIDs?.isEmpty == true {
-            let request = session.pendingRestart
             let stoppedByUser = session.stopRequestedByUser
             session.pendingRestart = nil
             session.pendingStopExitCode = nil
             session.stopRequestedByUser = false
-            if request == nil && !stoppedByUser && exitCode != 0 {
+            if !stoppedByUser && exitCode != 0 {
                 session.failureExecution = session.currentExecution
                 session.failureMessage = "命令以状态码 \(exitCode) 退出"
                 session.failureAt = Date()
@@ -1391,8 +1538,10 @@ final class ProjectRunCoordinator: ObservableObject {
                 session.failureMessage = nil
                 session.failureAt = nil
             }
-            session.state = request == nil && stoppedByUser ? .stopped(exitCode) : .exited(exitCode)
-            if let request { _ = launch(request) }
+            session.state = stoppedByUser ? .stopped(exitCode) : .exited(exitCode)
+            session.executionIsRunning = false
+            session.isClosing = false
+            if session.removeAfterClose { sessions.removeValue(forKey: session.id) }
             finishDeletionIfReady()
         } else if checksRemaining > 0 {
             let executionID = session.currentExecution?.id
@@ -1417,7 +1566,7 @@ final class ProjectRunCoordinator: ObservableObject {
         workingDirectory: String?,
         message: String
     ) {
-        guard let session = sessions[configuration.id], session.state.canRestart else { return }
+        guard let session = sessions[configuration.id], session.state.canRestart, !session.isClosing else { return }
         failRestart(
             session,
             message: message,
@@ -1447,7 +1596,7 @@ final class ProjectRunCoordinator: ObservableObject {
         session.failureMessage = "停止失败：\(message)"
         session.failureAt = Date()
         session.state = .stopFailed(message)
-        recheckFailedStop(session)
+        if session.isClosing { recheckFailedStop(session) }
         finishDeletionIfReady()
         objectWillChange.send()
     }
@@ -1485,25 +1634,69 @@ final class ProjectRunCoordinator: ObservableObject {
 
     func terminateAllForApplicationExit() -> Bool {
         var succeeded = true
-        for session in sessions.values where session.state.isLive
-            && !session.engine.signalProcessGroups(SIGKILL) {
-            session.state = .stopping
-            succeeded = false
+        for session in sessions.values where session.state.isLive {
+            session.pendingRestart = nil
+            session.pendingLaunch = nil
+            session.interruptID = nil
+            session.isClosing = true
+            if !session.engine.signalProcessGroups(SIGKILL) {
+                session.state = .stopping
+                succeeded = false
+            }
         }
-        guard succeeded else {
-            objectWillChange.send()
-            return false
-        }
-        sessions.removeAll()
+        if succeeded { sessions.removeAll() }
         objectWillChange.send()
-        return true
+        return succeeded
     }
 
     func closeTerminal(configurationID: String) {
-        guard sessions[configurationID]?.state.isLive != true else { return }
-        if sessions.removeValue(forKey: configurationID) != nil {
+        guard let session = sessions[configurationID] else { return }
+        if session.state.isLive {
+            session.removeAfterClose = true
+            beginClosing(session)
+        } else {
+            sessions.removeValue(forKey: configurationID)
             objectWillChange.send()
         }
+    }
+
+    @discardableResult
+    func openTerminal(_ configuration: ProjectRunConfiguration) -> ProjectRunActionResult {
+        guard activeDeletion?.configurationIDs.contains(configuration.id) != true else { return .rejected("正在删除运行配置") }
+        if sessions[configuration.id]?.state.isLive == true { return .started }
+        guard isRunConfigurationEnabled(configuration) else { return .rejected("运行配置已禁用") }
+        let projectRoot = configuration.associatedProject(in: projectsModel.records)?.path
+        do {
+            try validateProjectContext(configuration, projectRoot: projectRoot)
+            let directory = try ProjectRunWorkingDirectory.resolve(projectRoot: projectRoot, workingDirectory: configuration.workingDirectory)
+            let session = sessions[configuration.id] ?? makeSession(for: configuration.id)
+            try startShell(session, workingDirectory: directory.path)
+            return .started
+        } catch {
+            return rejectStartAttempt(configuration: configuration, projectRoot: projectRoot, workingDirectory: nil, error: error)
+        }
+    }
+
+    private func startShell(_ session: ProjectRunSession, workingDirectory: String) throws {
+        session.shellID = UUID()
+        session.activityID = session.pendingLaunch != nil ? session.currentExecution?.id ?? UUID() : UUID()
+        session.isClosing = false
+        session.removeAfterClose = false
+        session.state = .starting
+        try session.engine.startShell(executable: shellProvider.defaultLoginShell(), workingDirectory: workingDirectory)
+        session.hasTerminal = true
+        let shellID = session.shellID
+        guard session.state == .starting else { objectWillChange.send(); return }
+        scheduler.schedule(after: .seconds(10)) { [weak self, weak session] in
+            guard let self, let session, session.shellID == shellID,
+                  session.state == .starting, !session.engine.isShellReady else { return }
+            session.pendingLaunch = nil
+            session.failureMessage = "尚未收到 Shell 就绪通知，可在终端检查初始化状态"
+            session.failureAt = Date()
+            session.state = .stopFailed("Shell 尚未就绪")
+            self.objectWillChange.send()
+        }
+        objectWillChange.send()
     }
 
     func clearTerminal(configurationID: String) {
@@ -1518,7 +1711,9 @@ final class ProjectRunCoordinator: ObservableObject {
         }
     }
 
-    private func validateProjectContext(_ configuration: ProjectRunConfiguration, projectRoot: String?) throws {
+    private func validateProjectContext(
+        _ configuration: ProjectRunConfiguration, projectRoot: String?, preservesProjectContextAfterMove: Bool = false
+    ) throws {
         guard let current = projectsModel.runConfigurations().first(where: { $0.id == configuration.id }),
               current.workspaceID == configuration.workspaceID,
               current.projectID == configuration.projectID else {
@@ -1528,75 +1723,91 @@ final class ProjectRunCoordinator: ObservableObject {
             guard projectRoot == nil else { throw ProjectRunConfigurationError.projectNotFound }
             return
         }
-        guard let project = projectsModel.records.first(where: {
-            $0.id == projectID && $0.workspaceID == current.workspaceID
-        }), project.path == projectRoot else {
+        guard current.deletedProjectPath == configuration.deletedProjectPath else {
+            throw ProjectRunConfigurationError.projectNotFound
+        }
+        let project = preservesProjectContextAfterMove
+            ? projectsModel.records.first { $0.id == projectID }
+            : current.associatedProject(in: projectsModel.records)
+        guard let project, project.path == projectRoot else {
             throw ProjectRunConfigurationError.projectNotFound
         }
     }
 
+    private func validateStart(_ request: ProjectRunFrozenStartRequest) throws {
+        try validateProjectContext(request.configuration, projectRoot: request.projectRoot,
+                                   preservesProjectContextAfterMove: request.preservesProjectContextAfterMove)
+        guard !request.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !request.command.contains("\0") else { throw ProjectRunConfigurationError.commandRequired }
+        guard isRunConfigurationEnabled(request.configuration) else { throw ProjectRunLaunchError.configurationDisabled }
+        let directory = try ProjectRunWorkingDirectory.resolve(projectRoot: request.projectRoot,
+                                                               workingDirectory: request.configuration.workingDirectory)
+        guard directory.path == request.workingDirectory else { throw ProjectRunLaunchError.reviewedWorkingDirectoryChanged }
+    }
+
     private func launch(_ request: ProjectRunFrozenStartRequest) -> ProjectRunActionResult {
         guard activeDeletion?.configurationIDs.contains(request.configuration.id) != true else { return .rejected("正在删除运行配置") }
-        do { try validateProjectContext(request.configuration, projectRoot: request.projectRoot) }
+        do { try validateStart(request) }
         catch { return rejectStartRequest(request, message: error.localizedDescription) }
-        guard !request.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !request.command.contains("\0") else {
-            return rejectStartRequest(request, message: ProjectRunConfigurationError.commandRequired.localizedDescription)
-        }
-        guard isRunConfigurationEnabled(request.configuration) else { return rejectStartRequest(request, message: "运行配置已禁用") }
-        guard sessions[request.configuration.id]?.state.isLive != true else {
-            return rejectStartRequest(request, message: "该运行配置已有活动会话")
+        guard sessions[request.configuration.id]?.state.canStart != false else {
+            return rejectStartRequest(request, message: "终端正忙，请停止或重启当前命令")
         }
         let session = sessions[request.configuration.id] ?? makeSession(for: request.configuration.id)
-        session.currentExecution = makeExecution(
-            configuration: request.configuration,
-            projectRoot: request.projectRoot,
-            workingDirectory: request.workingDirectory,
-            command: request.command
-        )
-        session.state = .starting
-        objectWillChange.send()
+        session.currentExecution = makeExecution(configuration: request.configuration, projectRoot: request.projectRoot,
+                                                 workingDirectory: request.workingDirectory, command: request.command)
+        session.activityID = session.currentExecution?.id ?? UUID()
+        session.pendingLaunch = request
         do {
-            let directory = try ProjectRunWorkingDirectory.resolve(
-                projectRoot: request.projectRoot,
-                workingDirectory: request.configuration.workingDirectory
-            )
-            guard directory.path == request.workingDirectory else {
-                throw ProjectRunLaunchError.reviewedWorkingDirectoryChanged
+            if session.state.isLive {
+                // Clear any partially typed command, then wait for a new prompt before dispatch.
+                beginInterrupt(session, restarting: true)
+            } else {
+                try startShell(session, workingDirectory: request.workingDirectory)
             }
-            let shell = try shellProvider.defaultLoginShell()
-            try session.engine.start(
-                executable: shell,
-                arguments: ["-i", "-c", request.command],
-                loginName: "-\(URL(fileURLWithPath: shell).lastPathComponent)",
-                workingDirectory: request.workingDirectory
-            )
-            session.lastSuccessfulCommand = request.command
-            session.startedAt = Date()
+            return .started
+        } catch {
+            session.pendingLaunch = nil
+            session.currentExecution = makeExecution(configuration: request.configuration, projectRoot: request.projectRoot,
+                                                     workingDirectory: request.workingDirectory, command: request.command)
+            return rejectCurrentExecution(configurationID: request.configuration.id, error: error)
+        }
+    }
+
+    private func execute(_ request: ProjectRunFrozenStartRequest, in session: ProjectRunSession, execution: ProjectRunExecution? = nil) {
+        do {
+            guard activeDeletion?.configurationIDs.contains(session.id) != true else { return }
+            try validateStart(request)
+            session.currentExecution = execution ?? makeExecution(configuration: request.configuration, projectRoot: request.projectRoot,
+                                                     workingDirectory: request.workingDirectory, command: request.command)
+            if let execution = session.currentExecution { session.activityID = execution.id }
+            session.state = .running
+            session.executionIsRunning = true
+            session.stopRequestedByUser = false
             session.failureExecution = nil
             session.failureMessage = nil
             session.failureAt = nil
+            session.lastExitCode = nil
+            try session.engine.execute(command: request.command, workingDirectory: request.workingDirectory)
+            session.lastSuccessfulCommand = request.command
+            session.startedAt = Date()
             session.state = .running
             if request.commandWasDraft,
-               let currentConfiguration = projectsModel.runConfigurations().first(where: {
-                   $0.id == request.configuration.id
-               }) {
-                let currentDraft = commandDrafts[request.configuration.id]
-                if projectsModel.updateRunConfiguration(
-                    currentConfiguration,
-                    name: currentConfiguration.name,
-                    command: request.command,
-                    workingDirectory: currentConfiguration.workingDirectory
-                ), currentDraft == request.command,
-                   commandDrafts[request.configuration.id] == request.command {
-                    commandDrafts.removeValue(forKey: request.configuration.id)
+               let current = projectsModel.runConfigurations().first(where: { $0.id == request.configuration.id }) {
+                let draft = commandDrafts[current.id]
+                if projectsModel.updateRunConfiguration(current, name: current.name, command: request.command,
+                                                        workingDirectory: current.workingDirectory),
+                   draft == request.command, commandDrafts[current.id] == request.command {
+                    commandDrafts.removeValue(forKey: current.id)
                 }
             }
-            objectWillChange.send()
-            return .started
         } catch {
-            return rejectCurrentExecution(configurationID: request.configuration.id, error: error)
+            session.executionIsRunning = false
+            session.state = session.engine.isShellReady ? .ready : .running
+            session.failureExecution = session.currentExecution
+            session.failureMessage = error.localizedDescription
+            session.failureAt = Date()
         }
+        objectWillChange.send()
     }
 
     private func isRunConfigurationEnabled(_ configuration: ProjectRunConfiguration) -> Bool {
@@ -1605,30 +1816,72 @@ final class ProjectRunCoordinator: ObservableObject {
 
     private func makeSession(for configurationID: String) -> ProjectRunSession {
         let session = ProjectRunSession(configurationID: configurationID, engine: makeEngine())
-        session.engine.onExit = { [weak self, weak session] exitCode in
-            guard let self, let session else { return }
-            if session.state.isStopping {
-                session.pendingStopExitCode = exitCode
-                if case .stopFailed = session.state {
-                    session.state = .stopping
-                    self.finishStopping(session)
-                    self.objectWillChange.send()
+        session.engine.onUserInterrupt = { [weak self, weak session] in
+            guard let self, let session, session.state.isLive, !session.isClosing else { return }
+            session.pendingLaunch = nil
+            session.pendingRestart = nil
+            self.beginInterrupt(session, restarting: false, sendInput: false)
+        }
+        session.engine.onShellState = { [weak self, weak session] ready, exitCode in
+            guard let self, let session, self.sessions[session.id] === session,
+                  session.state.isLive, !session.isClosing else { return }
+            if ready {
+                if session.executionIsRunning {
+                    session.lastExitCode = exitCode
+                    if let exitCode, exitCode != 0, !session.stopRequestedByUser {
+                        session.failureExecution = session.currentExecution
+                        session.failureMessage = "命令以状态码 \(exitCode) 退出"
+                        session.failureAt = Date()
+                    }
                 }
+                if session.stopRequestedByUser {
+                    session.failureExecution = nil
+                    session.failureMessage = nil
+                    session.failureAt = nil
+                }
+                session.executionIsRunning = false
+                session.stopRequestedByUser = false
+                session.interruptID = nil
+                session.state = .ready
+                session.activityID = UUID()
+                let request = session.pendingRestart ?? session.pendingLaunch
+                let execution = session.pendingLaunch != nil ? session.currentExecution : nil
+                session.pendingRestart = nil
+                session.pendingLaunch = nil
+                if let request { self.execute(request, in: session, execution: execution) }
+            } else if session.state == .ready {
+                session.activityID = UUID()
+                session.startedAt = Date()
+                session.state = .running
+            }
+            self.objectWillChange.send()
+        }
+        session.engine.onExit = { [weak self, weak session] exitCode in
+            guard let self, let session, self.sessions[session.id] === session else { return }
+            if session.isClosing {
+                session.pendingStopExitCode = session.pendingStopExitCode ?? exitCode
+                if case .stopFailed = session.state { self.finishStopping(session) }
+                else if session.ownedProcessIDs?.isEmpty == true { self.finishStopping(session) }
+                self.objectWillChange.send()
                 return
             }
-            if exitCode != 0 {
-                session.failureExecution = session.currentExecution
-                session.failureMessage = "命令以状态码 \(exitCode ?? -1) 退出"
-                session.failureAt = Date()
+            session.interruptID = nil
+            session.pendingLaunch = nil
+            session.pendingRestart = nil
+            if session.executionIsRunning {
+                session.lastExitCode = exitCode
+                if exitCode != 0, !session.stopRequestedByUser {
+                    session.failureExecution = session.currentExecution
+                    session.failureMessage = "命令以状态码 \(exitCode ?? -1) 退出"
+                    session.failureAt = Date()
+                }
             }
-            if session.engine.signalProcessGroups(SIGKILL) {
-                session.state = .exited(exitCode ?? -1)
-            } else {
-                session.stopRequestedByUser = false
-                session.state = .stopping
-                session.pendingStopExitCode = exitCode
-                self.finishStopping(session)
-            }
+            session.pendingStopExitCode = session.executionIsRunning ? exitCode : 0
+            session.executionIsRunning = false
+            session.isClosing = true
+            session.state = .stopping
+            _ = session.engine.signalProcessGroups(SIGKILL)
+            self.finishStopping(session)
             self.objectWillChange.send()
         }
         sessions[configurationID] = session
@@ -1703,11 +1956,11 @@ final class ProjectRunCoordinator: ObservableObject {
     ) -> ProjectRunActionResult {
         guard projectsModel.runConfigurations().contains(where: { $0.id == configurationID }) else { return .rejected(message) }
         let session = sessions[configurationID] ?? makeSession(for: configurationID)
-        let activeExecution = session.activeExecution
+        let isLive = session.state.isLive
         session.failureExecution = execution
         session.failureMessage = message
         session.failureAt = Date()
-        if activeExecution == nil {
+        if !isLive {
             session.currentExecution = execution
             session.state = .launchFailed(message)
         }

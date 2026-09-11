@@ -1,5 +1,7 @@
 # 将可信 Project Run 与只读 Environment Scan 分离
 
+> 终端生命周期及停止、重启语义已由 [ADR-0015](0015-support-persistent-interactive-run-terminals.md) 取代：配置命令结束后保留交互 Shell，停止仅发送 Ctrl+C，关闭终端才清理整个会话。
+
 > “Environment Scan 不加载 Shell 配置”的限制已由 [ADR-0013](0013-initialize-machine-tool-search-path-from-login-shell.md) 在取得 Machine Tool Search PATH 的固定、限时调用范围内取代；Project Run 的信任边界不变。
 
 Environment Scan 继续只执行固定观察；除 ADR-0013 为取得 Machine Tool Search PATH 而进行的受限 Shell 初始化外，不加载 Shell 配置，也不根据扫描结果自动启动项目命令。Project Run Suggestion 只提供候选运行意图；只有用户保存 Project Run Configuration，并在首次执行对应 Project Root 时核对完整命令与解析后的工作目录、建立 Project Trust，DevEnv 才创建 Project Run Session。

@@ -93,7 +93,7 @@ enum OverviewAttention {
         let runs = input.runs
             .filter { $0.state.isLive || $0.failureMessage != nil }
             .map { run in
-                let bindings: [ListenerBinding]? = if run.state == .running, let processIDs = run.ownedProcessIDs {
+                let bindings: [ListenerBinding]? = if run.state == .running || run.state == .ready, let processIDs = run.ownedProcessIDs {
                     Array(Set(input.snapshot.localServices
                         .filter { processIDs.contains($0.pid) }
                         .flatMap(\.bindings)))
@@ -142,7 +142,7 @@ enum OverviewAttention {
             add("run-failure:\(run.id)", "\(run.project?.title ?? run.configuration.name) 运行失败", "\(run.configuration.name)：\(message)", .critical, .runFailure, run.failureAt, .run(run.id))
         }
 
-        for run in runs where run.state == .running && run.ownedProcessIDs == nil {
+        for run in runs where (run.state == .running || run.state == .ready) && run.ownedProcessIDs == nil {
             add("run-evidence:\(run.id)", "\(run.project?.title ?? run.configuration.name) 运行证据不足", "无法确证该运行会话的进程归属，端口与内存状态可能不完整", .warning, .runEvidence, run.startedAt, .run(run.id))
         }
 

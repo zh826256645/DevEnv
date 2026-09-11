@@ -170,7 +170,8 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         start.target = self
         start.isEnabled = runCoordinator.canStartBatch(in: runCoordinator.runConfigurations())
         menu.addItem(start)
-        let stop = NSMenuItem(title: "全部工作区停止", action: #selector(requestStopAll(_:)), keyEquivalent: "")
+        let stopTitle = runCoordinator.canCloseBatch(in: runCoordinator.runConfigurations()) ? "全部工作区关闭" : "全部工作区停止"
+        let stop = NSMenuItem(title: stopTitle, action: #selector(requestStopAll(_:)), keyEquivalent: "")
         stop.target = self
         stop.isEnabled = runCoordinator.canStopBatch(in: runCoordinator.runConfigurations())
         menu.addItem(stop)
@@ -178,7 +179,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
 
         let summary = runCoordinator.sessionSummary
         let summaryItem = NSMenuItem(
-            title: "\(summary.running) 运行 · \(summary.stopped) 停止 · \(summary.exceptional) 异常",
+            title: "\(summary.running) 执行中 · \(summary.ready) 就绪 · \(summary.stopped) 已结束 · \(summary.exceptional) 异常",
             action: nil,
             keyEquivalent: ""
         )
@@ -256,7 +257,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func requestStopAll(_: NSMenuItem) {
         let scope = runCoordinator.runConfigurations()
         guard runCoordinator.canStopBatch(in: scope) else { return }
-        runCoordinator.requestBatchStop(in: scope)
+        runCoordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
         handoffToRunsPage()
     }
 

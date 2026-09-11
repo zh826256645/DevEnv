@@ -34,6 +34,30 @@ enum AppAppearance: String, CaseIterable {
     }
 }
 
+enum RunListStatusFilter: String, CaseIterable {
+    case all = "全部状态"
+    case active = "活动运行"
+    case inactive = "未启动"
+    case ended = "已结束"
+    case failed = "异常"
+    case disabled = "已禁用"
+
+    func includes(_ configuration: ProjectRunConfiguration, state: ProjectRunSessionState, searchText: String, projectTitle: String, hasFailure: Bool = false) -> Bool {
+        let matchesStatus: Bool = switch self {
+        case .all: true
+        case .active: configuration.isEnabled && state.isLive
+        case .inactive: configuration.isEnabled && state == .inactive
+        case .ended: configuration.isEnabled && state.summaryCategory == .stopped
+        case .failed: configuration.isEnabled && (hasFailure || state.summaryCategory == .exceptional)
+        case .disabled: !configuration.isEnabled
+        }
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return matchesStatus && (query.isEmpty || [configuration.name, configuration.command, projectTitle].contains {
+            $0.localizedCaseInsensitiveContains(query)
+        })
+    }
+}
+
 private enum AppTheme {
     static let accent = adaptive(
         light: NSColor(red: 0.08, green: 0.38, blue: 0.95, alpha: 1),
@@ -79,6 +103,12 @@ final class ProjectTerminalContainerView: NSView {
         guard terminalView.superview !== self else { return }
         addSubview(terminalView)
         resizeTerminalIfPossible()
+        window?.makeFirstResponder(terminalView)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let terminalView { window?.makeFirstResponder(terminalView) }
     }
 
     func unmount() {
@@ -374,7 +404,7 @@ func overviewVisibleRunLimit(cardHeight: CGFloat, itemCount: Int) -> Int {
     guard itemCount > 0 else { return 0 }
     return (1...itemCount).reversed().first { count in
         let footerHeight: CGFloat = itemCount > count ? 36 : 0
-        let tableChromeHeight: CGFloat = 92
+        let tableChromeHeight: CGFloat = 106
         let rowHeight: CGFloat = 68
         return tableChromeHeight + CGFloat(count) * rowHeight + footerHeight <= cardHeight
     } ?? 1
@@ -584,7 +614,9 @@ struct ContentView: View {
     }
 
     private struct OverviewRunTableColumns {
-        let configuration: CGFloat
+        let workspace: CGFloat
+        let project: CGFloat
+        let spacing: CGFloat
         let port: CGFloat
         let status: CGFloat
         let duration: CGFloat
@@ -592,13 +624,15 @@ struct ContentView: View {
         let actions: CGFloat
 
         init(availableWidth: CGFloat) {
-            let compact = availableWidth < 900
-            configuration = compact ? 122 : 148
-            port = compact ? 72 : 86
-            status = compact ? 80 : 90
-            duration = compact ? 78 : 92
-            memory = compact ? 82 : 96
-            actions = compact ? 76 : 86
+            let compact = availableWidth < 1000
+            workspace = compact ? 72 : 100
+            project = compact ? 106 : 152
+            spacing = compact ? 8 : 12
+            port = compact ? 56 : 72
+            status = compact ? 76 : 90
+            duration = compact ? 64 : 84
+            memory = compact ? 68 : 84
+            actions = compact ? 102 : 124
         }
     }
 
@@ -694,6 +728,10 @@ struct ContentView: View {
     @State private var selectedProjectID: String?
     @State private var expandedProjectRequirementID: String?
     @State private var projectSearchText = ""
+    @State private var projectStatusFilter: ProjectRequirementsSummary?
+    @State private var showsIgnoredProjects = false
+    @State private var projectDetailTab = "详情"
+    @State private var overviewWorkspaceFilterID: String?
     @State private var runProjectFilterID: String?
     @State private var isRunSuggestionsExpanded = false
     @State private var isShowingRunConfigurationEditor = false
@@ -703,7 +741,11 @@ struct ContentView: View {
     @State private var isShowingWorkspaceEditor = false
     @State private var renamingWorkspaceID: String?
     @State private var workspaceNameDraft = ""
-    @State private var runConfigurationProjectID = ""
+    @State private var movingTarget: WorkspaceMoveTarget?
+    @State private var moveDestinationID = ""
+    @State private var moveIncludingRelated = true
+    @State private var moveError: String?
+    @State private var runConfigurationProjectID: String? = ""
     @State private var runConfigurationName = ""
     @State private var runConfigurationCommand = ""
     @State private var runConfigurationWorkingDirectory = "."
@@ -713,6 +755,9 @@ struct ContentView: View {
     @State private var selectedRunConfigurationID: String?
     @State private var expandedTerminalConfiguration: ProjectRunConfiguration?
     @State private var runSearchText = ""
+    @State private var runStatusFilter = RunListStatusFilter.all
+    @State private var runDetailTab = "终端"
+    @FocusState private var runSearchIsFocused: Bool
     @FocusState private var focusedCopyPath: String?
     @FocusState private var projectSearchIsFocused: Bool
     @FocusState private var projectAddIsFocused: Bool
@@ -727,6 +772,7 @@ struct ContentView: View {
         navigation(model.snapshot)
         .frame(minWidth: 1100, minHeight: 720)
         .sheet(isPresented: $isShowingWorkspaceEditor) { workspaceEditor }
+        .sheet(item: $movingTarget) { workspaceMoveSheet($0) }
         .onChange(of: projectsModel.currentWorkspace.id) { _, _ in
             selectedProjectIDs.removeAll()
             isSelectingProjects = false
@@ -735,7 +781,10 @@ struct ContentView: View {
             }
             runProjectFilterID = nil
             runSearchText = ""
+            runStatusFilter = .all
             projectSearchText = ""
+            projectStatusFilter = nil
+            showsIgnoredProjects = false
             if !workspaceRunConfigurations.contains(where: { $0.id == selectedRunConfigurationID }) {
                 selectedRunConfigurationID = nil
             }
@@ -901,7 +950,9 @@ struct ContentView: View {
 
     var body: some View {
         mainContent
-        .onChange(of: projectsModel.document.runConfigurations.map(\.id)) { _, ids in
+        .onChange(of: projectsModel.document.runConfigurations.filter {
+            $0.workspaceID == projectsModel.currentWorkspace.id
+        }.map(\.id)) { _, ids in
             if let id = selectedRunConfigurationID, !ids.contains(id) { selectedRunConfigurationID = nil }
             if let configuration = expandedTerminalConfiguration, !ids.contains(configuration.id) { expandedTerminalConfiguration = nil }
             if let configuration = editingRunConfiguration, !ids.contains(configuration.id) {
@@ -1154,7 +1205,6 @@ struct ContentView: View {
         if page.usesProjectRecords {
             VStack(spacing: 0) {
                 workspaceNavigation
-                Divider()
                 if runCoordinator.activeDeletion != nil {
                     ProgressView("正在安全停止相关运行，完成后删除保存内容…").padding()
                 }
@@ -1224,7 +1274,7 @@ struct ContentView: View {
         Binding(
             get: { selectedPage },
             set: { page in
-                if let page { requestPage(page) }
+                if let page { requestPage(page == .projects ? .runs : page) }
             }
         )
     }
@@ -1314,54 +1364,100 @@ struct ContentView: View {
     }
 
     private var workspaceNavigation: some View {
-        HStack(spacing: 12) {
-            Picker("工作区", selection: Binding(
-                get: { projectsModel.currentWorkspace.id },
-                set: { _ = projectsModel.selectWorkspace($0) }
-            )) {
-                if projectsModel.document.workspaces.isEmpty { Text("无工作区").tag("") }
-                ForEach(projectsModel.document.workspaces) { workspace in
-                    Text(workspace.name).tag(workspace.id)
+        HStack(spacing: 18) {
+            Text("工作区").font(.system(size: 29, weight: .bold)).fixedSize()
+            HStack(spacing: 8) {
+                runConfigurationIcon(size: 22)
+                Menu {
+                    ForEach(projectsModel.document.workspaces) { workspace in
+                        Button {
+                            _ = projectsModel.selectWorkspace(workspace.id)
+                        } label: {
+                            if workspace.id == projectsModel.currentWorkspace.id {
+                                Label(workspace.name, systemImage: "checkmark")
+                            } else { Text(workspace.name) }
+                        }
+                    }
+                } label: {
+                    Text(projectsModel.document.workspaces.isEmpty ? "无工作区" : projectsModel.currentWorkspace.name)
+                        .fontWeight(.semibold).lineLimit(1)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(maxWidth: 180)
+                .accessibilityLabel("切换工作区")
+                if projectsModel.currentWorkspace.id == Workspace.defaultWorkspace.id {
+                    Text("默认").font(.caption.weight(.medium))
+                        .foregroundStyle(AppTheme.accent)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(AppTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 }
             }
-            .labelsHidden()
-            .fixedSize()
-            .accessibilityLabel("切换工作区")
+            .padding(.horizontal, 12).frame(height: 44)
+            .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppTheme.accent.opacity(0.16)))
             .disabled(projectsModel.mutationsArePaused)
-            Picker("工作区页签", selection: Binding(
-                get: { selectedPage == .runs ? Page.runs : Page.projects },
-                set: { requestPage($0) }
-            )) {
-                Text("项目").tag(Page.projects)
-                Text("运行").tag(Page.runs)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .accessibilityLabel("工作区页签")
-            .frame(width: 100)
-            Spacer()
-            Group {
+            .fixedSize(horizontal: true, vertical: false)
+            Menu {
                 Button("新建工作区") {
                     renamingWorkspaceID = nil
                     workspaceNameDraft = ""
                     isShowingWorkspaceEditor = true
                 }
-                Button("重命名") {
+                Button("重命名工作区") {
                     renamingWorkspaceID = projectsModel.currentWorkspace.id
                     workspaceNameDraft = projectsModel.currentWorkspace.name
                     isShowingWorkspaceEditor = true
                 }
-                .accessibilityLabel("重命名当前工作区")
                 .disabled(projectsModel.document.workspaces.isEmpty)
+                Button("添加项目…") { chooseProjectDirectories(forBatchScan: false) }
+                    .disabled(projectsModel.document.workspaces.isEmpty || projectsModel.isScanning)
+                Divider()
                 Button("删除工作区", role: .destructive) {
                     runCoordinator.requestDeletion(workspaceID: projectsModel.currentWorkspace.id)
                 }
                 .disabled(projectsModel.document.workspaces.isEmpty || projectsModel.isScanning || runCoordinator.activeDeletion != nil)
+            } label: {
+                Label("工作区设置", systemImage: "gearshape")
             }
+            .fixedSize()
             .disabled(projectsModel.mutationsArePaused)
+            Spacer(minLength: 0)
+            Button(action: beginCreatingRunConfiguration) {
+                Label("新建运行配置", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+            .fixedSize()
+            .disabled(projectsModel.document.workspaces.isEmpty || projectsModel.mutationsArePaused)
         }
-        .padding(.horizontal, 28)
-        .padding(.vertical, 16)
+        .controlSize(.large)
+        .padding(.horizontal, 24)
+        .padding(.top, 22)
+        .padding(.bottom, 16)
+    }
+
+    private var workspaceTabs: some View {
+        HStack(spacing: 0) {
+            workspaceTab(.runs, title: "运行配置", count: projectsModel.document.runConfigurations.filter {
+                $0.workspaceID == projectsModel.currentWorkspace.id
+            }.count, symbol: "play")
+            workspaceTab(.projects, title: "项目", count: projectsModel.workspaceRecords.count, symbol: "folder")
+        }
+    }
+
+    private func workspaceTab(_ page: Page, title: String, count: Int, symbol: String) -> some View {
+        Button { requestPage(page) } label: {
+            Label("\(title) (\(count))", systemImage: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(selectedPage == page ? AppTheme.accent : Color.primary)
+                .padding(.horizontal, 18).frame(height: 40)
+                .background(selectedPage == page ? AppTheme.cardRaised : Color.clear)
+                .overlay(alignment: .bottom) {
+                    if selectedPage == page { Rectangle().fill(AppTheme.accent).frame(height: 2) }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selectedPage == page ? .isSelected : [])
     }
 
     private var workspaceEditor: some View {
@@ -1398,48 +1494,6 @@ struct ContentView: View {
 
     private var projectsPage: some View {
         VStack(spacing: 14) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("项目")
-                        .font(.system(size: 29, weight: .bold))
-                    Text("\(projectsModel.workspaceRecords.count) 个项目  ·  本次新增 \(projectsModel.workspaceRecords.filter(\.isNew).count) 个")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 20)
-                Button { chooseProjectDirectories(forBatchScan: false) } label: {
-                    Label("添加项目", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-                .focused($projectAddIsFocused)
-                .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
-                Button("扫描目录…") { chooseProjectDirectories(forBatchScan: true) }
-                    .buttonStyle(.bordered)
-                    .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
-                if isSelectingProjects {
-                    Button("取消") {
-                        selectedProjectIDs.removeAll()
-                        isSelectingProjects = false
-                    }
-                    Button("全选") { selectedProjectIDs = visibleProjectRecordIDs }
-                        .disabled(selectedProjectIDs == visibleProjectRecordIDs)
-                    Button("删除（\(selectedProjectIDs.count)）", role: .destructive) {
-                        pendingProjectRemovalIDs = selectedProjectIDs
-                    }
-                    .disabled(
-                        selectedProjectIDs.isEmpty
-                            || projectsModel.mutationsArePaused
-                            || projectsModel.isScanning
-                    )
-                } else {
-                    Button("多选") { isSelectingProjects = true }
-                        .buttonStyle(.bordered)
-                        .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
-                }
-            }
-            .controlSize(.regular)
-            .padding(.bottom, 4)
-
             if let storageError = projectsModel.storageError {
                 GroupBox {
                     HStack(alignment: .top, spacing: 12) {
@@ -1508,95 +1562,30 @@ struct ContentView: View {
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
             }
 
-            if projectsModel.workspaceRecords.isEmpty && projectsModel.ignoredProjects.isEmpty {
-                ContentUnavailableView {
-                    Label("尚未添加项目", systemImage: "folder.badge.plus")
-                } description: {
-                    Text("直接添加 Project Root，或扫描一个临时选择的目录来批量发现项目。")
-                } actions: {
-                    Button("添加项目…") { chooseProjectDirectories(forBatchScan: false) }
-                        .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+            GeometryReader { geometry in
+                HStack(alignment: .top, spacing: 14) {
+                    projectList
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    projectDetail
+                        .frame(width: min(max(geometry.size.width * 0.45, 420), 680))
+                        .frame(maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
-            } else {
-                VStack(spacing: 14) {
-                    GeometryReader { geometry in
-                        HStack(spacing: 12) {
-                            projectList
-                                .frame(
-                                    width: min(max(geometry.size.width * 0.20, 240), 320),
-                                    height: geometry.size.height
-                                )
-                            projectDetail
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                                .frame(height: geometry.size.height, alignment: .topLeading)
-                                .layoutPriority(1)
-                        }
-                    }
-                    if selectedProject != nil {
-                        projectStatusBar
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .accessibilityElement(children: .contain)
             }
         }
-        .padding(24)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 24)
         .background(AppTheme.canvas)
         .onAppear(perform: selectFirstProjectIfNeeded)
-        .onChange(of: projectsModel.workspaceRecords.map(\.id)) { _, _ in
+        .onChange(of: visibleProjectRecordIDs) { _, ids in
+            selectedProjectIDs.formIntersection(ids)
             selectFirstProjectIfNeeded()
-        }
-        .onChange(of: selectedProjectID) { _, _ in
-            expandedProjectRequirementID = nil
         }
     }
 
     private var runsPage: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("运行")
-                        .font(.system(size: 29, weight: .bold))
-                    Text("管理和运行项目的开发、启动或调试命令")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 20)
-                Picker("筛选项目", selection: $runProjectFilterID) {
-                    Text("全部项目").tag(Optional<String>.none)
-                    ForEach(projectsModel.workspaceRecords) { project in
-                        Text(project.title).tag(Optional(project.id))
-                    }
-                }
-                .frame(maxWidth: 260)
-                .accessibilityLabel("按项目筛选运行配置")
-                Button(action: requestRunAll) {
-                    Label("全部启动", systemImage: "play.fill")
-                }
-                .buttonStyle(.bordered)
-                .disabled(!runCoordinator.canStartBatch(in: visibleRunConfigurations))
-                Button(role: .destructive, action: requestStopAll) {
-                    Label("全部停止", systemImage: "stop.fill")
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-                .disabled(!runCoordinator.canStopBatch(in: visibleRunConfigurations))
-                Button(action: beginCreatingRunConfiguration) {
-                    Label("新建配置", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(projectsModel.mutationsArePaused)
-                .accessibilityLabel("新建运行配置")
-            }
-            .padding(.horizontal, 4)
-            .padding(.bottom, 18)
-
-            runsPageContent
-        }
-        .padding(24)
+        runsPageContent
+        .padding(.horizontal, 24)
+        .padding(.bottom, 24)
         .background(AppTheme.canvas)
         .onAppear(perform: selectFirstRunConfigurationIfNeeded)
         .onChange(of: projectsModel.workspaceRecords.map(\.id)) { _, projectIDs in
@@ -1610,20 +1599,29 @@ struct ContentView: View {
                 selectedRunConfigurationID = visibleRunConfigurations.first?.id
             }
         }
+        .onChange(of: runStatusFilter) { _, _ in
+            if !visibleRunConfigurations.contains(where: { $0.id == selectedRunConfigurationID }) {
+                selectedRunConfigurationID = visibleRunConfigurations.first?.id
+            }
+        }
         .onChange(of: runSearchText) { _, _ in
             if !visibleRunConfigurations.contains(where: { $0.id == selectedRunConfigurationID }) {
                 selectedRunConfigurationID = visibleRunConfigurations.first?.id
             }
         }
         .alert(
-            "停止全部活动会话？",
+            runCoordinator.pendingBatchStopIntent?.closesTerminals == true ? "关闭全部就绪终端？" : "停止全部活动会话？",
             isPresented: isConfirmingStopAll,
             presenting: runCoordinator.pendingBatchStopIntent
-        ) { _ in
+        ) { intent in
             Button("取消", role: .cancel) { runCoordinator.cancelBatchStop() }
-            Button("全部停止", role: .destructive) { runCoordinator.confirmBatchStop() }
+            Button(intent.closesTerminals ? "全部关闭" : "全部停止", role: .destructive) { runCoordinator.confirmBatchStop() }
         } message: { intent in
-            Text("将停止 \(intent.executionIDs.count) 个活动会话，包括取消正在进行的重启。")
+            if intent.closesTerminals {
+                Text("将关闭 \(intent.executionIDs.count) 个就绪终端；运行配置将保留。")
+            } else {
+                Text("将向 \(intent.executionIDs.count) 个活动会话发送 Ctrl+C，并取消等待中的重启；终端会话将保留。")
+            }
         }
     }
 
@@ -1639,37 +1637,20 @@ struct ContentView: View {
     @ViewBuilder
     private var runsPageContent: some View {
         if let storageError = projectsModel.storageError {
-            runStorageErrorView(storageError)
-        } else if workspaceRunConfigurations.isEmpty
-            && selectedRunSuggestions.isEmpty {
-            ContentUnavailableView {
-                Label("没有运行配置", systemImage: "play.rectangle")
-            } description: {
-                Text(runEmptyDescription)
-            } actions: {
-                Button("新建配置", action: beginCreatingRunConfiguration)
-                    .disabled(projectsModel.mutationsArePaused)
+            VStack {
+                workspaceTabs
+                runStorageErrorView(storageError)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            VStack(spacing: 14) {
-                GeometryReader { geometry in
-                    HStack(spacing: 12) {
-                        runConfigurationSidebar
-                            .frame(
-                                width: min(max(geometry.size.width * 0.20, 240), 320),
-                                height: geometry.size.height
-                            )
-                        runConfigurationDetail
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                            .frame(height: geometry.size.height, alignment: .topLeading)
-                            .layoutPriority(1)
-                    }
+            GeometryReader { geometry in
+                HStack(alignment: .top, spacing: 14) {
+                    runConfigurationTable
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    runConfigurationDetail
+                        .frame(width: min(max(geometry.size.width * 0.45, 420), 680))
+                        .frame(maxHeight: .infinity)
                 }
-                .clipped()
-                runSessionStatusBar
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
@@ -1686,30 +1667,15 @@ struct ContentView: View {
     }
 
     private var visibleRunConfigurations: [ProjectRunConfiguration] {
-        let configurations = runCoordinator.activeConfigurationsFirst(
-            workspaceRunConfigurations
-        )
-        guard !runSearchText.isEmpty else { return configurations }
-        return configurations.filter {
-            $0.name.localizedCaseInsensitiveContains(runSearchText)
-                || $0.command.localizedCaseInsensitiveContains(runSearchText)
+        runCoordinator.activeConfigurationsFirst(workspaceRunConfigurations).filter { configuration in
+            runStatusFilter.includes(
+                configuration,
+                state: runCoordinator.session(for: configuration.id)?.state ?? .inactive,
+                searchText: runSearchText,
+                projectTitle: configuration.associatedProject(in: projectsModel.records)?.title ?? (configuration.projectID == nil ? "" : configuration.missingProjectTitle),
+                hasFailure: runCoordinator.session(for: configuration.id)?.failureMessage != nil
+            )
         }
-    }
-
-    private var runningConfigurations: [ProjectRunConfiguration] {
-        visibleRunConfigurations.filter {
-            $0.isEnabled && runCoordinator.session(for: $0.id)?.state.isLive == true
-        }
-    }
-
-    private var stoppedConfigurations: [ProjectRunConfiguration] {
-        visibleRunConfigurations.filter {
-            $0.isEnabled && runCoordinator.session(for: $0.id)?.state.isLive != true
-        }
-    }
-
-    private var disabledConfigurations: [ProjectRunConfiguration] {
-        visibleRunConfigurations.filter { !$0.isEnabled }
     }
 
     private var selectedRunConfiguration: ProjectRunConfiguration? {
@@ -1724,7 +1690,7 @@ struct ContentView: View {
     }
 
     private func requestStopAll() {
-        runCoordinator.requestBatchStop(in: visibleRunConfigurations)
+        runCoordinator.requestBatchStop(in: visibleRunConfigurations, closeReadyTerminals: true)
     }
 
     private func selectFirstRunConfigurationIfNeeded() {
@@ -1733,174 +1699,259 @@ struct ContentView: View {
         }
     }
 
-    private var runConfigurationSidebar: some View {
+    private var runConfigurationTable: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("搜索配置名称或命令", text: $runSearchText)
-                    .textFieldStyle(.plain)
-                Text("⌘F")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.tertiary)
+            HStack(spacing: 10) {
+                workspaceTabs
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.10)))
-            .padding(14)
-
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    runConfigurationSection(title: "运行中", count: runningConfigurations.count, configurations: runningConfigurations)
-                    runConfigurationSection(title: "未启动", count: stoppedConfigurations.count, configurations: stoppedConfigurations)
-                    runConfigurationSection(title: "已禁用", count: disabledConfigurations.count, configurations: disabledConfigurations)
+            .padding(.horizontal, 14).padding(.top, 10)
+            Divider().opacity(0.6)
+            runListFilters.padding(14)
+            if visibleRunConfigurations.isEmpty {
+                ContentUnavailableView {
+                    Label(workspaceRunConfigurations.isEmpty ? "没有运行配置" : "没有匹配的运行配置", systemImage: "play.rectangle")
+                } description: {
+                    Text(workspaceRunConfigurations.isEmpty ? runEmptyDescription : "试试其他关键词或筛选条件。")
+                } actions: {
+                    if !runSearchText.isEmpty || runStatusFilter != .all || runProjectFilterID != nil {
+                        Button("清除筛选") {
+                            runSearchText = ""
+                            runStatusFilter = .all
+                            runProjectFilterID = nil
+                        }
+                    } else {
+                        Button("新建运行配置", action: beginCreatingRunConfiguration)
+                            .disabled(projectsModel.mutationsArePaused)
+                    }
                 }
-                .padding(.bottom, 16)
-            }
-            .scrollIndicators(.hidden)
-
-            if !selectedRunSuggestions.isEmpty {
-                Divider().opacity(0.5)
-                DisclosureGroup(isExpanded: $isRunSuggestionsExpanded) {
-                    VStack(spacing: 8) {
-                        ForEach(selectedRunSuggestions) { suggestion in
-                            runSuggestionRow(suggestion)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                GeometryReader { geometry in
+                    // Keep name, status and actions; add project, command, then ports as space permits.
+                    let detailColumnCount = [444.0, 554, 604].filter { geometry.size.width >= $0 }.count
+                    VStack(spacing: 0) {
+                        runTableHeader(detailColumnCount: detailColumnCount)
+                        ScrollView(.vertical) {
+                            LazyVStack(spacing: 0) {
+                                ForEach(visibleRunConfigurations) { configuration in
+                                    runConfigurationRow(configuration, detailColumnCount: detailColumnCount)
+                                }
+                            }
                         }
                     }
+                }
+                .padding(.horizontal, 14)
+            }
+            if !selectedRunSuggestions.isEmpty {
+                Divider().padding(.horizontal, 14)
+                DisclosureGroup(isExpanded: $isRunSuggestionsExpanded) {
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            ForEach(selectedRunSuggestions) { runSuggestionRow($0) }
+                        }
+                    }
+                    .frame(maxHeight: 150)
                     .padding(.top, 8)
                 } label: {
-                    Label("运行建议", systemImage: "lightbulb")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
+                    Label("运行建议 (\(selectedRunSuggestions.count))", systemImage: "lightbulb")
+                        .font(.subheadline).foregroundStyle(.secondary)
                 }
                 .padding(14)
             }
-        }
-        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
-    }
-
-    private var runSessionStatusBar: some View {
-        let configuration = selectedRunConfiguration
-        let project = configuration.flatMap { selected in
-            projectsModel.records.first { $0.id == selected.projectID }
-        }
-        let state = configuration.flatMap { runCoordinator.session(for: $0.id)?.state } ?? .inactive
-        return HStack(spacing: 10) {
-            Image(systemName: state.isLive ? "checkmark.shield.fill" : "shield")
-                .foregroundStyle(state.isLive ? Color.green : Color.secondary)
-                .padding(7)
-                .background((state.isLive ? Color.green : Color.secondary).opacity(0.12), in: Circle())
-            if configuration?.isEnabled == false {
-                Label("已禁用", systemImage: "pause.circle.fill")
-                    .foregroundStyle(.secondary)
-                    .font(.callout)
-            } else {
-                projectRunState(state)
-                    .font(.callout)
-            }
-            Spacer()
-            if let project {
-                Text("最后更新：\(formatted(project.lastDiscoveredAt))")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-            Button("刷新状态") { runCoordinator.refreshProjects() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(runCoordinator.isRefreshingProjects)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
-    }
-
-    private func runConfigurationSection(
-        title: String,
-        count: Int,
-        configurations: [ProjectRunConfiguration]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(title == "运行中" ? Color.blue : Color.secondary)
-                    .frame(width: 8, height: 8)
-                Text("\(title)  \(count)")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(title == "运行中" ? Color.blue : Color.primary)
+            HStack {
+                Text("共 \(visibleRunConfigurations.count) 个运行配置")
                 Spacer()
-                Image(systemName: "chevron.up")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
+                Text("\(visibleRunConfigurations.filter { runCoordinator.session(for: $0.id)?.state.isLive == true }.count) 个活动会话")
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 12)
+            .font(.caption).foregroundStyle(.secondary)
+            .padding(18)
+        }
+        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.accent.opacity(0.10)))
+    }
 
-            ForEach(configurations) { configuration in
-                runConfigurationRow(configuration)
-            }
-            if !configurations.isEmpty {
-                Divider().padding(.horizontal, 14).padding(.top, 4)
-            }
+    private var runListFilters: some View {
+        HStack(spacing: 4) {
+            runSearchAndStatusFilters
+            runListActions
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 11))
+        .controlSize(.mini)
+        .lineLimit(1)
+        .background {
+            Button("搜索运行配置") { runSearchIsFocused = true }
+                .keyboardShortcut("f", modifiers: .command).hidden()
         }
     }
 
-    private func runConfigurationRow(_ configuration: ProjectRunConfiguration) -> some View {
-        let session = runCoordinator.session(for: configuration.id)
-        let isSelected = selectedRunConfiguration?.id == configuration.id
-        let state = session?.state ?? .inactive
-        let isLive = state.isLive
-        let status: (title: String, color: Color) = if !configuration.isEnabled {
-            ("已禁用", .secondary)
-        } else {
-            switch state {
-            case .restarting: ("重启中", .blue)
-            case .restartFailed: ("重启失败", .orange)
-            default: (isLive ? "运行中" : "未启动", isLive ? .green : .secondary)
-            }
-        }
-        return Button {
-            selectedRunConfigurationID = configuration.id
-        } label: {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(status.color)
-                    .frame(width: 9, height: 9)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(configuration.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(configuration.isEnabled ? Color.primary : Color.secondary)
-                        .lineLimit(1)
-                    Text("\(projectsModel.records.first { $0.id == configuration.projectID }?.title ?? (configuration.projectID == nil ? "独立运行" : configuration.missingProjectTitle)) · \(configuration.command)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+    private var runSearchAndStatusFilters: some View {
+        HStack(spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("搜索…", text: $runSearchText)
+                    .textFieldStyle(.plain)
+                    .focused($runSearchIsFocused)
+                    .accessibilityLabel("搜索运行配置")
+                if !runSearchText.isEmpty {
+                    Button { runSearchText = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .accessibilityLabel("清除搜索")
                 }
-                Spacer(minLength: 4)
-                Text(status.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(status.color)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(status.color.opacity(0.12), in: Capsule())
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .background(isSelected ? Color.blue.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(isSelected ? Color.blue : Color.primary.opacity(0.08), lineWidth: isSelected ? 1.5 : 1)
-            )
+            .padding(.horizontal, 6).frame(minWidth: 44, maxWidth: 160).frame(height: 22)
+            .background(AppTheme.innerCard.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.08)))
+            .help("搜索配置名称、命令、项目")
+            Picker("状态", selection: $runStatusFilter) {
+                ForEach(RunListStatusFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .labelsHidden().frame(width: 72)
+            .accessibilityLabel("按状态筛选运行配置")
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 10)
+    }
+
+    private var runListActions: some View {
+        let closesTerminals = runCoordinator.canCloseBatch(in: visibleRunConfigurations)
+        return HStack(spacing: 4) {
+            Picker("筛选项目", selection: $runProjectFilterID) {
+                Text("全部项目").tag(Optional<String>.none)
+                ForEach(projectsModel.workspaceRecords) { Text($0.title).tag(Optional($0.id)) }
+            }
+            .labelsHidden().frame(width: 72)
+            .accessibilityLabel("按项目筛选运行配置")
+            Button(action: requestRunAll) {
+                Label("全部启动", systemImage: "play.fill")
+            }
+            .tint(AppTheme.accent)
+            .disabled(!runCoordinator.canStartBatch(in: visibleRunConfigurations))
+            .help("启动当前筛选结果中的运行配置")
+            Button(role: .destructive, action: requestStopAll) {
+                Label(closesTerminals ? "全部关闭" : "全部暂停", systemImage: closesTerminals ? "xmark" : "pause.fill")
+            }
+            .tint(.red)
+            .disabled(!runCoordinator.canStopBatch(in: visibleRunConfigurations))
+            .help(closesTerminals ? "关闭当前筛选结果中的全部就绪终端" : "向当前筛选结果中的活动会话发送 Ctrl+C，保留终端会话")
+        }
+        .labelStyle(.titleOnly)
+        .buttonStyle(.bordered).fixedSize()
+    }
+
+    private func runTableHeader(detailColumnCount: Int) -> some View {
+        HStack(spacing: 10) {
+            Text("名称").frame(minWidth: detailColumnCount > 0 ? 128 : 0, maxWidth: .infinity, alignment: .leading)
+            Text("状态").frame(width: 76, alignment: .leading)
+            if detailColumnCount >= 1 {
+                Text("关联项目").frame(width: 90, alignment: .leading)
+            }
+            if detailColumnCount >= 2 {
+                Text("命令 / 启动方式").frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+            }
+            if detailColumnCount >= 3 {
+                Text("端口").frame(width: 40, alignment: .leading)
+            }
+            Text("操作").frame(width: 94)
+        }
+        .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+        .padding(.horizontal, 12).frame(height: 36)
+        .background(AppTheme.innerCard.opacity(0.45))
+        .accessibilityHidden(true)
+    }
+
+    private func runConfigurationRow(_ configuration: ProjectRunConfiguration, detailColumnCount: Int) -> some View {
+        let project = configuration.associatedProject(in: projectsModel.records)
+        let state = runCoordinator.session(for: configuration.id)?.state ?? .inactive
+        let isSelected = selectedRunConfiguration?.id == configuration.id
+        return HStack(spacing: 10) {
+            Button { selectedRunConfigurationID = configuration.id } label: {
+                HStack(spacing: 10) {
+                    HStack(spacing: 9) {
+                        runConfigurationLogo(configuration, size: 28)
+                        Text(configuration.name).fontWeight(.medium).lineLimit(1)
+                    }
+                    .frame(minWidth: detailColumnCount > 0 ? 128 : 0, maxWidth: .infinity, alignment: .leading)
+                    projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
+                        .frame(width: 76, alignment: .leading)
+                    if detailColumnCount >= 1 {
+                        HStack(spacing: 6) {
+                            Image(systemName: project == nil ? "link.badge.plus" : "folder.fill")
+                                .foregroundStyle(project == nil ? Color.secondary : AppTheme.accent)
+                            Text(project?.title ?? (configuration.projectID == nil ? "未关联" : configuration.missingProjectTitle))
+                                .foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        .frame(width: 90, alignment: .leading)
+                    }
+                    if detailColumnCount >= 2 {
+                        Text(configuration.command).font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary).lineLimit(1)
+                            .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+                    }
+                    if detailColumnCount >= 3 {
+                        Text(runPortsText(configuration)).monospacedDigit()
+                            .foregroundStyle(.secondary).lineLimit(1)
+                            .frame(width: 40, alignment: .leading)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 58)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(configuration.name)，\(configuration.isEnabled ? state.statusTitle : "已禁用")，\(configuration.command)")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            HStack(spacing: 6) {
+                Button {
+                    if state.isLive { runCoordinator.stopOrCloseTerminal(configurationID: configuration.id) }
+                    else { run(configuration, project: project) }
+                } label: {
+                    Label(state.isLive ? state.stopActionTitle : "启动", systemImage: state.isLive ? state.stopActionSymbol : "play.fill")
+                        .font(.system(size: 11, weight: .medium)).frame(width: 62, height: 28)
+                        .foregroundStyle(state.isLive ? Color.red : AppTheme.accent)
+                        .background((state.isLive ? Color.red : AppTheme.accent).opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(state.isLive ? Color.red.opacity(0.3) : Color.clear))
+                }
+                .buttonStyle(.plain)
+                .disabled(state == .stopping || (!state.isLive && (!configuration.isEnabled || (configuration.projectID != nil && project == nil) || project?.availability.isUnavailable == true)))
+                .help(state == .ready ? "关闭终端" : (state.isLive ? "停止运行" : "启动运行"))
+                .accessibilityLabel("\(state.isLive ? state.stopActionTitle : "启动") \(configuration.name)")
+                Menu { runConfigurationMenu(configuration) } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                    .frame(width: 26, height: 28)
+                    .foregroundStyle(AppTheme.accent)
+                    .accessibilityLabel("\(configuration.name) 的更多操作")
+            }
+            .frame(width: 94)
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 12)
+        .background(isSelected ? AppTheme.accent.opacity(0.10) : Color.clear)
+        .overlay(alignment: .bottom) { Divider().opacity(0.45) }
+        .contextMenu { runConfigurationMenu(configuration) }
+    }
+
+    private func runConfigurationIcon(size: CGFloat) -> some View {
+        Image(systemName: "terminal.fill")
+            .font(.system(size: size * 0.48, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(AppTheme.accent.gradient, in: RoundedRectangle(cornerRadius: size * 0.22))
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func runConfigurationLogo(_ configuration: ProjectRunConfiguration, size: CGFloat) -> some View {
+        if let brand = runConfigurationBrand(configuration) {
+            runtimeLogo(brand, size: size, padding: size * 7 / 40, cornerRadius: size * 9 / 40)
+        } else {
+            runConfigurationIcon(size: size)
+        }
+    }
+
+    private func runPortsText(_ configuration: ProjectRunConfiguration) -> String {
+        guard let session = runCoordinator.session(for: configuration.id), session.state == .running || session.state == .ready else { return "—" }
+        guard let ids = session.ownedProcessIDs, let snapshot = model.snapshot else { return "未知" }
+        let ports = Set(snapshot.localServices.filter { ids.contains($0.pid) }.flatMap(\.bindings).map(\.port)).sorted()
+        return ports.isEmpty ? "无监听" : ports.map(String.init).joined(separator: ", ")
     }
 
     @ViewBuilder
@@ -1908,272 +1959,303 @@ struct ContentView: View {
         if let configuration = selectedRunConfiguration {
             runConfigurationDetail(configuration)
         } else {
-            ContentUnavailableView("选择一个运行配置", systemImage: "play.rectangle")
+            ContentUnavailableView("选择一个运行配置", systemImage: "play.rectangle", description: Text("在左侧查看配置，选择后显示详情。"))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.accent.opacity(0.10)))
         }
     }
 
     private func runConfigurationDetail(_ configuration: ProjectRunConfiguration) -> some View {
-        let project = projectsModel.records.first { $0.id == configuration.projectID }
+        let project = configuration.associatedProject(in: projectsModel.records)
         let session = runCoordinator.session(for: configuration.id)
         let state = session?.state ?? .inactive
-        return VStack(alignment: .leading, spacing: 12) {
-                VStack(spacing: 0) {
-                    HStack(alignment: .top, spacing: 14) {
-                        Image(systemName: "terminal.fill")
-                            .font(.system(size: 23, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 50, height: 50)
-                            .background(Color.blue.gradient, in: RoundedRectangle(cornerRadius: 10))
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(alignment: .center, spacing: 9) {
-                                Text(configuration.name)
-                                    .font(.title2.bold())
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.8)
-                                    .layoutPriority(1)
-                                    .frame(minHeight: 24, alignment: .center)
-                                projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
+        return VStack(alignment: .leading, spacing: 0) {
+            runInspectorHeader(configuration)
+            Divider().opacity(0.6)
+            HStack(spacing: 0) {
+                ForEach(["终端", "详情", "关联项目"], id: \.self) { tab in
+                    Button { runDetailTab = tab } label: {
+                        Label(tab, systemImage: tab == "终端" ? "terminal" : (tab == "详情" ? "doc.text" : "folder"))
+                            .font(.system(size: 13, weight: runDetailTab == tab ? .semibold : .regular))
+                            .foregroundStyle(runDetailTab == tab ? AppTheme.accent : Color.secondary)
+                            .frame(height: 38)
+                            .overlay(alignment: .bottom) {
+                                if runDetailTab == tab { Rectangle().fill(AppTheme.accent).frame(height: 2) }
                             }
-                            Text(project.map { "\($0.title)" } ?? (configuration.projectID == nil ? "独立运行" : configuration.missingProjectTitle))
-                                .font(.callout).foregroundStyle(.secondary)
-                            Text(project?.path ?? configuration.deletedProjectPath ?? "").font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
-                        }
-                        Spacer()
-                        HStack(spacing: 6) {
-                            if !configuration.isEnabled {
-                                Button(session == nil ? "运行" : "重新运行") {}
-                                    .buttonStyle(.borderedProminent)
-                                    .controlSize(.regular)
-                                    .frame(minWidth: session == nil ? 60 : 76, minHeight: 36)
-                                    .disabled(true)
-                            } else if state == .restarting {
-                                Button {} label: {
-                                    HStack(spacing: 6) {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                        Text("正在重启")
-                                    }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.regular)
-                                .frame(width: 96, height: 36)
-                                .disabled(true)
-                            } else if state == .stopping {
-                                Button {
-                                    runCoordinator.stop(configurationID: configuration.id)
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                        Text("正在停止")
-                                    }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.red)
-                                .controlSize(.regular)
-                                .frame(width: 88, height: 36)
-                                .disabled(true)
-                            } else if state.canRestart {
-                                Button("重启") {
-                                    runCoordinator.restart(configuration, project: project)
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.regular)
-                                .frame(minWidth: 60, minHeight: 36)
-                                .disabled((configuration.projectID != nil && project == nil) || project?.availability.isUnavailable == true)
-                                Button("停止", role: .destructive) { runCoordinator.stop(configurationID: configuration.id) }
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(.red)
-                                    .controlSize(.regular)
-                                    .frame(minWidth: 60, minHeight: 36)
-                            } else if state.isLive {
-                                Button("停止", role: .destructive) { runCoordinator.stop(configurationID: configuration.id) }
-                                    .buttonStyle(.borderedProminent)
-                                    .tint(.red)
-                                    .controlSize(.regular)
-                                    .frame(minWidth: 60, minHeight: 36)
-                            } else {
-                                Button(session == nil ? "运行" : "重新运行") { run(configuration, project: project) }
-                                    .buttonStyle(.borderedProminent)
-                                    .controlSize(.regular)
-                                    .frame(minWidth: session == nil ? 60 : 76, minHeight: 36)
-                                    .disabled((configuration.projectID != nil && project == nil) || project?.availability.isUnavailable == true)
-                            }
-                            Button("编辑") { beginEditingRunConfiguration(configuration) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.regular)
-                                .frame(minWidth: 60, minHeight: 36)
-                                .disabled(projectsModel.mutationsArePaused || runCoordinator.activeDeletion?.configurationIDs.contains(configuration.id) == true)
-                            Button(configuration.isEnabled ? "禁用" : "启用") {
-                                runCoordinator.setRunConfigurationEnabled(
-                                    configuration,
-                                    isEnabled: !configuration.isEnabled
-                                )
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.regular)
-                            .frame(minWidth: 60, minHeight: 36)
-                            .disabled(
-                                projectsModel.mutationsArePaused
-                                    || (configuration.isEnabled && state.isLive)
-                            )
-                            Menu { Button("删除", role: .destructive) { runCoordinator.requestDeletion(configurationID: configuration.id) } } label: {
-                                Image(systemName: "ellipsis")
-                                    .frame(width: 34, height: 22)
-                            }
-                            .menuStyle(.button)
-                            .controlSize(.regular)
-                            .frame(minWidth: 42, minHeight: 36)
-                        }
+                            .padding(.horizontal, 12)
+                            .contentShape(Rectangle())
                     }
-                    .padding(16)
-
-                    Text("配置详情")
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.bottom, 10)
-                        .overlay(alignment: .bottom) {
-                            Rectangle()
-                                .fill(Color.accentColor)
-                                .frame(height: 3)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 10)
-                        .overlay(alignment: .bottom) {
-                            Divider().opacity(0.45)
-                        }
-
-                    VStack(alignment: .leading, spacing: 0) {
-                        runDetailRow("命令") {
-                            runDetailField(configuration.command)
-                        }
-                        runDetailRow("工作目录") {
-                            runDetailField(configuration.workingDirectory.isEmpty ? (configuration.projectID == nil ? "默认：当前用户目录（启动时解析）" : "默认：项目目录") : configuration.workingDirectory)
-                        }
-                        runDetailRow("来源") {
-                            if configuration.sourceIdentity != nil {
-                                Text(configuration.sourceIdentity ?? "").foregroundStyle(.secondary)
-                            } else { Text("手动创建").foregroundStyle(.secondary) }
-                        }
-                        if let project {
-                            runDetailRow("创建时间") { Text(formatted(project.firstDiscoveredAt)).foregroundStyle(.secondary) }
-                            runDetailRow("更新时间") { Text(formatted(project.lastDiscoveredAt)).foregroundStyle(.secondary) }
-                        }
-                        if runCoordinator.hasCommandDraft(configurationID: configuration.id) {
-                            Label("命令修改将在成功启动后保存", systemImage: "clock.arrow.circlepath").foregroundStyle(.secondary).padding(.vertical, 10)
-                        }
-                    }
-                    .padding(10)
-                    .background(AppTheme.innerCard, in: RoundedRectangle(cornerRadius: 11))
-                    .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.primary.opacity(0.10)))
-                    .padding(10)
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(runDetailTab == tab ? .isSelected : [])
                 }
-                .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
-
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("终端会话")
-                            .font(.headline)
-                            .frame(minHeight: 24, alignment: .center)
-                        projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
-                        Spacer()
-                        if session != nil, !state.isLive {
-                            Button("重新运行") { run(configuration, project: project) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(
-                                    !configuration.isEnabled
-                                        || project == nil
-                                        || project?.availability.isUnavailable == true
-                                )
-                        }
-                        if session?.lastSuccessfulCommand != nil {
-                            Button("清空") { runCoordinator.clearTerminal(configurationID: configuration.id) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                        }
-                        if session?.lastSuccessfulCommand != nil, !state.isLive {
-                            Button("关闭终端") { runCoordinator.closeTerminal(configurationID: configuration.id) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                        }
-                        Button {
-                            expandedTerminalConfiguration = configuration
-                        } label: {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(session?.lastSuccessfulCommand == nil)
-                        .help("放大终端")
-                    }
-                    if let session,
-                       session.lastSuccessfulCommand != nil,
-                       expandedTerminalConfiguration?.id != configuration.id {
-                        ProjectTerminalView(terminalView: session.terminalView)
-                            .id(configuration.id)
-                            .frame(minHeight: 280, idealHeight: 360, maxHeight: .infinity)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .accessibilityLabel("运行配置 \(configuration.name) 的终端")
-                    } else {
-                        ZStack {
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.04, green: 0.08, blue: 0.16),
-                                    Color(red: 0.08, green: 0.15, blue: 0.29)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-
-                            VStack(spacing: 12) {
-                                Image(systemName: "terminal.fill")
-                                    .font(.system(size: 30, weight: .semibold))
-                                    .foregroundStyle(AppTheme.accent)
-                                    .frame(width: 64, height: 64)
-                                    .background(AppTheme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                            .stroke(AppTheme.accent.opacity(0.35), lineWidth: 1)
-                                    }
-                                Text("终端会话尚未启动")
-                                    .font(.headline.weight(.semibold))
-                                    .foregroundStyle(.white)
-                                Text("运行配置后，终端输出会显示在这里")
-                                    .font(.callout)
-                                    .foregroundStyle(.white.opacity(0.62))
-                                Text("⌘↵ 运行配置")
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(.white.opacity(0.72))
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(.white.opacity(0.10), in: Capsule())
-                            }
-                            .padding(24)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(AppTheme.accent.opacity(0.28), lineWidth: 1)
-                        }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel("终端会话尚未启动，运行配置后终端输出会显示在这里")
-                    }
-                }
-                .padding(16)
-                .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
-                .frame(maxHeight: .infinity, alignment: .topLeading)
+                Spacer(minLength: 0)
             }
-            .frame(maxHeight: .infinity, alignment: .topLeading)
-        .frame(maxHeight: .infinity, alignment: .topLeading)
-        .sheet(item: $expandedTerminalConfiguration) { configuration in
-            expandedTerminalView(configuration)
+            .padding(.horizontal, 8)
+            Divider().opacity(0.6)
+            if runDetailTab == "终端" {
+                runTerminalPanel(configuration)
+                    .padding(.horizontal, 14).padding(.top, 14)
+                if let failure = session?.failureMessage {
+                    Label(failure, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .lineLimit(3).textSelection(.enabled)
+                        .padding(.horizontal, 20).padding(.top, 12)
+                }
+                runSessionSummary(configuration)
+                    .padding(20)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if runDetailTab == "关联项目" {
+                            if let project {
+                                runDetailRow("名称") { Text(project.title).textSelection(.enabled) }
+                                runDetailRow("项目路径") { runDetailField(project.path) }
+                                Button {
+                                    openProject(project)
+                                } label: { Label("查看项目详情", systemImage: "arrow.up.right") }
+                                .padding(.top, 16)
+                            } else {
+                                ContentUnavailableView(configuration.projectID == nil ? "未关联项目" : "关联项目已失效", systemImage: "folder", description: Text("在编辑配置中选择项目，或保留为独立运行配置。"))
+                                Button("编辑关联", action: { beginEditingRunConfiguration(configuration) })
+                                    .disabled(projectsModel.mutationsArePaused)
+                            }
+                        } else {
+                            runDetailRow("名称") { Text(configuration.name).textSelection(.enabled) }
+                            runDetailRow("关联项目") {
+                                if let project {
+                                    Button {
+                                        openProject(project)
+                                    } label: { Label(project.title, systemImage: "folder.fill").lineLimit(1) }
+                                    .buttonStyle(.plain).foregroundStyle(AppTheme.accent)
+                                } else {
+                                    Text(configuration.projectID == nil ? "独立运行" : configuration.missingProjectTitle)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            runDetailRow("命令") { runDetailField(configuration.command) }
+                            runDetailRow("工作目录") {
+                                runDetailField(configuration.workingDirectory.isEmpty ? (project?.path ?? (configuration.projectID == nil ? "默认：当前用户目录" : "默认：关联项目目录（已失效）")) : configuration.workingDirectory)
+                            }
+                            runDetailRow("端口") { Text(runPortsText(configuration)).foregroundStyle(.secondary) }
+                            runDetailRow("来源") { Text(configuration.sourceIdentity ?? "手动创建").foregroundStyle(.secondary).textSelection(.enabled) }
+                            if let execution = session?.currentExecution {
+                                runDetailRow("运行目录") { runDetailField(execution.workingDirectory ?? "尚未解析") }
+                            }
+                            runDetailRow("运行状态", showsDivider: false) { projectRunState(state).font(.caption) }
+                            if runCoordinator.hasCommandDraft(configurationID: configuration.id) {
+                                Label("命令修改将在成功启动后保存", systemImage: "clock.arrow.circlepath")
+                                    .font(.caption).foregroundStyle(.secondary).padding(.vertical, 10)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20).padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: .infinity)
+            }
         }
+        .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.accent.opacity(0.10)))
+        .sheet(item: $expandedTerminalConfiguration) { expandedTerminalView($0) }
+    }
+
+    private func runInspectorHeader(_ configuration: ProjectRunConfiguration) -> some View {
+        let project = configuration.associatedProject(in: projectsModel.records)
+        let session = runCoordinator.session(for: configuration.id)
+        let state = session?.state ?? .inactive
+        let projectUnavailable = (configuration.projectID != nil && project == nil) || project?.availability.isUnavailable == true
+        let cannotEdit = projectsModel.mutationsArePaused || runCoordinator.activeDeletion?.configurationIDs.contains(configuration.id) == true
+        return VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                runConfigurationLogo(configuration, size: 56)
+                Text(configuration.name).font(.system(size: 20, weight: .bold))
+                    .lineLimit(2).textSelection(.enabled).layoutPriority(1)
+                Button { beginEditingRunConfiguration(configuration) } label: { Image(systemName: "pencil") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("编辑配置").accessibilityLabel("编辑 \(configuration.name)")
+                    .disabled(cannotEdit)
+                Spacer(minLength: 0)
+                projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
+            }
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("关联项目").foregroundStyle(.secondary)
+                    if let project {
+                        Button { runDetailTab = "关联项目" } label: { Label(project.title, systemImage: "folder.fill").lineLimit(1) }
+                            .buttonStyle(.plain).foregroundStyle(AppTheme.accent).help(project.title)
+                    } else {
+                        Text(configuration.projectID == nil ? "未关联" : configuration.missingProjectTitle)
+                            .foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Divider().frame(height: 44)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("命令").foregroundStyle(.secondary)
+                    Text(state.isLive ? (session?.currentExecution?.command ?? configuration.command) : configuration.command)
+                        .font(.caption.monospaced()).lineLimit(1)
+                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(AppTheme.innerCard, in: RoundedRectangle(cornerRadius: 5))
+                        .help(state.isLive ? (session?.currentExecution?.command ?? configuration.command) : configuration.command)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Divider().frame(height: 44)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("端口").foregroundStyle(.secondary)
+                    Text(runPortsText(configuration)).monospacedDigit().lineLimit(1)
+                        .help(runPortsText(configuration))
+                }
+                .frame(width: 58, alignment: .leading)
+            }
+            .font(.system(size: 12))
+            HStack(spacing: 10) {
+                Button { run(configuration, project: project) } label: {
+                    Label("启动", systemImage: "play.fill").frame(maxWidth: .infinity)
+                }
+                .tint(AppTheme.accent)
+                .disabled(!state.canStart || !configuration.isEnabled || projectUnavailable)
+                Button { runCoordinator.stopOrCloseTerminal(configurationID: configuration.id) } label: {
+                    Label(state.stopActionTitle, systemImage: state.stopActionSymbol).frame(maxWidth: .infinity)
+                }
+                .tint(.red)
+                .disabled(!state.isLive || session?.isClosing == true)
+                .help(state == .ready ? "关闭终端" : "发送 Ctrl+C，中断当前命令并保留终端")
+                Button {
+                    runCoordinator.restart(configuration, project: project)
+                } label: { Label("重启", systemImage: "arrow.clockwise").frame(maxWidth: .infinity) }
+                .disabled(!configuration.isEnabled || !state.canRestart || session?.isClosing == true || projectUnavailable)
+                Button { beginEditingRunConfiguration(configuration) } label: {
+                    Label("编辑", systemImage: "pencil").frame(maxWidth: .infinity)
+                }
+                .disabled(cannotEdit)
+                Menu { runConfigurationMenu(configuration) } label: { Text("更多") }
+                    .fixedSize()
+            }
+            .buttonStyle(.bordered).controlSize(.large)
+        }
+        .padding(20)
+    }
+
+    private func runSessionSummary(_ configuration: ProjectRunConfiguration) -> some View {
+        let session = runCoordinator.session(for: configuration.id)
+        let state = session?.state ?? .inactive
+        return TimelineView(.periodic(from: .now, by: 2)) { _ in
+            HStack(spacing: 8) {
+                Circle().fill(configuration.isEnabled ? overviewRunColor(state) : Color.secondary).frame(width: 7, height: 7)
+                if state == .running, let startedAt = session?.startedAt {
+                    Text("运行时间").foregroundStyle(.secondary)
+                    Text(startedAt, style: .timer).monospacedDigit().fixedSize()
+                } else {
+                    Text(configuration.isEnabled ? state.statusTitle : "已禁用").foregroundStyle(.secondary)
+                }
+                if let exitCode = session?.lastExitCode {
+                    Text("配置退出码 \(exitCode)").monospacedDigit().foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Divider().frame(height: 12)
+                Text("内存").foregroundStyle(.secondary)
+                Text(state.isLive ? session?.physicalMemoryBytes.map(byteCount) ?? "未知" : "—").monospacedDigit()
+                Divider().frame(height: 12)
+                Text("端口").foregroundStyle(.secondary)
+                Text(runPortsText(configuration)).monospacedDigit().lineLimit(1)
+            }
+            .font(.caption)
+            .padding(.top, 14)
+            .overlay(alignment: .top) { Divider().opacity(0.6) }
+        }
+    }
+
+    @ViewBuilder
+    private func runConfigurationMenu(_ configuration: ProjectRunConfiguration) -> some View {
+        let state = runCoordinator.session(for: configuration.id)?.state ?? .inactive
+        Button("打开终端") {
+            selectedRunConfigurationID = configuration.id
+            runDetailTab = "终端"
+            runCoordinator.openTerminal(configuration)
+        }
+        Button("编辑配置") { beginEditingRunConfiguration(configuration) }
+            .disabled(projectsModel.mutationsArePaused || runCoordinator.activeDeletion?.configurationIDs.contains(configuration.id) == true)
+        Button("复制配置") { beginDuplicatingRunConfiguration(configuration) }
+            .disabled(projectsModel.mutationsArePaused)
+        workspaceMoveButton(.configuration(configuration.id))
+        Button(configuration.isEnabled ? "禁用配置" : "启用配置") {
+            runCoordinator.setRunConfigurationEnabled(configuration, isEnabled: !configuration.isEnabled)
+        }
+        .disabled(projectsModel.mutationsArePaused || (configuration.isEnabled && state.isLive))
+        Divider()
+        Button("删除配置…", role: .destructive) { runCoordinator.requestDeletion(configurationID: configuration.id) }
+            .disabled(projectsModel.mutationsArePaused || runCoordinator.activeDeletion != nil)
+    }
+
+    private func beginDuplicatingRunConfiguration(_ configuration: ProjectRunConfiguration) {
+        beginEditingRunConfiguration(configuration)
+        editingRunConfiguration = nil
+        if runConfigurationProjectID == nil { runConfigurationProjectID = "" }
+        runConfigurationName = "\(configuration.name) 副本"
+        runConfigurationSourceIdentity = nil
+        runConfigurationSourceProjectID = nil
+    }
+
+    private func runTerminalPanel(_ configuration: ProjectRunConfiguration) -> some View {
+        let session = runCoordinator.session(for: configuration.id)
+        let terminal = session?.terminalView as? AdaptiveProjectRunTerminalView
+        let hasOutput = session?.hasTerminal == true
+        return VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Text("\(configuration.name) · 终端").font(.callout).lineLimit(1)
+                Spacer(minLength: 0)
+                Button {
+                    guard let terminal else { return }
+                    copy(String(decoding: terminal.terminal.getBufferAsData(), as: UTF8.self))
+                } label: { Image(systemName: "doc.on.doc") }
+                .disabled(!hasOutput || terminal == nil)
+                .help("复制终端输出").accessibilityLabel("复制终端输出")
+                Button { expandedTerminalConfiguration = configuration } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
+                .disabled(!hasOutput)
+                .help("放大终端").accessibilityLabel("放大终端")
+                Button { runCoordinator.clearTerminal(configurationID: configuration.id) } label: {
+                    Image(systemName: "trash")
+                }
+                .disabled(!hasOutput)
+                .help("清空终端输出").accessibilityLabel("清空终端输出")
+                if hasOutput {
+                    Button { runCoordinator.closeTerminal(configurationID: configuration.id) } label: { Image(systemName: "xmark") }
+                        .help("关闭终端").accessibilityLabel("关闭终端")
+                }
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.white.opacity(0.75))
+            .padding(.horizontal, 16).frame(height: 42)
+            .background(Color(white: 0.18))
+            if let session, hasOutput, expandedTerminalConfiguration?.id != configuration.id {
+                ProjectTerminalView(terminalView: session.terminalView)
+                    .id(configuration.id)
+                    .frame(minHeight: 180, maxHeight: .infinity)
+                    .accessibilityLabel("运行配置 \(configuration.name) 的终端")
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "terminal").font(.system(size: 30, weight: .light))
+                        .foregroundStyle(.white.opacity(0.5))
+                    Text(hasOutput ? "终端已在独立窗口打开" : "终端会话尚未启动")
+                        .font(.headline).foregroundStyle(.white.opacity(0.9))
+                    Text(hasOutput ? "关闭放大窗口后，终端会回到这里" : "打开终端后可直接输入命令，或点击启动执行配置命令")
+                        .font(.callout).foregroundStyle(.white.opacity(0.5))
+                        .multilineTextAlignment(.center)
+                    if !hasOutput {
+                        Button("打开终端") { runCoordinator.openTerminal(configuration) }
+                            .disabled(!configuration.isEnabled || (configuration.projectID != nil && configuration.associatedProject(in: projectsModel.records) == nil))
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, minHeight: 180, maxHeight: .infinity)
+                .background(Color(red: 0.055, green: 0.065, blue: 0.075))
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1)))
     }
 
     private func expandedTerminalView(_ configuration: ProjectRunConfiguration) -> some View {
@@ -2182,11 +2264,11 @@ struct ContentView: View {
                 Text(configuration.name).font(.title2.bold())
                 Spacer()
                 Button("清空") { runCoordinator.clearTerminal(configurationID: configuration.id) }
-                    .disabled(runCoordinator.session(for: configuration.id)?.lastSuccessfulCommand == nil)
+                    .disabled(runCoordinator.session(for: configuration.id)?.hasTerminal != true)
                 Button("关闭") { expandedTerminalConfiguration = nil }
                     .keyboardShortcut(.cancelAction)
             }
-            if let session = runCoordinator.session(for: configuration.id), session.lastSuccessfulCommand != nil {
+            if let session = runCoordinator.session(for: configuration.id), session.hasTerminal {
                 ProjectTerminalView(terminalView: session.terminalView)
                     .frame(minWidth: 780, minHeight: 480)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -2233,6 +2315,7 @@ struct ContentView: View {
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
         .background(AppTheme.innerCard, in: RoundedRectangle(cornerRadius: 8))
+        .help(value)
         .contentShape(Rectangle())
         .onHover { isHovering in
             if isHovering {
@@ -2254,7 +2337,8 @@ struct ContentView: View {
             switch state {
             case .inactive: ("未启动", "circle.fill", .secondary)
             case .starting: ("正在启动", "hourglass", .blue)
-            case .running: ("运行中", "checkmark.circle.fill", .green)
+            case .running: ("执行中", "checkmark.circle.fill", .green)
+            case .ready: ("终端就绪", "terminal", .blue)
             case .stopping: ("正在停止", "stop.circle.fill", .orange)
             case .stopFailed: ("停止失败", "exclamationmark.triangle.fill", .orange)
             case .restarting: ("正在重启", "arrow.clockwise.circle.fill", .blue)
@@ -2282,6 +2366,8 @@ struct ContentView: View {
         case .starting:
             Label("正在启动", systemImage: "hourglass")
                 .foregroundStyle(.secondary)
+        case .ready:
+            Label("终端就绪", systemImage: "terminal").foregroundStyle(.blue)
         case .running:
             Label("正在运行", systemImage: "play.circle.fill")
                 .foregroundStyle(.green)
@@ -2352,14 +2438,14 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                     runConfigurationEditorField("项目", systemImage: "folder") {
                         Picker("项目", selection: $runConfigurationProjectID) {
-                            Text("不关联项目").tag("")
+                            Text("不关联项目").tag(Optional(""))
                             if let configuration = editingRunConfiguration,
-                               let projectID = configuration.projectID,
-                               !projectsModel.workspaceRecords.contains(where: { $0.id == projectID }) {
-                                Text(configuration.missingProjectTitle).tag(projectID)
+                               configuration.projectID != nil,
+                               configuration.associatedProject(in: projectsModel.records) == nil {
+                                Text(configuration.missingProjectTitle).tag(nil as String?)
                             }
                             ForEach(projectsModel.workspaceRecords) { project in
-                                Text(project.title).tag(project.id)
+                                Text(project.title).tag(Optional(project.id))
                             }
                         }
                         .pickerStyle(.menu)
@@ -2524,7 +2610,8 @@ struct ContentView: View {
 
     private func beginEditingRunConfiguration(_ configuration: ProjectRunConfiguration) {
         editingRunConfiguration = configuration
-        runConfigurationProjectID = configuration.projectID ?? ""
+        runConfigurationProjectID = configuration.projectID != nil && configuration.associatedProject(in: projectsModel.records) == nil
+            ? nil : configuration.projectID ?? ""
         runConfigurationName = configuration.name
         runConfigurationCommand = configuration.command
         runConfigurationWorkingDirectory = configuration.workingDirectory
@@ -2538,16 +2625,19 @@ struct ContentView: View {
         runConfigurationSaveAttempted = true
         let succeeded: Bool
         if var editingRunConfiguration {
-            editingRunConfiguration.projectID = runConfigurationProjectID.isEmpty ? nil : runConfigurationProjectID
+            if let runConfigurationProjectID {
+                editingRunConfiguration.projectID = runConfigurationProjectID.isEmpty ? nil : runConfigurationProjectID
+            }
             succeeded = runCoordinator.updateRunConfiguration(
                 editingRunConfiguration,
                 name: runConfigurationName,
                 command: runConfigurationCommand,
-                workingDirectory: runConfigurationWorkingDirectory
+                workingDirectory: runConfigurationWorkingDirectory,
+                reassociateProject: runConfigurationProjectID?.isEmpty == false
             )
         } else {
             succeeded = runCoordinator.createRunConfiguration(
-                projectID: runConfigurationProjectID.isEmpty ? nil : runConfigurationProjectID,
+                projectID: runConfigurationProjectID?.isEmpty == false ? runConfigurationProjectID : nil,
                 name: runConfigurationName,
                 command: runConfigurationCommand,
                 workingDirectory: runConfigurationWorkingDirectory,
@@ -2558,240 +2648,405 @@ struct ContentView: View {
         if succeeded { isShowingRunConfigurationEditor = false }
     }
 
-    private var projectList: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("搜索项目或路径", text: $projectSearchText)
-                    .textFieldStyle(.plain)
-                    .focused($projectSearchIsFocused)
-                    .accessibilityLabel("搜索项目标题或路径")
-                Text("⌘F")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.10)))
-            .padding(14)
-
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    Text("项目列表")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 14)
-                        .padding(.top, 4)
-
-                    let matchingProjects = projectsModel.records(matching: projectSearchText)
-                    ForEach(matchingProjects) { project in
-                        let isSelected = selectedProjectID == project.id
-                        HStack(spacing: 8) {
-                            if isSelectingProjects {
-                                Toggle("", isOn: projectSelectionBinding(project.id))
-                                    .labelsHidden()
-                                    .toggleStyle(.checkbox)
-                                    .accessibilityLabel("选择 \(project.title)")
-                            }
-                            Button { selectedProjectID = project.id } label: {
-                                projectListRow(project)
-                                    .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                            .accessibilityAddTraits(isSelected ? .isSelected : [])
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
-                        .background(isSelected ? Color.blue.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(isSelected ? Color.blue : Color.primary.opacity(0.08), lineWidth: isSelected ? 1.5 : 1)
-                        )
-                        .padding(.horizontal, 10)
-                        .onAppear { projectsModel.markDisplayed(project.id) }
-                        .onTapGesture { selectedProjectID = project.id }
-                    }
-                    if !projectSearchText.isEmpty && matchingProjects.isEmpty {
-                        Text("没有匹配的项目")
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 14)
-                    }
-
-                    if !projectsModel.ignoredProjects.isEmpty {
-                        HStack {
-                            Image(systemName: "eye.slash")
-                            Text("已忽略  \(projectsModel.ignoredProjects.count)")
-                            Spacer()
-                            Image(systemName: "chevron.down")
-                        }
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 14)
-                        .padding(.top, 18)
-
-                        ForEach(projectsModel.ignoredProjects) { project in
-                            HStack(spacing: 8) {
-                                if isSelectingProjects {
-                                    Toggle("", isOn: projectSelectionBinding(project.id))
-                                        .labelsHidden()
-                                        .toggleStyle(.checkbox)
-                                        .accessibilityLabel("选择 \(project.path)")
-                                }
-                                Image(systemName: "eye.slash")
-                                    .foregroundStyle(.secondary)
-                                Text(project.path)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                Spacer()
-                                if !isSelectingProjects {
-                                    Button("恢复") {
-                                        guard let restored = projectsModel.restore(project) else { return }
-                                        selectedProjectID = restored.id
-                                        projectSearchIsFocused = true
-                                    }
-                                    .accessibilityLabel("恢复 \(project.path)")
-                                    .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
-                                }
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                }
-                .padding(.bottom, 16)
-            }
-            .scrollIndicators(.hidden)
-        }
-        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
+    private var visibleProjects: [ProjectRecord] {
+        projectsModel.records(matching: projectSearchText, summary: projectStatusFilter)
     }
 
-    private func projectListRow(_ project: ProjectRecord) -> some View {
-        let summary = projectsModel.summary(for: project)
-        let hasActiveSession = runCoordinator.runConfigurations(projectID: project.id).contains {
-            runCoordinator.session(for: $0.id)?.state.isLive == true
-        }
-        return HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 20, weight: .medium))
-                .foregroundStyle(.blue)
-                .frame(width: 30, height: 30)
-                .accessibilityHidden(true)
+    private var matchingIgnoredProjects: [IgnoredProject] {
+        let query = projectSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return projectStatusFilter == nil ? projectsModel.ignoredProjects.filter {
+            query.isEmpty || $0.path.localizedCaseInsensitiveContains(query)
+        } : []
+    }
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 7) {
-                    Text(project.title)
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
-                    if project.isNew {
-                        Text("NEW")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.blue)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.12), in: Capsule())
+    private var projectList: some View {
+        VStack(spacing: 0) {
+            HStack {
+                workspaceTabs
+                Spacer(minLength: 0)
+                Button(action: runCoordinator.refreshProjects) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+                .disabled(projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                .help("刷新项目要求").accessibilityLabel("刷新项目要求")
+                .padding(.trailing, 14)
+            }
+            .padding(.horizontal, 14).padding(.top, 10)
+            Divider().opacity(0.6)
+            projectListFilters.padding(14)
+            if isSelectingProjects {
+                HStack {
+                    Button("全选") { selectedProjectIDs = visibleProjectRecordIDs }
+                        .disabled(selectedProjectIDs == visibleProjectRecordIDs)
+                    Text("已选择 \(selectedProjectIDs.count) 项").foregroundStyle(.secondary)
+                    Spacer()
+                    Button("删除记录…", role: .destructive) {
+                        pendingProjectRemovalIDs = selectedProjectIDs
                     }
-                    Spacer(minLength: 4)
-                    if projectsModel.refreshingProjectIDs.contains(project.id) {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .accessibilityLabel("正在刷新 \(project.title)")
+                    .disabled(selectedProjectIDs.isEmpty || projectsModel.mutationsArePaused || projectsModel.isScanning)
+                }
+                .font(.caption).padding(.horizontal, 18).padding(.bottom, 12)
+            }
+            if visibleProjects.isEmpty {
+                ContentUnavailableView {
+                    Label(projectsModel.workspaceRecords.isEmpty ? "尚未添加项目" : "没有匹配的项目", systemImage: "folder")
+                } description: {
+                    Text(projectsModel.workspaceRecords.isEmpty ? "添加项目目录，或扫描目录来发现项目。" : "试试其他关键词或筛选条件。")
+                } actions: {
+                    if !projectSearchText.isEmpty || projectStatusFilter != nil {
+                        Button("清除筛选") { clearProjectFilters() }
+                    } else {
+                        Button("添加项目…") { chooseProjectDirectories(forBatchScan: false) }
+                            .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
                     }
                 }
-                Text(project.path)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                HStack(spacing: 5) {
-                    Image(systemName: projectSummarySymbol(summary))
-                    Text(summary.map(projectSummaryTitle) ?? "待刷新")
-                    if projectsModel.staleProjectIDs.contains(project.id) {
-                        Text("过期")
-                    }
-                    if hasActiveSession {
-                        HStack(spacing: 5) {
-                            Image(systemName: "play.circle.fill")
-                            Text("运行中")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                GeometryReader { geometry in
+                    // Reserve the selection checkbox before adding count, Git and discovery date.
+                    let availableWidth = geometry.size.width - (isSelectingProjects ? 28 : 0)
+                    let detailColumnCount = [392.0, 494, 622].filter { availableWidth >= $0 }.count
+                    VStack(spacing: 0) {
+                        projectTableHeader(detailColumnCount: detailColumnCount)
+                        ScrollView(.vertical) {
+                            LazyVStack(spacing: 0) {
+                                ForEach(visibleProjects) { project in
+                                    projectListRow(project, detailColumnCount: detailColumnCount)
+                                        .onAppear { projectsModel.markDisplayed(project.id) }
+                                }
+                            }
                         }
-                        .padding(.leading, 3)
-                        .foregroundStyle(.green)
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(projectSummaryColor(summary))
+                .padding(.horizontal, 14)
+            }
+            if !matchingIgnoredProjects.isEmpty {
+                Divider().padding(.horizontal, 14)
+                DisclosureGroup(isExpanded: $showsIgnoredProjects) {
+                    ScrollView {
+                        VStack(spacing: 10) {
+                            ForEach(matchingIgnoredProjects) { project in
+                                HStack(spacing: 8) {
+                                    if isSelectingProjects {
+                                        Toggle("", isOn: projectSelectionBinding(project.id))
+                                            .labelsHidden().toggleStyle(.checkbox)
+                                            .accessibilityLabel("选择 \(project.path)")
+                                    }
+                                    Image(systemName: "eye.slash")
+                                    Text(project.path).lineLimit(1).truncationMode(.middle)
+                                    Spacer(minLength: 0)
+                                    if !isSelectingProjects {
+                                        Button("恢复") {
+                                            guard let restored = projectsModel.restore(project) else { return }
+                                            clearProjectFilters()
+                                            selectedProjectID = restored.id
+                                        }
+                                        .accessibilityLabel("恢复 \(project.path)")
+                                        .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
+                                    }
+                                }
+                                .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.top, 8)
+                    }
+                    .frame(maxHeight: 130)
+                } label: {
+                    Label("已忽略 (\(matchingIgnoredProjects.count))", systemImage: "eye.slash")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                .padding(14)
+            }
+            HStack {
+                Text("共 \(visibleProjects.count) 个项目")
+                Spacer()
+                Text("已选择 \(isSelectingProjects ? selectedProjectIDs.count : (selectedProject == nil ? 0 : 1)) 项")
+            }
+            .font(.caption).foregroundStyle(.secondary).padding(18)
+        }
+        .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.accent.opacity(0.10)))
+    }
+
+    private var projectListFilters: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                projectSearchField.frame(minWidth: 150)
+                projectStatusPicker
+                projectListActions
+            }
+            VStack(spacing: 10) {
+                HStack(spacing: 10) { projectSearchField; projectStatusPicker }
+                HStack { projectListActions; Spacer(minLength: 0) }
             }
         }
-        .opacity(project.availability == .available ? 1 : 0.72)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "\(project.title)，\(project.path)，\(project.isNew ? "New，" : "")"
-                + "\(summary.map(projectSummaryTitle) ?? "待刷新")"
-                + "\(projectsModel.staleProjectIDs.contains(project.id) ? "，结果已过期" : "")"
-                + "\(hasActiveSession ? "，含活动 Project Run Session" : "")"
-        )
+    }
+
+    private var projectSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("搜索项目名称、路径…", text: $projectSearchText)
+                .textFieldStyle(.plain).focused($projectSearchIsFocused)
+                .accessibilityLabel("搜索项目标题或路径")
+            if !projectSearchText.isEmpty {
+                Button { projectSearchText = "" } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .accessibilityLabel("清除项目搜索")
+            }
+        }
+        .padding(.horizontal, 10).frame(height: 34)
+        .background(AppTheme.innerCard.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.08)))
+    }
+
+    private var projectStatusPicker: some View {
+        Picker("状态", selection: $projectStatusFilter) {
+            Text("全部状态").tag(Optional<ProjectRequirementsSummary>.none)
+            ForEach(ProjectRequirementsSummary.allCases, id: \.self) { summary in
+                Text(projectSummaryTitle(summary)).tag(Optional(summary))
+            }
+        }
+        .labelsHidden().frame(width: 116).controlSize(.large)
+        .accessibilityLabel("按环境要求状态筛选项目")
+    }
+
+    private var projectListActions: some View {
+        HStack(spacing: 8) {
+            Button { chooseProjectDirectories(forBatchScan: false) } label: {
+                Label("添加项目", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent).focused($projectAddIsFocused)
+            Button("扫描目录…") { chooseProjectDirectories(forBatchScan: true) }
+                .buttonStyle(.bordered)
+            Button(isSelectingProjects ? "取消多选" : "多选") {
+                selectedProjectIDs.removeAll()
+                isSelectingProjects.toggle()
+            }
+            .buttonStyle(.bordered)
+        }
+        .fixedSize().controlSize(.regular)
+        .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
+    }
+
+    private func projectTableHeader(detailColumnCount: Int) -> some View {
+        HStack(spacing: 10) {
+            if isSelectingProjects { Color.clear.frame(width: 18) }
+            Text("名称").frame(minWidth: detailColumnCount > 0 ? 148 : 0, maxWidth: .infinity, alignment: .leading)
+            Text("状态").frame(width: 88, alignment: .leading)
+            if detailColumnCount >= 1 {
+                Text("运行配置数").frame(width: 68)
+            }
+            if detailColumnCount >= 2 {
+                Text("Git").frame(width: 92, alignment: .leading)
+            }
+            if detailColumnCount >= 3 {
+                Text("最近发现").frame(width: 118, alignment: .leading)
+            }
+            Text("操作").frame(width: 32)
+        }
+        .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+        .padding(.horizontal, 12).frame(height: 36)
+        .background(AppTheme.innerCard.opacity(0.45))
+        .accessibilityHidden(true)
+    }
+
+    private func projectListRow(_ project: ProjectRecord, detailColumnCount: Int) -> some View {
+        let isSelected = selectedProjectID == project.id
+        let configurations = runCoordinator.runConfigurations(projectID: project.id)
+        let hasActiveSession = configurations.contains { runCoordinator.session(for: $0.id)?.state.isLive == true }
+        return HStack(spacing: 10) {
+            if isSelectingProjects {
+                Toggle("", isOn: projectSelectionBinding(project.id))
+                    .labelsHidden().toggleStyle(.checkbox).frame(width: 18)
+                    .accessibilityLabel("选择 \(project.title)")
+            }
+            Button { selectedProjectID = project.id } label: {
+                HStack(spacing: 10) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder.fill").font(.system(size: 22)).foregroundStyle(AppTheme.accent)
+                        Text(project.title).fontWeight(.medium).lineLimit(1)
+                        if project.isNew {
+                            Text("NEW").font(.system(size: 8, weight: .bold)).foregroundStyle(AppTheme.accent)
+                        }
+                        if projectsModel.staleProjectIDs.contains(project.id) {
+                            Image(systemName: "clock.badge.exclamationmark").foregroundStyle(.orange).help("结果已过期")
+                        }
+                    }
+                    .frame(minWidth: detailColumnCount > 0 ? 148 : 0, maxWidth: .infinity, alignment: .leading)
+                    projectSummaryBadge(project).frame(width: 88, alignment: .leading)
+                    if detailColumnCount >= 1 {
+                        HStack(spacing: 5) {
+                            Text("\(configurations.count)")
+                            if hasActiveSession { Circle().fill(.green).frame(width: 5, height: 5) }
+                        }
+                        .frame(width: 68)
+                        .accessibilityLabel("\(configurations.count) 个运行配置\(hasActiveSession ? "，含活动运行" : "")")
+                    }
+                    if detailColumnCount >= 2 {
+                        let repository = ProjectRepositoryState.read(projectRoot: project.path)
+                        HStack(spacing: 6) {
+                            if repository != .nonGit { gitLogo(size: 22) }
+                            Text(repository == .nonGit ? "—" : repositoryStateText(repository)).lineLimit(1)
+                        }
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(width: 92, alignment: .leading).help(repositoryStateText(repository))
+                    }
+                    if detailColumnCount >= 3 {
+                        Text(project.lastDiscoveredAt.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits).hour().minute()))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            .frame(width: 118, alignment: .leading)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 52).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).help(project.path)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            projectActionsMenu(project).frame(width: 32)
+        }
+        .padding(.horizontal, 12)
+        .background(isSelected ? AppTheme.accent.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            if isSelected { RoundedRectangle(cornerRadius: 8).stroke(AppTheme.accent.opacity(0.75)) }
+        }
+        .overlay(alignment: .bottom) { if !isSelected { Divider().opacity(0.45) } }
+    }
+
+    private func projectSummaryBadge(_ project: ProjectRecord) -> some View {
+        let summary = projectsModel.summary(for: project)
+        return Label(summary.map(projectSummaryTitle) ?? "待刷新", systemImage: projectSummarySymbol(summary))
+            .font(.caption.weight(.medium)).foregroundStyle(projectSummaryColor(summary)).lineLimit(1)
+    }
+
+    private var workspaceMoveUnavailable: Bool {
+        projectsModel.document.workspaces.count < 2 || projectsModel.mutationsArePaused
+            || projectsModel.isScanning || runCoordinator.activeDeletion != nil
+    }
+
+    private func workspaceMoveButton(_ target: WorkspaceMoveTarget) -> some View {
+        Button("移动到工作区…") {
+            moveDestinationID = projectsModel.document.workspaces.first { $0.id != projectsModel.currentWorkspace.id }?.id ?? ""
+            moveIncludingRelated = true
+            moveError = nil
+            movingTarget = target
+        }
+        .disabled(workspaceMoveUnavailable)
+        .help(projectsModel.document.workspaces.count < 2 ? "请先创建其他工作区" : "移动到另一个工作区，保持当前运行")
+    }
+
+    private func workspaceMoveSheet(_ target: WorkspaceMoveTarget) -> some View {
+        let single = projectsModel.document.moveContents(for: target, includingRelated: false)
+        let related = projectsModel.document.moveContents(for: target, includingRelated: true)
+        let contents = moveIncludingRelated ? related : single
+        let movesProject: Bool = if case .project = target { true } else { false }
+        let hasRelated = movesProject ? related?.configurations.isEmpty == false : related?.project != nil
+        let name = single?.project?.title ?? single?.configurations.first?.name ?? ""
+        let sourceID = single?.project?.workspaceID ?? single?.configurations.first?.workspaceID
+        let destinations = projectsModel.document.workspaces.filter { $0.id != sourceID }
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("移动到工作区").font(.headline)
+            Text(name).font(.subheadline).lineLimit(2)
+            Picker("目标工作区", selection: $moveDestinationID) {
+                ForEach(destinations) { Text($0.name).tag($0.id) }
+            }
+            if hasRelated {
+                Toggle(movesProject ? "同时移动项目相关的配置" : "同时移动关联项目及项目相关的其他配置", isOn: $moveIncludingRelated)
+            }
+            Text("将移动 \(contents?.project == nil ? 0 : 1) 个项目、\(contents?.configurations.count ?? 0) 个运行配置。")
+            if hasRelated && !moveIncludingRelated {
+                Label(movesProject
+                    ? "留在原工作区的 \(related?.configurations.count ?? 0) 个配置将失去项目关联。"
+                    : "移动的配置将失去项目关联。", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                Text("当前运行继续；后续启动或重启前，需显式解除或重新关联项目。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("不会修改磁盘目录或中断运行。完成后留在当前工作区。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let moveError { Text(moveError).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) { movingTarget = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("移动") {
+                    if runCoordinator.move(target, to: moveDestinationID, includingRelated: moveIncludingRelated) {
+                        movingTarget = nil
+                    } else {
+                        moveError = projectsModel.operationError ?? "内容或工作区已变化，请重新选择后重试。"
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(workspaceMoveUnavailable || contents == nil || !destinations.contains { $0.id == moveDestinationID })
+            }
+        }
+        .padding(24)
+        .frame(width: 480)
+    }
+
+    private func projectActionsMenu(_ project: ProjectRecord) -> some View {
+        Menu {
+            Button("查看运行配置") { openRuns(for: project) }
+            Button("重命名项目") {
+                projectNameDraft = project.title
+                renamingProject = project
+            }
+            .disabled(projectsModel.mutationsArePaused)
+            workspaceMoveButton(.project(project.id))
+            Divider()
+            Button("移除项目记录", role: .destructive) { pendingProjectRemovalIDs = [project.id] }
+                .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
+        } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .foregroundStyle(AppTheme.accent)
+        .accessibilityLabel("项目操作：\(project.title)")
     }
 
     @ViewBuilder
     private var projectDetail: some View {
         if let project = selectedProject {
             VStack(spacing: 0) {
+                VStack(spacing: 18) {
+                    projectDetailHeader(project)
+                    projectSummaryCards(project, analysis: projectsModel.analyses[project.id])
+                }
+                .padding(20)
+                Divider().opacity(0.6)
+                HStack(spacing: 0) {
+                    ForEach(["运行配置", "详情"], id: \.self) { tab in
+                        Button { projectDetailTab = tab } label: {
+                            Label(tab, systemImage: tab == "详情" ? "doc.text" : "play.rectangle")
+                                .font(.callout.weight(.medium))
+                                .foregroundStyle(projectDetailTab == tab ? AppTheme.accent : Color.secondary)
+                                .frame(height: 38)
+                                .overlay(alignment: .bottom) {
+                                    if projectDetailTab == tab { Rectangle().fill(AppTheme.accent).frame(height: 2) }
+                                }
+                                .padding(.horizontal, 12)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(projectDetailTab == tab ? .isSelected : [])
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 8)
+                Divider().opacity(0.6)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        projectDetailHeader(project)
-                        projectSummaryCards(project, analysis: projectsModel.analyses[project.id])
-                        if case let .unavailable(reason) = project.availability {
-                            Label("项目不可用：\(reason)", systemImage: "folder.badge.questionmark")
-                                .foregroundStyle(.secondary)
-                                .padding(12)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                        }
-                        if projectsModel.staleProjectIDs.contains(project.id) {
-                            Label("当前路径刷新失败；以下为本次会话最后一次成功结果，已过期。", systemImage: "clock.badge.exclamationmark")
-                                .foregroundStyle(.orange)
-                                .accessibilityLabel("项目结果已过期，显示本次会话最后一次成功结果")
-                        }
-                        if projectsModel.refreshingProjectIDs.contains(project.id) {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text("正在刷新项目要求…")
-                            }
-                            .accessibilityElement(children: .combine)
-                        }
-                        ForEach(projectsModel.projectNotices[project.id] ?? []) { notice in
-                            Label("\(notice.relativePath)：\(notice.message)", systemImage: "exclamationmark.triangle")
-                                .font(.callout)
-                                .foregroundStyle(.orange)
-                                .accessibilityLabel("Project Notice，\(notice.relativePath)，\(notice.message)")
-                        }
-                        Text("环境要求与匹配")
-                            .font(.headline)
-                        if let analysis = projectsModel.analyses[project.id] {
-                            projectAnalysisDetail(analysis)
-                        } else if !projectsModel.refreshingProjectIDs.contains(project.id) {
-                            ContentUnavailableView {
-                                Label("没有项目要求结果", systemImage: "doc.text.magnifyingglass")
-                            } description: {
-                                Text("刷新项目后将在此展示声明来源和 Machine Environment 证据。")
-                            }
+                    VStack(alignment: .leading, spacing: 16) {
+                        if projectDetailTab == "运行配置" {
+                            projectRunConfigurations(project)
+                        } else {
+                            projectRequirementsContent(project)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
+                    .padding(20)
                 }
+                Divider().opacity(0.6)
+                projectStatusBar
             }
-            .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
+            .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.accent.opacity(0.10)))
             .id(project.id)
         } else {
             ContentUnavailableView {
@@ -2800,50 +3055,72 @@ struct ContentView: View {
                 Text("从列表中选择项目以查看声明来源和 Machine Environment 证据。")
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.10)))
+            .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.accent.opacity(0.10)))
+        }
+    }
+
+    @ViewBuilder
+    private func projectRequirementsContent(_ project: ProjectRecord) -> some View {
+        if case let .unavailable(reason) = project.availability {
+            Label("项目不可用：\(reason)", systemImage: "folder.badge.questionmark")
+                .foregroundStyle(.secondary)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        }
+        if projectsModel.staleProjectIDs.contains(project.id) {
+            Label("当前路径刷新失败；以下为本次会话最后一次成功结果，已过期。", systemImage: "clock.badge.exclamationmark")
+                .foregroundStyle(.orange)
+                .accessibilityLabel("项目结果已过期，显示本次会话最后一次成功结果")
+        }
+        if projectsModel.refreshingProjectIDs.contains(project.id) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在刷新项目要求…")
+            }
+            .accessibilityElement(children: .combine)
+        }
+        ForEach(projectsModel.projectNotices[project.id] ?? []) { notice in
+            Label("\(notice.relativePath)：\(notice.message)", systemImage: "exclamationmark.triangle")
+                .font(.callout).foregroundStyle(.orange)
+                .accessibilityLabel("Project Notice，\(notice.relativePath)，\(notice.message)")
+        }
+        Text("环境要求与匹配").font(.headline)
+        if let analysis = projectsModel.analyses[project.id] {
+            projectAnalysisDetail(analysis)
+        } else if !projectsModel.refreshingProjectIDs.contains(project.id) {
+            ContentUnavailableView {
+                Label("没有项目要求结果", systemImage: "doc.text.magnifyingglass")
+            } description: {
+                Text("刷新项目后将在此展示声明来源和 Machine Environment 证据。")
+            }
         }
     }
 
     @ViewBuilder
     private var projectStatusBar: some View {
         if let project = selectedProject {
-            HStack(spacing: 10) {
-                Image(systemName: project.availability == .available ? "checkmark.shield.fill" : "shield")
+            HStack(spacing: 8) {
+                Label(project.availability == .available ? "项目可访问" : "项目不可访问",
+                      systemImage: project.availability == .available ? "checkmark.shield" : "shield")
                     .foregroundStyle(project.availability == .available ? Color.green : Color.secondary)
-                    .padding(7)
-                    .background(
-                        (project.availability == .available ? Color.green : Color.secondary).opacity(0.12),
-                        in: Circle()
-                    )
-                Text(project.availability == .available ? "项目可访问" : "项目不可访问")
-                    .font(.callout)
-                    .foregroundStyle(project.availability == .available ? Color.green : Color.secondary)
-                Spacer()
-                Text("最近发现：\(formatted(project.lastDiscoveredAt))")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Button("重新扫描", action: runCoordinator.refreshProjects)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(projectsModel.isScanning || projectsModel.isRefreshingProjects)
+                Spacer(minLength: 0)
+                Text("最近发现：\(formatted(project.lastDiscoveredAt))").foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(AppTheme.cardSurface, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
+            .font(.caption).padding(16)
         }
     }
 
     private var selectedProject: ProjectRecord? {
         guard let selectedProjectID else { return nil }
-        return projectsModel.workspaceRecords.first { $0.id == selectedProjectID }
+        return visibleProjects.first { $0.id == selectedProjectID }
     }
 
     private var visibleProjectRecordIDs: Set<String> {
         Set(
-            projectsModel.records(matching: projectSearchText).map(\.id)
-                + projectsModel.ignoredProjects.map(\.id)
+            visibleProjects.map(\.id)
+                + (showsIgnoredProjects ? matchingIgnoredProjects.map(\.id) : [])
         )
     }
 
@@ -2861,75 +3138,88 @@ struct ContentView: View {
     }
 
     private func projectDetailHeader(_ project: ProjectRecord) -> some View {
-        let summary = projectsModel.summary(for: project)
-        return HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: 12) {
             Image(systemName: "folder.fill")
-                .font(.system(size: 28, weight: .medium))
-                .foregroundStyle(.blue)
-                .frame(width: 48, height: 42)
-                .background(.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 12) {
-                    Text(project.title)
-                        .font(.title2.bold())
-                    Label(summary.map(projectSummaryTitle) ?? "待刷新", systemImage: projectSummarySymbol(summary))
-                        .foregroundStyle(projectSummaryColor(summary))
+                .font(.system(size: 28, weight: .medium)).foregroundStyle(AppTheme.accent)
+                .frame(width: 50, height: 50)
+                .background(AppTheme.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 11))
+            VStack(alignment: .leading, spacing: 7) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { Text(project.title).font(.title3.bold()); projectSummaryBadge(project) }
+                    VStack(alignment: .leading, spacing: 4) { Text(project.title).font(.title3.bold()); projectSummaryBadge(project) }
                 }
-                Text(project.path)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                Text(project.path).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle).textSelection(.enabled).help(project.path)
                     .accessibilityLabel("项目路径 \(project.path)")
-                if project.isNew {
-                    HStack(spacing: 8) {
-                        Text("NEW")
-                            .font(.caption.bold())
-                            .foregroundStyle(.blue)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(.blue.opacity(0.12), in: Capsule())
-                        Text("本次扫描新发现")
-                            .font(.callout)
-                            .foregroundStyle(.blue)
-                    }
-                }
             }
-            Spacer()
-            if !isSelectingProjects {
-                Button {
-                    openRuns(for: project)
-                } label: {
-                    Label("运行", systemImage: "play.rectangle")
-                }
-                .buttonStyle(.borderedProminent)
+            Spacer(minLength: 0)
+            Button { openRuns(for: project) } label: { Label("运行", systemImage: "play.rectangle") }
+                .buttonStyle(.borderedProminent).fixedSize()
                 .accessibilityLabel("管理 \(project.title) 的运行配置")
                 .help("在运行页面管理此项目的运行配置")
-                Menu {
-                    Button("重命名项目") {
-                        projectNameDraft = project.title
-                        renamingProject = project
-                    }
-                    .disabled(projectsModel.mutationsArePaused)
-                    Button("移除项目记录", role: .destructive) {
-                        pendingProjectRemovalIDs = [project.id]
-                    }
-                    .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .frame(width: 24, height: 20)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .accessibilityLabel("项目操作")
-                .help("项目操作")
-            }
+            projectActionsMenu(project)
         }
         .accessibilityElement(children: .contain)
     }
 
+    private func clearProjectFilters() {
+        projectSearchText = ""
+        projectStatusFilter = nil
+    }
+
+    private func openProject(_ project: ProjectRecord) {
+        clearProjectFilters()
+        selectedProjectID = project.id
+        projectDetailTab = "详情"
+        requestPage(.projects)
+    }
+
     private func openRuns(for project: ProjectRecord) {
+        runSearchText = ""
+        runStatusFilter = .all
         runProjectFilterID = project.id
         selectPage(.runs)
+    }
+
+    private func projectRunConfigurations(_ project: ProjectRecord) -> some View {
+        let configurations = runCoordinator.runConfigurations(projectID: project.id)
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("运行配置 (\(configurations.count))").font(.headline)
+                Spacer()
+                Button("新建配置") {
+                    beginCreatingRunConfiguration()
+                    runConfigurationProjectID = project.id
+                }
+                .disabled(projectsModel.mutationsArePaused)
+            }
+            if configurations.isEmpty {
+                ContentUnavailableView("尚无运行配置", systemImage: "play.rectangle", description: Text("为此项目保存启动命令与工作目录。"))
+            }
+            ForEach(configurations) { configuration in
+                Button {
+                    selectedRunConfigurationID = configuration.id
+                    openRuns(for: project)
+                } label: {
+                    HStack(spacing: 12) {
+                        runConfigurationLogo(configuration, size: 32)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(configuration.name).fontWeight(.medium)
+                            Text(configuration.command).font(.caption.monospaced())
+                                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer(minLength: 0)
+                        projectRunStatusBadge(runCoordinator.session(for: configuration.id)?.state ?? .inactive, isEnabled: configuration.isEnabled)
+                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                    }
+                    .padding(14).contentShape(Rectangle())
+                    .background(AppTheme.innerCard.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("查看运行配置 \(configuration.name)")
+            }
+        }
     }
 
     private func projectSummaryCards(
@@ -2944,7 +3234,7 @@ struct ContentView: View {
         let isGitRepository = discovery.isGitRepository(project.path)
         let gitBranch = discovery.currentGitBranch(project.path)
         return LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
+            columns: [GridItem(.adaptive(minimum: 125), spacing: 10)],
             spacing: 10
         ) {
             projectMetricCard(
@@ -2971,10 +3261,10 @@ struct ContentView: View {
             )
             projectMetricCard(
                 title: "匹配结果",
-                symbol: projectSummarySymbol(analysis?.summary),
-                value: analysis.map { projectSummaryTitle($0.summary) } ?? "待刷新",
-                detail: "未满足 \(unsatisfiedCount) 项",
-                tint: projectSummaryColor(analysis?.summary)
+                symbol: projectSummarySymbol(projectsModel.summary(for: project)),
+                value: projectsModel.summary(for: project).map(projectSummaryTitle) ?? "待刷新",
+                detail: projectsModel.staleProjectIDs.contains(project.id) ? "上次结果已过期" : "未满足 \(unsatisfiedCount) 项",
+                tint: projectSummaryColor(projectsModel.summary(for: project))
             )
         }
     }
@@ -2989,11 +3279,8 @@ struct ContentView: View {
     ) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Group {
-                if let assetName {
-                    Image(assetName)
-                        .resizable()
-                        .scaledToFit()
-                        .padding(2)
+                if assetName == "GitLogo" {
+                    gitLogo(size: 22)
                 } else if let symbol {
                     Image(systemName: symbol)
                         .font(.system(size: 15, weight: .medium))
@@ -3034,16 +3321,12 @@ struct ContentView: View {
             Label("未声明受支持的 Project Requirements", systemImage: "doc.text")
                 .foregroundStyle(.secondary)
         } else {
-            VStack(spacing: 0) {
-                ForEach(Array(requirements.enumerated()), id: \.element.id) { index, requirement in
+            VStack(spacing: 12) {
+                ForEach(requirements) { requirement in
                     projectRequirementDetail(requirement)
-                    if index < requirements.count - 1 { Divider() }
+                        .background(AppTheme.innerCard.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
                 }
-            }
-            .background(AppTheme.innerCard, in: RoundedRectangle(cornerRadius: 14))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(.separator.opacity(0.75), lineWidth: 1)
             }
             .onAppear {
                 expandedProjectRequirementID = expandedProjectRequirementID ?? requirements.first?.id
@@ -3173,7 +3456,7 @@ struct ContentView: View {
                 }
                 .padding(14)
                 .background(.secondary.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
-                .padding(.leading, 72)
+                .padding(.leading, 16)
                 .padding(.trailing, 18)
                 .padding(.bottom, 16)
             }
@@ -3184,6 +3467,8 @@ struct ContentView: View {
     private func projectCapabilityIcon(_ capability: String) -> some View {
         if let brand = runtimeBrand(capability) {
             runtimeLogo(brand)
+        } else if ["bun", "npm", "pnpm", "yarn", "uv", "homebrew"].contains(capability) {
+            packageManagerLogo(capability, size: 48)
         } else if capability == "mysql-compatible" {
             HStack(spacing: 4) {
                 databaseLogo("mysql", size: 22, padding: 4)
@@ -3297,10 +3582,10 @@ struct ContentView: View {
     }
 
     private func selectFirstProjectIfNeeded() {
-        if let selectedProjectID, projectsModel.workspaceRecords.contains(where: { $0.id == selectedProjectID }) {
+        if let selectedProjectID, visibleProjects.contains(where: { $0.id == selectedProjectID }) {
             return
         }
-        selectedProjectID = projectsModel.workspaceRecords.first?.id
+        selectedProjectID = visibleProjects.first?.id
     }
 
     private func chooseProjectDirectories(forBatchScan: Bool) {
@@ -3573,7 +3858,10 @@ struct ContentView: View {
     private func overviewPage(_ snapshot: MachineSnapshot) -> some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let result = overviewAttention(snapshot, now: context.date)
-            let runs = result.runs.compactMap(overviewRun)
+            let runs = result.runs
+                .filter { overviewWorkspaceFilterID == nil || $0.configuration.workspaceID == overviewWorkspaceFilterID }
+                .compactMap(overviewRun)
+            let runCardHeight: CGFloat = runs.isEmpty ? 160 : 106 + CGFloat(runs.count) * 68
 
             VStack(alignment: .leading, spacing: 12) {
                 overviewHeader(snapshot, now: context.date)
@@ -3586,7 +3874,7 @@ struct ContentView: View {
                     overviewRunningCard(runs, visibleLimit: visibleRunLimit, now: context.date)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(minHeight: 322)
+                .frame(minHeight: min(322, runCardHeight), maxHeight: runCardHeight)
 
                 overviewEnvironmentSummary(snapshot)
                 overviewBaseConfiguration(snapshot)
@@ -3639,23 +3927,56 @@ struct ContentView: View {
                             .padding(.vertical, 2)
                             .background(Color.primary.opacity(0.07), in: Capsule())
                     }
-                    Text("当前活动及异常的项目运行会话")
+                    Text("当前活动及异常的运行会话")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Picker("所属工作区", selection: $overviewWorkspaceFilterID) {
+                    Text("全部工作区").tag(nil as String?)
+                    ForEach(projectsModel.document.workspaces) { workspace in
+                        Text(workspace.name).tag(Optional(workspace.id))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 142)
+                .controlSize(.large)
+                .onChange(of: projectsModel.document.workspaces.map(\.id)) { _, ids in
+                    if let selected = overviewWorkspaceFilterID, !ids.contains(selected) {
+                        overviewWorkspaceFilterID = nil
+                    }
+                }
+
+                Button {
+                    model.refreshDynamicStatus()
+                    runCoordinator.refreshProjects()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .medium))
+                        .frame(width: 34, height: 34)
+                        .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.10)))
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshingCurrentPage)
+                .help("刷新运行会话与项目状态")
+                .accessibilityLabel("刷新运行会话")
             }
             .padding(.horizontal, 16)
-            .frame(height: 54)
+            .frame(height: 68)
 
             Divider()
 
             if runs.isEmpty {
                 Button {
+                    if let workspaceID = overviewWorkspaceFilterID {
+                        _ = projectsModel.selectWorkspace(workspaceID)
+                    }
                     selectPage(.runs)
                 } label: {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("当前没有运行会话")
+                        Text(overviewWorkspaceFilterID == nil ? "当前没有运行会话" : "此工作区没有运行会话")
                             .font(.callout.weight(.semibold))
                         Text("启动运行配置后，会在这里显示实时状态")
                             .font(.callout)
@@ -3683,6 +4004,9 @@ struct ContentView: View {
 
                         if runs.count > visibleRuns.count {
                             Button {
+                                if let workspaceID = overviewWorkspaceFilterID {
+                                    _ = projectsModel.selectWorkspace(workspaceID)
+                                }
                                 selectPage(.runs)
                             } label: {
                                 HStack(spacing: 5) {
@@ -3702,15 +4026,18 @@ struct ContentView: View {
                 }
             }
         }
-        .overviewCard()
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overviewCard(cornerRadius: 12)
     }
 
     private func overviewRunTableHeader(_ columns: OverviewRunTableColumns) -> some View {
-        HStack(spacing: 12) {
-            Text("项目")
-                .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: columns.spacing) {
             Text("运行配置")
-                .frame(width: columns.configuration, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("所属工作区")
+                .frame(width: columns.workspace, alignment: .leading)
+            Text("关联项目")
+                .frame(width: columns.project, alignment: .leading)
             Text("端口")
                 .frame(width: columns.port)
             Text("状态")
@@ -3737,16 +4064,27 @@ struct ContentView: View {
     ) -> some View {
         let tint = overviewRunColor(run.session.state)
         let canStop = run.session.state.isLive && run.session.state != .stopping
+        let workspaceName = projectsModel.document.workspaces.first { $0.id == run.configuration.workspaceID }?.name ?? "未知工作区"
 
-        return HStack(spacing: 12) {
+        return HStack(spacing: columns.spacing) {
             Button {
                 openOverviewRun(run)
             } label: {
-                HStack(spacing: 12) {
-                    overviewRunProjectCell(run)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: columns.spacing) {
                     overviewRunConfigurationCell(run)
-                        .frame(width: columns.configuration, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Label {
+                        Text(workspaceName)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    } icon: {
+                        Image(systemName: "folder").foregroundStyle(AppTheme.accent)
+                    }
+                    .font(.callout)
+                    .frame(width: columns.workspace, alignment: .leading)
+                    .help(workspaceName)
+                    overviewRunProjectCell(run)
+                        .frame(width: columns.project, alignment: .leading)
                     Text(overviewPortsText(run))
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -3779,23 +4117,24 @@ struct ContentView: View {
                 Button {
                     openOverviewRun(run)
                 } label: {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .frame(width: 30, height: 30)
-                        .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
+                    Label("终端", systemImage: "terminal")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AppTheme.accent)
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                        .background(AppTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppTheme.accent.opacity(0.10)))
                 }
                 .buttonStyle(.plain)
                 .help("进入会话")
-                .accessibilityLabel("进入 \(run.project?.title ?? "独立运行") 运行会话")
+                .accessibilityLabel("打开 \(run.configuration.name) 的终端")
 
                 Button(role: .destructive) {
-                    runCoordinator.stop(configurationID: run.configuration.id)
+                    runCoordinator.stopOrCloseTerminal(configurationID: run.configuration.id)
                 } label: {
-                    Image(systemName: run.session.state == .stopping ? "hourglass" : "stop.fill")
+                    Image(systemName: run.session.state == .stopping ? "hourglass" : run.session.state.stopActionSymbol)
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(canStop ? Color.red : Color.secondary)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 30, height: 32)
                         .background(
                             (canStop ? Color.red : Color.secondary).opacity(0.08),
                             in: RoundedRectangle(cornerRadius: 7)
@@ -3803,8 +4142,8 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!canStop)
-                .help(run.session.state == .stopping ? "正在停止" : "停止")
-                .accessibilityLabel("停止 \(run.project?.title ?? "独立运行") 运行会话")
+                .help(run.session.state == .stopping ? "正在停止" : (run.session.state == .ready ? "关闭终端" : "停止"))
+                .accessibilityLabel("\(run.session.state.stopActionTitle) \(run.configuration.name)")
             }
             .frame(width: columns.actions)
         }
@@ -3815,44 +4154,46 @@ struct ContentView: View {
     }
 
     private func overviewRunProjectCell(_ run: OverviewRun) -> some View {
-        HStack(spacing: 10) {
-            overviewRunLogo(run)
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 17))
+                .foregroundStyle(AppTheme.accent)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 7) {
-                    Text(run.project?.title ?? "独立运行")
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text(repositoryStateText(run.repositoryState))
-                        .font(.caption2.monospaced().weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 5))
-                }
-                Text(run.project?.path ?? run.session.currentExecution?.workingDirectory ?? "")
+                Text(run.project?.title ?? "未关联项目")
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if run.project != nil {
+                    HStack(spacing: 5) {
+                        Circle().fill(.secondary).frame(width: 6, height: 6)
+                        Text(repositoryStateText(run.repositoryState))
+                            .lineLimit(1)
+                    }
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                }
             }
         }
+        .help(run.project.map { "\($0.path)\n\(repositoryStateText(run.repositoryState))" } ?? "未关联项目")
     }
 
     private func overviewRunConfigurationCell(_ run: OverviewRun) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            let workspaceName = projectsModel.document.workspaces.first { $0.id == run.configuration.workspaceID }?.name ?? "未知工作区"
-            Text("\(workspaceName) · \(run.configuration.name)")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Text(run.session.lastSuccessfulCommand ?? run.configuration.command)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+        HStack(spacing: 12) {
+            runConfigurationLogo(run.configuration, size: 42)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(run.configuration.name)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(run.session.lastSuccessfulCommand ?? run.configuration.command)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
+        .help("\(run.configuration.name)\n\(run.session.lastSuccessfulCommand ?? run.configuration.command)")
     }
 
     private func overviewRunStatusBadge(_ state: ProjectRunSessionState, tint: Color) -> some View {
@@ -3882,26 +4223,14 @@ struct ContentView: View {
         guard projectsModel.selectWorkspace(configuration.workspaceID) else { return }
         runProjectFilterID = nil
         runSearchText = ""
+        runStatusFilter = .all
     }
 
-    @ViewBuilder
-    private func overviewRunLogo(_ run: OverviewRun) -> some View {
-        if let brand = overviewRunBrand(run) {
-            runtimeLogo(brand, size: 40, padding: 7, cornerRadius: 9)
-        } else {
-            Image(systemName: "terminal.fill")
-                .font(.system(size: 19, weight: .medium))
-                .foregroundStyle(.blue)
-                .frame(width: 40, height: 40)
-                .background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .accessibilityHidden(true)
-        }
-    }
-
-    private func overviewRunBrand(_ run: OverviewRun) -> (assetName: String, color: Color)? {
-        guard let project = run.project, let analysis = projectsModel.analyses[project.id] else { return nil }
+    private func runConfigurationBrand(_ configuration: ProjectRunConfiguration) -> (assetName: String, color: Color)? {
+        guard let project = configuration.associatedProject(in: projectsModel.records),
+              let analysis = projectsModel.analyses[project.id] else { return nil }
         let componentCapabilities = analysis.components
-            .first { $0.relativePath == run.configuration.workingDirectory }?
+            .first { $0.relativePath == configuration.workingDirectory }?
             .requirements.map(\.capability) ?? []
         return (componentCapabilities + analysis.requirements.map(\.capability))
             .lazy.compactMap(runtimeBrand).first
@@ -4122,7 +4451,9 @@ struct ContentView: View {
         } label: {
             HStack(spacing: 10) {
                 Group {
-                    if let assetName {
+                    if assetName == "GitLogo" {
+                        gitLogo(size: 30)
+                    } else if let assetName {
                         Image(assetName).resizable().scaledToFit().padding(6)
                     } else if let systemImage {
                         Image(systemName: systemImage)
@@ -4131,7 +4462,7 @@ struct ContentView: View {
                 }
                 .foregroundStyle(iconTint)
                 .frame(width: 30, height: 30)
-                .background(iconTint.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
+                .background(assetName == "GitLogo" ? .clear : iconTint.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
                 .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -4185,7 +4516,7 @@ struct ContentView: View {
 
     private func overviewAttention(_ snapshot: MachineSnapshot, now: Date) -> OverviewAttentionResult {
         let runs = runCoordinator.runConfigurations().compactMap { configuration -> OverviewAttentionRunInput? in
-            let project = projectsModel.records.first { $0.id == configuration.projectID }
+            let project = configuration.associatedProject(in: projectsModel.records)
             guard let session = runCoordinator.session(for: configuration.id) else { return nil }
             return OverviewAttentionRunInput(
                 configuration: configuration,
@@ -4233,6 +4564,8 @@ struct ContentView: View {
             if let project = projectsModel.records.first(where: { $0.id == projectID }) {
                 guard projectsModel.selectWorkspace(project.workspaceID) else { return }
             }
+            clearProjectFilters()
+            projectDetailTab = "详情"
             selectedProjectID = projectID
             if let capability { expandedProjectRequirementID = capability }
             selectPage(.projects)
@@ -4266,6 +4599,7 @@ struct ContentView: View {
         switch state {
         case .starting: .blue
         case .running: .green
+        case .ready: .blue
         case .stopping: .orange
         case .stopFailed: .red
         case .restarting: .blue
@@ -4281,7 +4615,8 @@ struct ContentView: View {
         switch state {
         case .inactive: "未启动"
         case .starting: "启动中"
-        case .running: "运行中"
+        case .running: "执行中"
+        case .ready: "终端就绪"
         case .stopping: "停止中"
         case .stopFailed: "停止失败"
         case .restarting: "重启中"
@@ -4302,14 +4637,14 @@ struct ContentView: View {
     }
 
     private func overviewPortsText(_ run: OverviewRun) -> String {
-        guard run.session.state == .running else { return "—" }
+        guard run.session.state == .running || run.session.state == .ready else { return "—" }
         guard let bindings = run.bindings else { return "未知" }
         let ports = Set(bindings.map(\.port)).sorted()
         return ports.isEmpty ? "无监听端口" : ports.map { ":\($0)" }.joined(separator: " · ")
     }
 
     private func overviewMemoryText(_ run: OverviewRun) -> String {
-        guard run.session.state == .running else { return "—" }
+        guard run.session.state == .running || run.session.state == .ready else { return "—" }
         guard let bytes = run.session.physicalMemoryBytes else { return "未知" }
         return byteCount(bytes)
     }
@@ -5680,6 +6015,10 @@ struct ContentView: View {
         }
     }
 
+    private func gitLogo(size: CGFloat) -> some View {
+        runtimeLogo((assetName: "GitLogo", color: .orange), size: size, padding: size * 0.2, cornerRadius: size * 0.22)
+    }
+
     private func runtimeLogo(
         _ brand: (assetName: String, color: Color),
         size: CGFloat = 48,
@@ -5910,21 +6249,7 @@ struct ContentView: View {
                         )
                     } else {
                         HStack(alignment: .center, spacing: 14) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .fill(Color.orange.opacity(0.09))
-                                Image("GitLogo")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .foregroundStyle(.orange)
-                                    .padding(10)
-                            }
-                            .frame(width: 50, height: 50)
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                    .stroke(Color.primary.opacity(0.07))
-                            }
-                            .accessibilityHidden(true)
+                            gitLogo(size: 50)
 
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Git")
@@ -6016,21 +6341,7 @@ struct ContentView: View {
         }
 
         return HStack(alignment: .center, spacing: 18) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.orange.opacity(0.10))
-                Image("GitLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .foregroundStyle(.orange)
-                    .padding(13)
-            }
-            .frame(width: 64, height: 64)
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.orange.opacity(0.16))
-            }
-            .accessibilityHidden(true)
+            gitLogo(size: 64)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("Git")
@@ -6601,23 +6912,9 @@ struct ContentView: View {
         statusColor: Color,
         statusImage: String
     ) -> some View {
-        let brand = packageManagerBrand(id)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(id == "bun" ? Color.white.opacity(0.92) : brand.tint.opacity(0.10))
-                    Image(brand.assetName)
-                        .resizable()
-                        .scaledToFit()
-                        .padding(9)
-                }
-                .frame(width: 44, height: 44)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(brand.tint.opacity(0.18))
-                }
-                .accessibilityHidden(true)
+                packageManagerLogo(id, size: 44)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(name)
@@ -6647,6 +6944,21 @@ struct ContentView: View {
                 .stroke(statusColor == .orange ? Color.orange.opacity(0.35) : Color.primary.opacity(0.09))
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private func packageManagerLogo(_ id: String, size: CGFloat) -> some View {
+        let brand = packageManagerBrand(id)
+        return ZStack {
+            RoundedRectangle(cornerRadius: size * 10 / 44, style: .continuous)
+                .fill(id == "bun" ? Color.white.opacity(0.92) : brand.tint.opacity(0.10))
+            Image(brand.assetName).resizable().scaledToFit().padding(size * 9 / 44)
+        }
+        .frame(width: size, height: size)
+        .overlay {
+            RoundedRectangle(cornerRadius: size * 10 / 44, style: .continuous)
+                .stroke(brand.tint.opacity(0.18))
+        }
+        .accessibilityHidden(true)
     }
 
     private func packageManagerBrand(_ id: String) -> (assetName: String, tint: Color) {

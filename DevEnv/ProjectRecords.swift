@@ -61,6 +61,18 @@ struct Workspace: Codable, Identifiable, Equatable, Sendable {
     var name: String
 }
 
+enum WorkspaceMoveTarget: Identifiable {
+    case project(String)
+    case configuration(String)
+
+    var id: String {
+        switch self {
+        case let .project(id): "project:\(id)"
+        case let .configuration(id): "configuration:\(id)"
+        }
+    }
+}
+
 struct ProjectRecord: Codable, Identifiable, Equatable, Sendable {
     let id: String
     var workspaceID: String
@@ -176,6 +188,22 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
 
     var missingProjectTitle: String {
         "\(deletedProjectTitle ?? projectID ?? "项目")（已失效）"
+    }
+
+    func associatedProject(in records: [ProjectRecord]) -> ProjectRecord? {
+        guard deletedProjectPath == nil else { return nil }
+        return records.first { $0.id == projectID && $0.workspaceID == workspaceID }
+    }
+
+    mutating func invalidateProjectAssociation(_ project: ProjectRecord) {
+        deletedProjectTitle = project.title
+        deletedProjectPath = project.path
+        if !NSString(string: workingDirectory).isAbsolutePath,
+           let directory = try? ProjectRunWorkingDirectory.location(
+               projectRoot: project.path, workingDirectory: workingDirectory
+           ) {
+            workingDirectory = directory.path
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -587,7 +615,7 @@ struct ProjectRunSuggestionScanner: Sendable {
 }
 
 struct ProjectRecordDocument: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 7
+    static let currentSchemaVersion = 8
 
     let schemaVersion: Int
     var records: [ProjectRecord]
@@ -694,7 +722,8 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
             }
             let projectWorkspaces = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0.workspaceID) })
             guard runConfigurations.allSatisfy({ configuration in
-                configuration.projectID.flatMap { projectWorkspaces[$0] }.map { $0 == configuration.workspaceID } ?? true
+                (storedSchemaVersion >= 8 && configuration.deletedProjectPath != nil)
+                    || (configuration.projectID.flatMap { projectWorkspaces[$0] }.map { $0 == configuration.workspaceID } ?? true)
             }), Set(runConfigurations.map(\.id)).count == runConfigurations.count,
                 Set(ignoredProjects.map(\.id)).count == ignoredProjects.count else {
                 throw ProjectRecordStoreError.corrupt
@@ -775,17 +804,29 @@ struct ProjectRecordDocument: Codable, Equatable, Sendable {
         let projects = records.filter { projectIDs.contains($0.id) }
         // Preserve the directory before losing its base; keep the stale ID until explicit detachment.
         for index in runConfigurations.indices {
-            guard let project = projects.first(where: { $0.id == runConfigurations[index].projectID }) else { continue }
-            runConfigurations[index].deletedProjectTitle = project.title
-            runConfigurations[index].deletedProjectPath = project.path
-            guard !NSString(string: runConfigurations[index].workingDirectory).isAbsolutePath,
-                  let directory = try? ProjectRunWorkingDirectory.location(
-                    projectRoot: project.path, workingDirectory: runConfigurations[index].workingDirectory
-                  ) else { continue }
-            runConfigurations[index].workingDirectory = directory.path
+            guard let project = runConfigurations[index].associatedProject(in: projects) else { continue }
+            runConfigurations[index].invalidateProjectAssociation(project)
         }
         records.removeAll { projectIDs.contains($0.id) }
         return projects
+    }
+
+    func moveContents(for target: WorkspaceMoveTarget, includingRelated: Bool) -> (
+        project: ProjectRecord?, configurations: [ProjectRunConfiguration]
+    )? {
+        switch target {
+        case let .project(id):
+            guard let project = records.first(where: { $0.id == id }) else { return nil }
+            return (project, includingRelated ? runConfigurations.filter {
+                $0.associatedProject(in: [project]) != nil
+            } : [])
+        case let .configuration(id):
+            guard let configuration = runConfigurations.first(where: { $0.id == id }) else { return nil }
+            guard includingRelated, let project = configuration.associatedProject(in: records) else {
+                return (nil, [configuration])
+            }
+            return (project, runConfigurations.filter { $0.associatedProject(in: [project]) != nil })
+        }
     }
 
     @discardableResult
@@ -1213,12 +1254,12 @@ final class ProjectsViewModel: ObservableObject {
         }
     }
 
-    func records(matching searchText: String) -> [ProjectRecord] {
+    func records(matching searchText: String, summary: ProjectRequirementsSummary? = nil) -> [ProjectRecord] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return workspaceRecords }
         return workspaceRecords.filter {
-            $0.title.localizedCaseInsensitiveContains(query)
-                || $0.path.localizedCaseInsensitiveContains(query)
+            (summary == nil || self.summary(for: $0) == summary)
+                && (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query)
+                    || $0.path.localizedCaseInsensitiveContains(query))
         }
     }
 
@@ -1229,7 +1270,8 @@ final class ProjectsViewModel: ObservableObject {
 
     func runConfigurations(projectID: String? = nil, workspaceID: String? = nil) -> [ProjectRunConfiguration] {
         document.runConfigurations
-            .filter { (projectID == nil || $0.projectID == projectID) && (workspaceID == nil || $0.workspaceID == workspaceID) }
+            .filter { (projectID == nil || $0.associatedProject(in: records)?.id == projectID)
+                && (workspaceID == nil || $0.workspaceID == workspaceID) }
             .sorted { lhs, rhs in
                 let projectOrder = (lhs.projectID ?? "").localizedStandardCompare(rhs.projectID ?? "")
                 if projectOrder != .orderedSame { return projectOrder == .orderedAscending }
@@ -1315,7 +1357,8 @@ final class ProjectsViewModel: ObservableObject {
         name: String,
         command: String,
         workingDirectory: String,
-        rememberCommand: Bool = true
+        rememberCommand: Bool = true,
+        reassociateProject: Bool = false
     ) -> Bool {
         guard !mutationsArePaused else { return false }
         do {
@@ -1327,7 +1370,7 @@ final class ProjectsViewModel: ObservableObject {
             if let projectID = existing.projectID, configuration.projectID == nil,
                directory == existing.workingDirectory,
                !NSString(string: directory).isAbsolutePath,
-               let projectPath = document.records.first(where: { $0.id == projectID })?.path ?? existing.deletedProjectPath {
+               let projectPath = existing.deletedProjectPath ?? document.records.first(where: { $0.id == projectID })?.path {
                 directory = try ProjectRunWorkingDirectory.location(
                     projectRoot: projectPath, workingDirectory: directory
                 ).path
@@ -1338,14 +1381,14 @@ final class ProjectsViewModel: ObservableObject {
                 command: command,
                 workingDirectory: directory,
                 workspaceID: existing.workspaceID,
-                existingProjectID: existing.projectID
+                existingProjectID: !reassociateProject && existing.associatedProject(in: records) == nil ? existing.projectID : nil
             )
             var updated = existing
             updated.projectID = configuration.projectID
             updated.name = input.name
             updated.command = rememberCommand ? input.command : existing.command
             updated.workingDirectory = input.workingDirectory
-            if updated.projectID != existing.projectID {
+            if updated.projectID != existing.projectID || reassociateProject {
                 updated.deletedProjectTitle = nil
                 updated.deletedProjectPath = nil
             }
@@ -1367,6 +1410,39 @@ final class ProjectsViewModel: ObservableObject {
         guard document.runConfigurations[index].isEnabled != isEnabled else { return true }
         guard applyDocumentChange({ $0.runConfigurations[index].isEnabled = isEnabled }) else { return false }
         resultMessage = "已\(isEnabled ? "启用" : "禁用")运行配置“\(configuration.name)”"
+        return true
+    }
+
+    @discardableResult
+    func move(_ target: WorkspaceMoveTarget, to workspaceID: String, includingRelated: Bool) -> Bool {
+        guard !mutationsArePaused, !isScanning,
+              document.workspaces.contains(where: { $0.id == workspaceID }),
+              let contents = document.moveContents(for: target, includingRelated: includingRelated),
+              let sourceID = contents.project?.workspaceID ?? contents.configurations.first?.workspaceID,
+              sourceID != workspaceID else { return false }
+        let configurationIDs = Set(contents.configurations.map(\.id))
+        guard applyDocumentChange({ document in
+            for index in document.runConfigurations.indices {
+                let movesConfiguration = configurationIDs.contains(document.runConfigurations[index].id)
+                if let project = document.runConfigurations[index].associatedProject(in: document.records),
+                   (project.id == contents.project?.id) != movesConfiguration {
+                    document.runConfigurations[index].invalidateProjectAssociation(project)
+                }
+                if movesConfiguration { document.runConfigurations[index].workspaceID = workspaceID }
+            }
+            if let project = contents.project,
+               let index = document.records.firstIndex(where: { $0.id == project.id }) {
+                document.records[index].workspaceID = workspaceID
+                if !document.ignoredProjects.contains(where: { $0.path == project.path && $0.workspaceID == sourceID }) {
+                    document.ignoredProjects.append(IgnoredProject(
+                        path: project.path, ignoredAt: Date(), boundary: project.boundary, workspaceID: sourceID
+                    ))
+                }
+                document.ignoredProjects.removeAll { $0.path == project.path && $0.workspaceID == workspaceID }
+            }
+        }) else { return false }
+        if contents.project != nil { refreshProjects() }
+        resultMessage = "已移动到目标工作区，当前运行保持不变。"
         return true
     }
 
@@ -1662,12 +1738,10 @@ final class ProjectsViewModel: ObservableObject {
         workspaceID: String? = nil,
         existingProjectID: String? = nil
     ) throws -> (name: String, command: String, workingDirectory: String) {
-        if let projectID {
-            if let project = document.records.first(where: { $0.id == projectID }) {
-                guard project.workspaceID == (workspaceID ?? document.selectedWorkspaceID) else {
-                    throw ProjectRunConfigurationError.projectNotFound
-                }
-            } else if projectID != existingProjectID {
+        if let projectID, projectID != existingProjectID {
+            guard document.records.contains(where: {
+                $0.id == projectID && $0.workspaceID == (workspaceID ?? document.selectedWorkspaceID)
+            }) else {
                 throw ProjectRunConfigurationError.projectNotFound
             }
         }

@@ -2,6 +2,96 @@ import XCTest
 @testable import DevEnv
 
 final class ProjectRecordsTests: XCTestCase {
+
+    @MainActor
+    func testWorkspaceMoveCombinationsPreserveIdentityAndOnlyCarryValidAssociations() throws {
+        for moveProject in [true, false] {
+            for includeRelated in [true, false] {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: root) }
+                let target = Workspace(id: "target", name: "目标")
+                let project = ProjectRecord(id: "project", path: root.path, discoveredAt: Date())
+                let duplicate = ProjectRecord(id: "duplicate", path: root.path, discoveredAt: Date(), workspaceID: target.id)
+                let first = ProjectRunConfiguration(id: "first", projectID: project.id, name: "服务", command: "  serve\n", workingDirectory: "api", sourceIdentity: "dev", sourceProjectID: project.id)
+                let disabled = ProjectRunConfiguration(id: "disabled", projectID: project.id, name: "服务", command: "worker", workingDirectory: "", isEnabled: false)
+                let unrelated = ProjectRunConfiguration(id: "unrelated", projectID: duplicate.id, name: "服务", command: "other", workingDirectory: "", workspaceID: target.id)
+                let sourceOnly = ProjectRunConfiguration(id: "source-only", name: "来源", command: "pwd", workingDirectory: root.path, sourceIdentity: "old", sourceProjectID: project.id)
+                let store = ProjectRecordStore(fileURL: root.appendingPathComponent("records.json"))
+                try store.save(ProjectRecordDocument(records: [project, duplicate], runConfigurations: [first, disabled, unrelated, sourceOnly], workspaces: [.defaultWorkspace, target]))
+                let model = ProjectsViewModel(store: store)
+                let selection: WorkspaceMoveTarget = moveProject ? .project(project.id) : .configuration(first.id)
+                XCTAssertTrue(model.move(selection, to: target.id, includingRelated: includeRelated))
+                let loaded = try store.load()
+                let movedFirst = try XCTUnwrap(loaded.runConfigurations.first { $0.id == first.id })
+                let movedDisabled = try XCTUnwrap(loaded.runConfigurations.first { $0.id == disabled.id })
+                XCTAssertEqual(loaded.selectedWorkspaceID, Workspace.defaultWorkspace.id)
+                XCTAssertEqual(Set(loaded.records.map(\.id)), [project.id, duplicate.id])
+                XCTAssertEqual(loaded.records.first { $0.id == project.id }?.workspaceID, moveProject || includeRelated ? target.id : project.workspaceID)
+                XCTAssertEqual(movedFirst.workspaceID, !moveProject || includeRelated ? target.id : first.workspaceID)
+                XCTAssertEqual(movedDisabled.workspaceID, includeRelated ? target.id : disabled.workspaceID)
+                XCTAssertEqual(movedDisabled.isEnabled, false)
+                XCTAssertEqual(movedFirst.name, first.name)
+                XCTAssertEqual(movedFirst.command, first.command)
+                XCTAssertEqual(movedFirst.sourceIdentity, first.sourceIdentity)
+                XCTAssertEqual(movedFirst.sourceProjectID, first.sourceProjectID)
+                XCTAssertEqual(movedFirst.projectID, project.id)
+                XCTAssertEqual(movedFirst.deletedProjectPath, includeRelated ? nil : root.path)
+                XCTAssertEqual(movedFirst.associatedProject(in: loaded.records)?.id, includeRelated ? project.id : nil)
+                XCTAssertEqual(movedFirst.workingDirectory, includeRelated ? "api" : root.appendingPathComponent("api").path)
+                XCTAssertEqual(loaded.runConfigurations.first { $0.id == unrelated.id }, unrelated)
+                XCTAssertEqual(loaded.runConfigurations.first { $0.id == sourceOnly.id }, sourceOnly)
+                XCTAssertEqual(loaded.ignoredProjects.count, moveProject || includeRelated ? 1 : 0)
+                if moveProject || includeRelated {
+                    var scanned = loaded
+                    scanned.mergeDiscovered([root.path])
+                    XCTAssertFalse(scanned.records.contains { $0.workspaceID == Workspace.defaultWorkspace.id })
+                    scanned.addDirect([root.path])
+                    XCTAssertEqual(scanned.records.filter { $0.workspaceID == Workspace.defaultWorkspace.id }.count, 1)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testSeparatedMovesStayInvalidUntilExplicitRelinkingAndFailedMovesRollback() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let target = Workspace(id: "target", name: "目标")
+        let project = ProjectRecord(id: "project", path: root.path, discoveredAt: Date())
+        let configuration = ProjectRunConfiguration(id: "run", projectID: project.id, name: "服务", command: "pwd", workingDirectory: "")
+        let file = root.appendingPathComponent("records.json")
+        let store = ProjectRecordStore(fileURL: file)
+        try store.save(ProjectRecordDocument(records: [project], runConfigurations: [configuration], workspaces: [.defaultWorkspace, target]))
+        let model = ProjectsViewModel(store: store)
+        let original = model.document
+        let originalData = try Data(contentsOf: file)
+        XCTAssertFalse(model.move(.project(project.id), to: "missing", includingRelated: true))
+        XCTAssertFalse(model.move(.configuration("missing"), to: target.id, includingRelated: true))
+        XCTAssertFalse(model.move(.project(project.id), to: project.workspaceID, includingRelated: true))
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
+        XCTAssertFalse(model.move(.project(project.id), to: target.id, includingRelated: true))
+        XCTAssertEqual(model.document, original)
+        XCTAssertEqual(try Data(contentsOf: file), originalData)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        XCTAssertTrue(model.move(.configuration(configuration.id), to: target.id, includingRelated: false))
+        XCTAssertNil(model.document.moveContents(for: .configuration(configuration.id), includingRelated: true)?.project)
+        XCTAssertTrue(model.move(.project(project.id), to: target.id, includingRelated: true))
+        let reloaded = ProjectsViewModel(store: store)
+        var invalid = try XCTUnwrap(reloaded.runConfigurations().first)
+        XCTAssertNil(invalid.associatedProject(in: reloaded.records))
+        XCTAssertTrue(reloaded.runConfigurations(projectID: project.id).isEmpty)
+        XCTAssertTrue(reloaded.updateRunConfiguration(invalid, name: "改名", command: "pwd", workingDirectory: invalid.workingDirectory))
+        invalid = try XCTUnwrap(reloaded.runConfigurations().first)
+        XCTAssertNotNil(invalid.deletedProjectPath)
+        XCTAssertTrue(reloaded.updateRunConfiguration(invalid, name: invalid.name, command: invalid.command, workingDirectory: invalid.workingDirectory, reassociateProject: true))
+        let restored = try XCTUnwrap(try store.load().runConfigurations.first)
+        XCTAssertNil(restored.deletedProjectPath)
+        XCTAssertEqual(restored.associatedProject(in: reloaded.records)?.id, project.id)
+        XCTAssertEqual(restored.workingDirectory, root.path)
+    }
     @MainActor
     func testNestedProjectBoundariesAndIgnoredDirectoriesDoNotLeakBetweenWorkspaces() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -204,7 +294,10 @@ final class ProjectRecordsTests: XCTestCase {
         model.remove(first)
         XCTAssertEqual(model.records.map(\.id), [second.id])
         XCTAssertEqual(Set(model.runConfigurations().map(\.id)), [firstRun.id, secondRun.id])
-        XCTAssertEqual(model.runConfigurations(projectID: first.id).first?.projectID, first.id)
+        let retained = try XCTUnwrap(model.runConfigurations().first { $0.id == firstRun.id })
+        XCTAssertEqual(retained.projectID, first.id)
+        XCTAssertNil(retained.associatedProject(in: model.records))
+        XCTAssertTrue(model.runConfigurations(projectID: first.id).isEmpty)
         XCTAssertFalse(model.isSuggestionSourceAvailable(firstRun))
         XCTAssertTrue(model.isSuggestionSourceAvailable(secondRun))
         XCTAssertEqual(try store.load().records.first?.title, "Worker")
@@ -1177,6 +1270,12 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(model.records(matching: "ALP").map(\.title), ["Alpha"])
         XCTAssertEqual(model.records(matching: "nested").map(\.title), ["beta"])
         XCTAssertEqual(model.records(matching: "").map(\.title), ["Alpha", "beta"])
+        XCTAssertEqual(model.records(matching: "  ", summary: .undeclared).map(\.title), ["Alpha", "beta"])
+        XCTAssertEqual(model.records(matching: " ALP ", summary: .undeclared).map(\.title), ["Alpha"])
+        XCTAssertTrue(model.records(matching: "Alpha", summary: .satisfied).isEmpty)
+        XCTAssertTrue(model.records(matching: "missing", summary: .undeclared).isEmpty)
+        _ = try XCTUnwrap(model.createWorkspace(name: "Other"))
+        XCTAssertTrue(model.records(matching: "", summary: .undeclared).isEmpty)
     }
 
     @MainActor
@@ -1204,6 +1303,8 @@ final class ProjectRecordsTests: XCTestCase {
         XCTAssertEqual(model.analyses[try XCTUnwrap(model.records.first).id], previous)
         XCTAssertTrue(model.staleProjectIDs.contains(try XCTUnwrap(model.records.first).id))
         XCTAssertEqual(model.summary(for: try XCTUnwrap(model.records.first)), .unavailable)
+        XCTAssertEqual(model.records(matching: "project", summary: .unavailable).map(\.id), model.records.map(\.id))
+        XCTAssertTrue(model.records(matching: "", summary: previous.summary).isEmpty)
         try? FileManager.default.removeItem(at: directory)
     }
 

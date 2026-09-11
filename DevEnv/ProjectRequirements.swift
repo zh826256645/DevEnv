@@ -7,7 +7,7 @@ enum ProjectRequirementSatisfactionState: String, Codable, Equatable, Sendable {
     case declarationConflict
 }
 
-enum ProjectRequirementsSummary: String, Codable, Equatable, Sendable {
+enum ProjectRequirementsSummary: String, Codable, CaseIterable, Equatable, Sendable {
     case satisfied
     case unsatisfied
     case undetermined
