@@ -888,14 +888,14 @@ final class ProjectRunSessionsTests: XCTestCase {
 
     func testOverviewAdaptsTableRowsWithoutMaximum() {
         XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 322, itemCount: 4), 2)
-        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 331, itemCount: 4), 2)
-        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 332, itemCount: 4), 3)
-        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 363, itemCount: 4), 3)
-        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 364, itemCount: 4), 4)
-        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 420, itemCount: 5), 4)
-        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 432, itemCount: 5), 5)
-        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 536, itemCount: 7), 6)
-        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 568, itemCount: 7), 7)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 345, itemCount: 4), 2)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 346, itemCount: 4), 3)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 377, itemCount: 4), 3)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 378, itemCount: 4), 4)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 434, itemCount: 5), 4)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 446, itemCount: 5), 5)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 550, itemCount: 7), 6)
+        XCTAssertEqual(overviewVisibleRunLimit(cardHeight: 582, itemCount: 7), 7)
     }
 
     func testListenerBindingTextPreservesAddressFamily() {

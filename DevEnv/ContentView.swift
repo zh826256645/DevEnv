@@ -398,7 +398,7 @@ func overviewVisibleRunLimit(cardHeight: CGFloat, itemCount: Int) -> Int {
     guard itemCount > 0 else { return 0 }
     return (1...itemCount).reversed().first { count in
         let footerHeight: CGFloat = itemCount > count ? 36 : 0
-        let tableChromeHeight: CGFloat = 92
+        let tableChromeHeight: CGFloat = 106
         let rowHeight: CGFloat = 68
         return tableChromeHeight + CGFloat(count) * rowHeight + footerHeight <= cardHeight
     } ?? 1
@@ -608,7 +608,9 @@ struct ContentView: View {
     }
 
     private struct OverviewRunTableColumns {
-        let configuration: CGFloat
+        let workspace: CGFloat
+        let project: CGFloat
+        let spacing: CGFloat
         let port: CGFloat
         let status: CGFloat
         let duration: CGFloat
@@ -616,13 +618,15 @@ struct ContentView: View {
         let actions: CGFloat
 
         init(availableWidth: CGFloat) {
-            let compact = availableWidth < 900
-            configuration = compact ? 122 : 148
-            port = compact ? 72 : 86
-            status = compact ? 80 : 90
-            duration = compact ? 78 : 92
-            memory = compact ? 82 : 96
-            actions = compact ? 76 : 86
+            let compact = availableWidth < 1000
+            workspace = compact ? 72 : 100
+            project = compact ? 106 : 152
+            spacing = compact ? 8 : 12
+            port = compact ? 56 : 72
+            status = compact ? 76 : 90
+            duration = compact ? 64 : 84
+            memory = compact ? 68 : 84
+            actions = compact ? 102 : 124
         }
     }
 
@@ -721,6 +725,7 @@ struct ContentView: View {
     @State private var projectStatusFilter: ProjectRequirementsSummary?
     @State private var showsIgnoredProjects = false
     @State private var projectDetailTab = "详情"
+    @State private var overviewWorkspaceFilterID: String?
     @State private var runProjectFilterID: String?
     @State private var isRunSuggestionsExpanded = false
     @State private var isShowingRunConfigurationEditor = false
@@ -3742,7 +3747,10 @@ struct ContentView: View {
     private func overviewPage(_ snapshot: MachineSnapshot) -> some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let result = overviewAttention(snapshot, now: context.date)
-            let runs = result.runs.compactMap(overviewRun)
+            let runs = result.runs
+                .filter { overviewWorkspaceFilterID == nil || $0.configuration.workspaceID == overviewWorkspaceFilterID }
+                .compactMap(overviewRun)
+            let runCardHeight: CGFloat = runs.isEmpty ? 160 : 106 + CGFloat(runs.count) * 68
 
             VStack(alignment: .leading, spacing: 12) {
                 overviewHeader(snapshot, now: context.date)
@@ -3755,7 +3763,7 @@ struct ContentView: View {
                     overviewRunningCard(runs, visibleLimit: visibleRunLimit, now: context.date)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(minHeight: 322)
+                .frame(minHeight: min(322, runCardHeight), maxHeight: runCardHeight)
 
                 overviewEnvironmentSummary(snapshot)
                 overviewBaseConfiguration(snapshot)
@@ -3808,23 +3816,56 @@ struct ContentView: View {
                             .padding(.vertical, 2)
                             .background(Color.primary.opacity(0.07), in: Capsule())
                     }
-                    Text("当前活动及异常的项目运行会话")
+                    Text("当前活动及异常的运行会话")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Picker("所属工作区", selection: $overviewWorkspaceFilterID) {
+                    Text("全部工作区").tag(nil as String?)
+                    ForEach(projectsModel.document.workspaces) { workspace in
+                        Text(workspace.name).tag(Optional(workspace.id))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 142)
+                .controlSize(.large)
+                .onChange(of: projectsModel.document.workspaces.map(\.id)) { _, ids in
+                    if let selected = overviewWorkspaceFilterID, !ids.contains(selected) {
+                        overviewWorkspaceFilterID = nil
+                    }
+                }
+
+                Button {
+                    model.refreshDynamicStatus()
+                    runCoordinator.refreshProjects()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .medium))
+                        .frame(width: 34, height: 34)
+                        .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.10)))
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshingCurrentPage)
+                .help("刷新运行会话与项目状态")
+                .accessibilityLabel("刷新运行会话")
             }
             .padding(.horizontal, 16)
-            .frame(height: 54)
+            .frame(height: 68)
 
             Divider()
 
             if runs.isEmpty {
                 Button {
+                    if let workspaceID = overviewWorkspaceFilterID {
+                        _ = projectsModel.selectWorkspace(workspaceID)
+                    }
                     selectPage(.runs)
                 } label: {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("当前没有运行会话")
+                        Text(overviewWorkspaceFilterID == nil ? "当前没有运行会话" : "此工作区没有运行会话")
                             .font(.callout.weight(.semibold))
                         Text("启动运行配置后，会在这里显示实时状态")
                             .font(.callout)
@@ -3852,6 +3893,9 @@ struct ContentView: View {
 
                         if runs.count > visibleRuns.count {
                             Button {
+                                if let workspaceID = overviewWorkspaceFilterID {
+                                    _ = projectsModel.selectWorkspace(workspaceID)
+                                }
                                 selectPage(.runs)
                             } label: {
                                 HStack(spacing: 5) {
@@ -3871,15 +3915,18 @@ struct ContentView: View {
                 }
             }
         }
-        .overviewCard()
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overviewCard(cornerRadius: 12)
     }
 
     private func overviewRunTableHeader(_ columns: OverviewRunTableColumns) -> some View {
-        HStack(spacing: 12) {
-            Text("项目")
-                .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: columns.spacing) {
             Text("运行配置")
-                .frame(width: columns.configuration, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("所属工作区")
+                .frame(width: columns.workspace, alignment: .leading)
+            Text("关联项目")
+                .frame(width: columns.project, alignment: .leading)
             Text("端口")
                 .frame(width: columns.port)
             Text("状态")
@@ -3906,16 +3953,27 @@ struct ContentView: View {
     ) -> some View {
         let tint = overviewRunColor(run.session.state)
         let canStop = run.session.state.isLive && run.session.state != .stopping
+        let workspaceName = projectsModel.document.workspaces.first { $0.id == run.configuration.workspaceID }?.name ?? "未知工作区"
 
-        return HStack(spacing: 12) {
+        return HStack(spacing: columns.spacing) {
             Button {
                 openOverviewRun(run)
             } label: {
-                HStack(spacing: 12) {
-                    overviewRunProjectCell(run)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: columns.spacing) {
                     overviewRunConfigurationCell(run)
-                        .frame(width: columns.configuration, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Label {
+                        Text(workspaceName)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    } icon: {
+                        Image(systemName: "folder").foregroundStyle(AppTheme.accent)
+                    }
+                    .font(.callout)
+                    .frame(width: columns.workspace, alignment: .leading)
+                    .help(workspaceName)
+                    overviewRunProjectCell(run)
+                        .frame(width: columns.project, alignment: .leading)
                     Text(overviewPortsText(run))
                         .font(.callout.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -3948,15 +4006,16 @@ struct ContentView: View {
                 Button {
                     openOverviewRun(run)
                 } label: {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .frame(width: 30, height: 30)
-                        .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
+                    Label("终端", systemImage: "terminal")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AppTheme.accent)
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                        .background(AppTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppTheme.accent.opacity(0.10)))
                 }
                 .buttonStyle(.plain)
                 .help("进入会话")
-                .accessibilityLabel("进入 \(run.project?.title ?? "独立运行") 运行会话")
+                .accessibilityLabel("打开 \(run.configuration.name) 的终端")
 
                 Button(role: .destructive) {
                     runCoordinator.stop(configurationID: run.configuration.id)
@@ -3964,7 +4023,7 @@ struct ContentView: View {
                     Image(systemName: run.session.state == .stopping ? "hourglass" : "stop.fill")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(canStop ? Color.red : Color.secondary)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 30, height: 32)
                         .background(
                             (canStop ? Color.red : Color.secondary).opacity(0.08),
                             in: RoundedRectangle(cornerRadius: 7)
@@ -3973,7 +4032,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .disabled(!canStop)
                 .help(run.session.state == .stopping ? "正在停止" : "停止")
-                .accessibilityLabel("停止 \(run.project?.title ?? "独立运行") 运行会话")
+                .accessibilityLabel("停止 \(run.configuration.name)")
             }
             .frame(width: columns.actions)
         }
@@ -3984,44 +4043,46 @@ struct ContentView: View {
     }
 
     private func overviewRunProjectCell(_ run: OverviewRun) -> some View {
-        HStack(spacing: 10) {
-            overviewRunLogo(run)
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 17))
+                .foregroundStyle(AppTheme.accent)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 7) {
-                    Text(run.project?.title ?? "独立运行")
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text(repositoryStateText(run.repositoryState))
-                        .font(.caption2.monospaced().weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 5))
-                }
-                Text(run.project?.path ?? run.session.currentExecution?.workingDirectory ?? "")
+                Text(run.project?.title ?? "未关联项目")
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if run.project != nil {
+                    HStack(spacing: 5) {
+                        Circle().fill(.secondary).frame(width: 6, height: 6)
+                        Text(repositoryStateText(run.repositoryState))
+                            .lineLimit(1)
+                    }
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                }
             }
         }
+        .help(run.project.map { "\($0.path)\n\(repositoryStateText(run.repositoryState))" } ?? "未关联项目")
     }
 
     private func overviewRunConfigurationCell(_ run: OverviewRun) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            let workspaceName = projectsModel.document.workspaces.first { $0.id == run.configuration.workspaceID }?.name ?? "未知工作区"
-            Text("\(workspaceName) · \(run.configuration.name)")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Text(run.session.lastSuccessfulCommand ?? run.configuration.command)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+        HStack(spacing: 12) {
+            runConfigurationLogo(run.configuration, size: 42)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(run.configuration.name)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(run.session.lastSuccessfulCommand ?? run.configuration.command)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
+        .help("\(run.configuration.name)\n\(run.session.lastSuccessfulCommand ?? run.configuration.command)")
     }
 
     private func overviewRunStatusBadge(_ state: ProjectRunSessionState, tint: Color) -> some View {
@@ -4052,20 +4113,6 @@ struct ContentView: View {
         runProjectFilterID = nil
         runSearchText = ""
         runStatusFilter = .all
-    }
-
-    @ViewBuilder
-    private func overviewRunLogo(_ run: OverviewRun) -> some View {
-        if let brand = runConfigurationBrand(run.configuration) {
-            runtimeLogo(brand, size: 40, padding: 7, cornerRadius: 9)
-        } else {
-            Image(systemName: "terminal.fill")
-                .font(.system(size: 19, weight: .medium))
-                .foregroundStyle(.blue)
-                .frame(width: 40, height: 40)
-                .background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .accessibilityHidden(true)
-        }
     }
 
     private func runConfigurationBrand(_ configuration: ProjectRunConfiguration) -> (assetName: String, color: Color)? {
