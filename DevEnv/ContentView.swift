@@ -735,7 +735,11 @@ struct ContentView: View {
     @State private var isShowingWorkspaceEditor = false
     @State private var renamingWorkspaceID: String?
     @State private var workspaceNameDraft = ""
-    @State private var runConfigurationProjectID = ""
+    @State private var movingTarget: WorkspaceMoveTarget?
+    @State private var moveDestinationID = ""
+    @State private var moveIncludingRelated = true
+    @State private var moveError: String?
+    @State private var runConfigurationProjectID: String? = ""
     @State private var runConfigurationName = ""
     @State private var runConfigurationCommand = ""
     @State private var runConfigurationWorkingDirectory = "."
@@ -762,6 +766,7 @@ struct ContentView: View {
         navigation(model.snapshot)
         .frame(minWidth: 1100, minHeight: 720)
         .sheet(isPresented: $isShowingWorkspaceEditor) { workspaceEditor }
+        .sheet(item: $movingTarget) { workspaceMoveSheet($0) }
         .onChange(of: projectsModel.currentWorkspace.id) { _, _ in
             selectedProjectIDs.removeAll()
             isSelectingProjects = false
@@ -939,7 +944,9 @@ struct ContentView: View {
 
     var body: some View {
         mainContent
-        .onChange(of: projectsModel.document.runConfigurations.map(\.id)) { _, ids in
+        .onChange(of: projectsModel.document.runConfigurations.filter {
+            $0.workspaceID == projectsModel.currentWorkspace.id
+        }.map(\.id)) { _, ids in
             if let id = selectedRunConfigurationID, !ids.contains(id) { selectedRunConfigurationID = nil }
             if let configuration = expandedTerminalConfiguration, !ids.contains(configuration.id) { expandedTerminalConfiguration = nil }
             if let configuration = editingRunConfiguration, !ids.contains(configuration.id) {
@@ -1655,7 +1662,7 @@ struct ContentView: View {
                 configuration,
                 state: runCoordinator.session(for: configuration.id)?.state ?? .inactive,
                 searchText: runSearchText,
-                projectTitle: projectsModel.records.first { $0.id == configuration.projectID }?.title ?? (configuration.projectID == nil ? "" : configuration.missingProjectTitle)
+                projectTitle: configuration.associatedProject(in: projectsModel.records)?.title ?? (configuration.projectID == nil ? "" : configuration.missingProjectTitle)
             )
         }
     }
@@ -1833,7 +1840,7 @@ struct ContentView: View {
     }
 
     private func runConfigurationRow(_ configuration: ProjectRunConfiguration, detailColumnCount: Int) -> some View {
-        let project = projectsModel.records.first { $0.id == configuration.projectID }
+        let project = configuration.associatedProject(in: projectsModel.records)
         let state = runCoordinator.session(for: configuration.id)?.state ?? .inactive
         let isSelected = selectedRunConfiguration?.id == configuration.id
         return HStack(spacing: 10) {
@@ -1940,7 +1947,7 @@ struct ContentView: View {
     }
 
     private func runConfigurationDetail(_ configuration: ProjectRunConfiguration) -> some View {
-        let project = projectsModel.records.first { $0.id == configuration.projectID }
+        let project = configuration.associatedProject(in: projectsModel.records)
         let session = runCoordinator.session(for: configuration.id)
         let state = session?.state ?? .inactive
         return VStack(alignment: .leading, spacing: 0) {
@@ -2034,7 +2041,7 @@ struct ContentView: View {
     }
 
     private func runInspectorHeader(_ configuration: ProjectRunConfiguration) -> some View {
-        let project = projectsModel.records.first { $0.id == configuration.projectID }
+        let project = configuration.associatedProject(in: projectsModel.records)
         let session = runCoordinator.session(for: configuration.id)
         let state = session?.state ?? .inactive
         let projectUnavailable = (configuration.projectID != nil && project == nil) || project?.availability.isUnavailable == true
@@ -2146,6 +2153,7 @@ struct ContentView: View {
             .disabled(projectsModel.mutationsArePaused || runCoordinator.activeDeletion?.configurationIDs.contains(configuration.id) == true)
         Button("复制配置") { beginDuplicatingRunConfiguration(configuration) }
             .disabled(projectsModel.mutationsArePaused)
+        workspaceMoveButton(.configuration(configuration.id))
         Button(configuration.isEnabled ? "禁用配置" : "启用配置") {
             runCoordinator.setRunConfigurationEnabled(configuration, isEnabled: !configuration.isEnabled)
         }
@@ -2158,6 +2166,7 @@ struct ContentView: View {
     private func beginDuplicatingRunConfiguration(_ configuration: ProjectRunConfiguration) {
         beginEditingRunConfiguration(configuration)
         editingRunConfiguration = nil
+        if runConfigurationProjectID == nil { runConfigurationProjectID = "" }
         runConfigurationName = "\(configuration.name) 副本"
         runConfigurationSourceIdentity = nil
         runConfigurationSourceProjectID = nil
@@ -2397,14 +2406,14 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                     runConfigurationEditorField("项目", systemImage: "folder") {
                         Picker("项目", selection: $runConfigurationProjectID) {
-                            Text("不关联项目").tag("")
+                            Text("不关联项目").tag(Optional(""))
                             if let configuration = editingRunConfiguration,
-                               let projectID = configuration.projectID,
-                               !projectsModel.workspaceRecords.contains(where: { $0.id == projectID }) {
-                                Text(configuration.missingProjectTitle).tag(projectID)
+                               configuration.projectID != nil,
+                               configuration.associatedProject(in: projectsModel.records) == nil {
+                                Text(configuration.missingProjectTitle).tag(nil as String?)
                             }
                             ForEach(projectsModel.workspaceRecords) { project in
-                                Text(project.title).tag(project.id)
+                                Text(project.title).tag(Optional(project.id))
                             }
                         }
                         .pickerStyle(.menu)
@@ -2569,7 +2578,8 @@ struct ContentView: View {
 
     private func beginEditingRunConfiguration(_ configuration: ProjectRunConfiguration) {
         editingRunConfiguration = configuration
-        runConfigurationProjectID = configuration.projectID ?? ""
+        runConfigurationProjectID = configuration.projectID != nil && configuration.associatedProject(in: projectsModel.records) == nil
+            ? nil : configuration.projectID ?? ""
         runConfigurationName = configuration.name
         runConfigurationCommand = configuration.command
         runConfigurationWorkingDirectory = configuration.workingDirectory
@@ -2583,16 +2593,19 @@ struct ContentView: View {
         runConfigurationSaveAttempted = true
         let succeeded: Bool
         if var editingRunConfiguration {
-            editingRunConfiguration.projectID = runConfigurationProjectID.isEmpty ? nil : runConfigurationProjectID
+            if let runConfigurationProjectID {
+                editingRunConfiguration.projectID = runConfigurationProjectID.isEmpty ? nil : runConfigurationProjectID
+            }
             succeeded = runCoordinator.updateRunConfiguration(
                 editingRunConfiguration,
                 name: runConfigurationName,
                 command: runConfigurationCommand,
-                workingDirectory: runConfigurationWorkingDirectory
+                workingDirectory: runConfigurationWorkingDirectory,
+                reassociateProject: runConfigurationProjectID?.isEmpty == false
             )
         } else {
             succeeded = runCoordinator.createRunConfiguration(
-                projectID: runConfigurationProjectID.isEmpty ? nil : runConfigurationProjectID,
+                projectID: runConfigurationProjectID?.isEmpty == false ? runConfigurationProjectID : nil,
                 name: runConfigurationName,
                 command: runConfigurationCommand,
                 workingDirectory: runConfigurationWorkingDirectory,
@@ -2873,6 +2886,71 @@ struct ContentView: View {
             .font(.caption.weight(.medium)).foregroundStyle(projectSummaryColor(summary)).lineLimit(1)
     }
 
+    private var workspaceMoveUnavailable: Bool {
+        projectsModel.document.workspaces.count < 2 || projectsModel.mutationsArePaused
+            || projectsModel.isScanning || runCoordinator.activeDeletion != nil
+    }
+
+    private func workspaceMoveButton(_ target: WorkspaceMoveTarget) -> some View {
+        Button("移动到工作区…") {
+            moveDestinationID = projectsModel.document.workspaces.first { $0.id != projectsModel.currentWorkspace.id }?.id ?? ""
+            moveIncludingRelated = true
+            moveError = nil
+            movingTarget = target
+        }
+        .disabled(workspaceMoveUnavailable)
+        .help(projectsModel.document.workspaces.count < 2 ? "请先创建其他工作区" : "移动到另一个工作区，保持当前运行")
+    }
+
+    private func workspaceMoveSheet(_ target: WorkspaceMoveTarget) -> some View {
+        let single = projectsModel.document.moveContents(for: target, includingRelated: false)
+        let related = projectsModel.document.moveContents(for: target, includingRelated: true)
+        let contents = moveIncludingRelated ? related : single
+        let movesProject: Bool = if case .project = target { true } else { false }
+        let hasRelated = movesProject ? related?.configurations.isEmpty == false : related?.project != nil
+        let name = single?.project?.title ?? single?.configurations.first?.name ?? ""
+        let sourceID = single?.project?.workspaceID ?? single?.configurations.first?.workspaceID
+        let destinations = projectsModel.document.workspaces.filter { $0.id != sourceID }
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("移动到工作区").font(.headline)
+            Text(name).font(.subheadline).lineLimit(2)
+            Picker("目标工作区", selection: $moveDestinationID) {
+                ForEach(destinations) { Text($0.name).tag($0.id) }
+            }
+            if hasRelated {
+                Toggle(movesProject ? "同时移动项目相关的配置" : "同时移动关联项目及项目相关的其他配置", isOn: $moveIncludingRelated)
+            }
+            Text("将移动 \(contents?.project == nil ? 0 : 1) 个项目、\(contents?.configurations.count ?? 0) 个运行配置。")
+            if hasRelated && !moveIncludingRelated {
+                Label(movesProject
+                    ? "留在原工作区的 \(related?.configurations.count ?? 0) 个配置将失去项目关联。"
+                    : "移动的配置将失去项目关联。", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                Text("当前运行继续；后续启动或重启前，需显式解除或重新关联项目。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("不会修改磁盘目录或中断运行。完成后留在当前工作区。")
+                .font(.caption).foregroundStyle(.secondary)
+            if let moveError { Text(moveError).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel) { movingTarget = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("移动") {
+                    if runCoordinator.move(target, to: moveDestinationID, includingRelated: moveIncludingRelated) {
+                        movingTarget = nil
+                    } else {
+                        moveError = projectsModel.operationError ?? "内容或工作区已变化，请重新选择后重试。"
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(workspaceMoveUnavailable || contents == nil || !destinations.contains { $0.id == moveDestinationID })
+            }
+        }
+        .padding(24)
+        .frame(width: 480)
+    }
+
     private func projectActionsMenu(_ project: ProjectRecord) -> some View {
         Menu {
             Button("查看运行配置") { openRuns(for: project) }
@@ -2881,6 +2959,7 @@ struct ContentView: View {
                 renamingProject = project
             }
             .disabled(projectsModel.mutationsArePaused)
+            workspaceMoveButton(.project(project.id))
             Divider()
             Button("移除项目记录", role: .destructive) { pendingProjectRemovalIDs = [project.id] }
                 .disabled(projectsModel.isScanning || projectsModel.mutationsArePaused)
@@ -4116,7 +4195,8 @@ struct ContentView: View {
     }
 
     private func runConfigurationBrand(_ configuration: ProjectRunConfiguration) -> (assetName: String, color: Color)? {
-        guard let projectID = configuration.projectID, let analysis = projectsModel.analyses[projectID] else { return nil }
+        guard let project = configuration.associatedProject(in: projectsModel.records),
+              let analysis = projectsModel.analyses[project.id] else { return nil }
         let componentCapabilities = analysis.components
             .first { $0.relativePath == configuration.workingDirectory }?
             .requirements.map(\.capability) ?? []
@@ -4404,7 +4484,7 @@ struct ContentView: View {
 
     private func overviewAttention(_ snapshot: MachineSnapshot, now: Date) -> OverviewAttentionResult {
         let runs = runCoordinator.runConfigurations().compactMap { configuration -> OverviewAttentionRunInput? in
-            let project = projectsModel.records.first { $0.id == configuration.projectID }
+            let project = configuration.associatedProject(in: projectsModel.records)
             guard let session = runCoordinator.session(for: configuration.id) else { return nil }
             return OverviewAttentionRunInput(
                 configuration: configuration,

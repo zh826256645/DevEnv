@@ -98,7 +98,8 @@ enum ProjectRunSessionSummaryCategory: Equatable, Sendable {
 }
 
 struct ProjectRunFrozenStartRequest: Equatable, Sendable {
-    let configuration: ProjectRunConfiguration
+    var configuration: ProjectRunConfiguration
+    var preservesProjectContextAfterMove = false
     let projectRoot: String?
     let command: String
     let workingDirectory: String
@@ -970,7 +971,8 @@ final class ProjectRunCoordinator: ObservableObject {
         _ configuration: ProjectRunConfiguration,
         name: String,
         command: String,
-        workingDirectory: String
+        workingDirectory: String,
+        reassociateProject: Bool = false
     ) -> Bool {
         guard activeDeletion?.configurationIDs.contains(configuration.id) != true,
               let remembered = projectsModel.runConfigurations().first(where: { $0.id == configuration.id }),
@@ -979,7 +981,8 @@ final class ProjectRunCoordinator: ObservableObject {
                   name: name,
                   command: command,
                   workingDirectory: workingDirectory,
-                  rememberCommand: false
+                  rememberCommand: false,
+                  reassociateProject: reassociateProject
               ) else { return false }
         if command == remembered.command {
             commandDrafts.removeValue(forKey: configuration.id)
@@ -995,6 +998,33 @@ final class ProjectRunCoordinator: ObservableObject {
         guard isEnabled || sessions[configuration.id]?.state.isLive != true,
               projectsModel.setRunConfigurationEnabled(configuration, isEnabled: isEnabled) else {
             return false
+        }
+        objectWillChange.send()
+        return true
+    }
+
+    @discardableResult
+    func move(_ target: WorkspaceMoveTarget, to workspaceID: String, includingRelated: Bool) -> Bool {
+        guard activeDeletion == nil else { return false }
+        let restarts = sessions.values.compactMap { session -> ProjectRunFrozenStartRequest? in
+            guard let request = session.pendingRestart,
+                  (try? validateProjectContext(
+                      request.configuration, projectRoot: request.projectRoot,
+                      preservesProjectContextAfterMove: request.preservesProjectContextAfterMove
+                  )) != nil else { return nil }
+            return request
+        }
+        guard projectsModel.move(target, to: workspaceID, includingRelated: includingRelated) else { return false }
+        for var request in restarts {
+            guard let current = projectsModel.document.runConfigurations.first(where: { $0.id == request.configuration.id }),
+                  current.workspaceID != request.configuration.workspaceID
+                    || current.deletedProjectPath != request.configuration.deletedProjectPath else { continue }
+            // Only ownership changes; the submitted command and directory remain frozen.
+            request.configuration.workspaceID = current.workspaceID
+            request.configuration.deletedProjectTitle = current.deletedProjectTitle
+            request.configuration.deletedProjectPath = current.deletedProjectPath
+            request.preservesProjectContextAfterMove = true
+            sessions[current.id]?.pendingRestart = request
         }
         objectWillChange.send()
         return true
@@ -1161,8 +1191,8 @@ final class ProjectRunCoordinator: ObservableObject {
                   sessions[configuration.id]?.activeExecution == nil else {
                 return nil
             }
-            if let projectID = configuration.projectID {
-                guard let project = projectsModel.records.first(where: { $0.id == projectID }),
+            if configuration.projectID != nil {
+                guard let project = configuration.associatedProject(in: projectsModel.records),
                       !project.availability.isUnavailable else { return nil }
             }
             return configuration
@@ -1177,7 +1207,7 @@ final class ProjectRunCoordinator: ObservableObject {
         in scope: [ProjectRunConfiguration]
     ) -> ProjectRunBatchIntent {
         let requests: [ProjectRunFrozenStartRequest] = batchStartCandidates(in: scope).compactMap { configuration in
-            let project = projectsModel.records.first { $0.id == configuration.projectID }
+            let project = configuration.associatedProject(in: projectsModel.records)
             do {
                 try validateProjectContext(configuration, projectRoot: project?.path)
                 let directory = try ProjectRunWorkingDirectory.resolve(
@@ -1206,7 +1236,7 @@ final class ProjectRunCoordinator: ObservableObject {
 
     func submitBatchStart(_ intent: ProjectRunBatchIntent) {
         for request in intent.startRequests {
-            if let project = projectsModel.records.first(where: { $0.id == request.configuration.projectID }),
+            if let project = request.configuration.associatedProject(in: projectsModel.records),
                let message = availabilityMessage(project) {
                 _ = rejectStartRequest(request, message: message)
                 continue
@@ -1235,7 +1265,7 @@ final class ProjectRunCoordinator: ObservableObject {
         if let project, let message = availabilityMessage(project) {
             return rejectStartAttempt(configuration: configuration, projectRoot: project.path, workingDirectory: nil, message: message)
         }
-        return run(configuration, projectRoot: project?.path ?? projectsModel.records.first { $0.id == configuration.projectID }?.path)
+        return run(configuration, projectRoot: project?.path ?? configuration.associatedProject(in: projectsModel.records)?.path)
     }
 
     func run(_ configuration: ProjectRunConfiguration, projectRoot: String?) -> ProjectRunActionResult {
@@ -1296,7 +1326,7 @@ final class ProjectRunCoordinator: ObservableObject {
             failRestartAttempt(configuration: configuration, projectRoot: project.path, workingDirectory: nil, message: message)
             return
         }
-        restart(configuration, projectRoot: project?.path ?? projectsModel.records.first { $0.id == configuration.projectID }?.path)
+        restart(configuration, projectRoot: project?.path ?? configuration.associatedProject(in: projectsModel.records)?.path)
     }
 
     func restart(_ configuration: ProjectRunConfiguration, projectRoot: String?) {
@@ -1518,7 +1548,9 @@ final class ProjectRunCoordinator: ObservableObject {
         }
     }
 
-    private func validateProjectContext(_ configuration: ProjectRunConfiguration, projectRoot: String?) throws {
+    private func validateProjectContext(
+        _ configuration: ProjectRunConfiguration, projectRoot: String?, preservesProjectContextAfterMove: Bool = false
+    ) throws {
         guard let current = projectsModel.runConfigurations().first(where: { $0.id == configuration.id }),
               current.workspaceID == configuration.workspaceID,
               current.projectID == configuration.projectID else {
@@ -1528,16 +1560,25 @@ final class ProjectRunCoordinator: ObservableObject {
             guard projectRoot == nil else { throw ProjectRunConfigurationError.projectNotFound }
             return
         }
-        guard let project = projectsModel.records.first(where: {
-            $0.id == projectID && $0.workspaceID == current.workspaceID
-        }), project.path == projectRoot else {
+        guard current.deletedProjectPath == configuration.deletedProjectPath else {
+            throw ProjectRunConfigurationError.projectNotFound
+        }
+        let project = preservesProjectContextAfterMove
+            ? projectsModel.records.first { $0.id == projectID }
+            : current.associatedProject(in: projectsModel.records)
+        guard let project, project.path == projectRoot else {
             throw ProjectRunConfigurationError.projectNotFound
         }
     }
 
     private func launch(_ request: ProjectRunFrozenStartRequest) -> ProjectRunActionResult {
         guard activeDeletion?.configurationIDs.contains(request.configuration.id) != true else { return .rejected("正在删除运行配置") }
-        do { try validateProjectContext(request.configuration, projectRoot: request.projectRoot) }
+        do {
+            try validateProjectContext(
+                request.configuration, projectRoot: request.projectRoot,
+                preservesProjectContextAfterMove: request.preservesProjectContextAfterMove
+            )
+        }
         catch { return rejectStartRequest(request, message: error.localizedDescription) }
         guard !request.command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !request.command.contains("\0") else {

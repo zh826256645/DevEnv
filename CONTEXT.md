@@ -26,6 +26,7 @@ _Avoid_: MySQL Requirement, MariaDB Requirement
 
 **Workspace**:
 用户手动创建、具有稳定身份和名称的项目与运行配置组织容器，本身不对应目录；每个项目记录和运行配置各自仅属于一个 Workspace，运行配置不以关联项目为存在前提。DevEnv 可以提供一个默认 Workspace。
+项目和运行配置可保持身份移动到其他 Workspace，并可携带当前有效关联内容；移动不修改磁盘目录、不打断运行，运行会话随配置归属移动。
 _Avoid_: Project Root, Working Directory, Git Worktree
 
 **Project Root**:
@@ -38,6 +39,7 @@ _Avoid_: Project Snapshot, Project Files, Directory Identity
 
 **Run Configuration**:
 DevEnv 保存、属于一个 Workspace 且可选关联该工作区内一个 Project Record 的独立运行意图，包含稳定身份、名称、命令、工作目录选择和可选来源身份；工作目录可以是绝对路径、项目相对路径或默认目录。它不以项目记录为存在前提，也不表示项目可运行。
+项目删除或项目与配置分开移动会使关联持续失效；后来进入同一 Workspace 也不自动恢复，需显式解除或重新关联。失效不终止当前执行，但阻止之后提交的新启动和重启；移动造成的失效也不取消移动前已提交的重启。
 _Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
 
 **Run Batch Intent**:
@@ -113,7 +115,7 @@ _Avoid_: Dynamic Status Freshness
 _Avoid_: Environment Snapshot Freshness
 
 **Ignored Project**:
-一个 Workspace 内因用户删除项目而不再由 Project Search Root 自动新增项目记录的目录；它不影响其他 Workspace 或仍指向该目录的项目记录。显式重新添加可以解除忽略，但不会恢复已删除项目的身份或旧配置关联。
+一个 Workspace 内因用户删除或移出项目而不再由 Project Search Root 自动新增项目记录的目录；它不影响其他 Workspace 或仍指向该目录的项目记录。显式重新添加可以解除忽略，但不会恢复已删除项目的身份或旧配置关联。
 _Avoid_: Deleted Project, Unavailable Project
 
 **Project Component**:

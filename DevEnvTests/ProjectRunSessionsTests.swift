@@ -7,6 +7,93 @@ import XCTest
 
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
+
+    func testWorkspaceMovesPreserveSessionsAndSubmittedRestartsButRejectLaterInvalidStarts() throws {
+        for moveProject in [true, false] {
+            for includeRelated in [true, false] {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: root) }
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                let configuration = ProjectRunConfiguration(id: "run", projectID: root.path, name: "服务", command: "sleep 30", workingDirectory: ".")
+                let sibling = ProjectRunConfiguration(id: "sibling", projectID: root.path, name: "后台", command: "worker", workingDirectory: "")
+                let fixture = try ProjectRunTestFixture(directory: root, configurations: [configuration, sibling], projectRoots: [root])
+                let target = try XCTUnwrap(fixture.projectsModel.createWorkspace(name: "目标"))
+                XCTAssertTrue(fixture.projectsModel.selectWorkspace(configuration.workspaceID))
+                let coordinator = fixture.coordinator
+                XCTAssertEqual(coordinator.run(configuration, projectRoot: root.path), .started)
+                XCTAssertEqual(coordinator.run(sibling, projectRoot: root.path), .started)
+                let session = try XCTUnwrap(coordinator.session(for: configuration.id))
+                let siblingSession = try XCTUnwrap(coordinator.session(for: sibling.id))
+                let execution = session.activeExecution
+                let siblingExecution = siblingSession.activeExecution
+                let engine = fixture.factory.engines[0]
+                let terminal = engine.terminalView
+                coordinator.restart(configuration, projectRoot: root.path)
+                let signals = engine.signals
+                let selection: WorkspaceMoveTarget = moveProject ? .project(root.path) : .configuration(configuration.id)
+                let beforeMove = fixture.projectsModel.document
+                try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
+                let failed = coordinator.move(selection, to: target.id, includingRelated: includeRelated)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+                XCTAssertFalse(failed)
+                XCTAssertEqual(fixture.projectsModel.document, beforeMove)
+                XCTAssertTrue(coordinator.move(selection, to: target.id, includingRelated: includeRelated))
+                XCTAssertEqual(fixture.projectsModel.currentWorkspace.id, configuration.workspaceID)
+                XCTAssertEqual(session.state, .restarting)
+                XCTAssertTrue(coordinator.session(for: configuration.id) === session)
+                XCTAssertTrue(session.terminalView === terminal)
+                XCTAssertEqual(session.activeExecution, execution)
+                XCTAssertEqual(siblingSession.activeExecution, siblingExecution)
+                XCTAssertTrue(fixture.factory.engines[1].signals.isEmpty)
+                XCTAssertEqual(engine.signals, signals)
+                XCTAssertEqual(engine.launches.count, 1)
+                let moved = try XCTUnwrap(coordinator.runConfigurations().first { $0.id == configuration.id })
+                XCTAssertEqual(moved.workspaceID, !moveProject || includeRelated ? target.id : configuration.workspaceID)
+                XCTAssertEqual(coordinator.runConfigurations(workspaceID: target.id).count, includeRelated ? 2 : (moveProject ? 0 : 1))
+                fixture.scheduler.runNext()
+                fixture.scheduler.runNext()
+                XCTAssertEqual(session.state, .running)
+                XCTAssertEqual(engine.launches.count, 2)
+                XCTAssertEqual(engine.launches.first, engine.launches.last)
+                XCTAssertNotEqual(session.activeExecution?.id, execution?.id)
+                XCTAssertTrue(session.terminalView === terminal)
+                if !includeRelated {
+                    coordinator.restart(moved, projectRoot: root.path)
+                    XCTAssertEqual(engine.launches.count, 2)
+                    XCTAssertTrue(coordinator.batchStartCandidates(in: [moved]).isEmpty)
+                }
+                coordinator.stop(configurationID: moved.id)
+                fixture.scheduler.runNext()
+                fixture.scheduler.runNext()
+                XCTAssertEqual(session.state, .stopped(137))
+                if !includeRelated {
+                    guard case .rejected = coordinator.run(moved) else { return XCTFail("失效关联不能再次启动") }
+                    XCTAssertEqual(engine.launches.count, 2)
+                } else {
+                    XCTAssertEqual(coordinator.run(moved), .started)
+                }
+            }
+        }
+    }
+
+    func testMovingIndependentConfigurationAndRepeatedMovesKeepFrozenRestartDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let independent = ProjectRunConfiguration(id: "independent", name: "独立", command: "pwd", workingDirectory: root.path)
+        let fixture = try ProjectRunTestFixture(directory: root, configurations: [independent], projectRoots: [])
+        let target = try XCTUnwrap(fixture.projectsModel.createWorkspace(name: "目标"))
+        let coordinator = fixture.coordinator
+        XCTAssertEqual(coordinator.run(independent), .started)
+        coordinator.restart(independent)
+        XCTAssertTrue(coordinator.move(.configuration(independent.id), to: target.id, includingRelated: true))
+        XCTAssertTrue(coordinator.move(.configuration(independent.id), to: independent.workspaceID, includingRelated: true))
+        fixture.scheduler.runNext()
+        fixture.scheduler.runNext()
+        XCTAssertEqual(coordinator.session(for: independent.id)?.state, .running)
+        XCTAssertEqual(fixture.factory.engines.first?.launches.count, 2)
+        XCTAssertEqual(fixture.factory.engines.first?.launches.last?.workingDirectory, root.path)
+    }
     func testWorkspaceRunFiltersPreserveLifecycleAndSearchProjectNames() {
         var configuration = ProjectRunConfiguration(name: "Web 前端", command: "npm run dev", workingDirectory: "")
         let cases: [(ProjectRunSessionState, Set<RunListStatusFilter>)] = [
