@@ -1719,18 +1719,17 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 GeometryReader { geometry in
-                    ScrollView(.horizontal) {
-                        VStack(spacing: 0) {
-                            runTableHeader
-                            ScrollView(.vertical) {
-                                LazyVStack(spacing: 0) {
-                                    ForEach(visibleRunConfigurations) { configuration in
-                                        runConfigurationRow(configuration)
-                                    }
+                    // Keep name, status and actions; add project, command, then ports as space permits.
+                    let detailColumnCount = [444.0, 554, 604].filter { geometry.size.width >= $0 }.count
+                    VStack(spacing: 0) {
+                        runTableHeader(detailColumnCount: detailColumnCount)
+                        ScrollView(.vertical) {
+                            LazyVStack(spacing: 0) {
+                                ForEach(visibleRunConfigurations) { configuration in
+                                    runConfigurationRow(configuration, detailColumnCount: detailColumnCount)
                                 }
                             }
                         }
-                        .frame(width: max(geometry.size.width, 604), height: geometry.size.height)
                     }
                 }
                 .padding(.horizontal, 14)
@@ -1807,13 +1806,19 @@ struct ContentView: View {
         }
     }
 
-    private var runTableHeader: some View {
+    private func runTableHeader(detailColumnCount: Int) -> some View {
         HStack(spacing: 10) {
-            Text("名称").frame(minWidth: 128, maxWidth: .infinity, alignment: .leading)
+            Text("名称").frame(minWidth: detailColumnCount > 0 ? 128 : 0, maxWidth: .infinity, alignment: .leading)
             Text("状态").frame(width: 76, alignment: .leading)
-            Text("关联项目").frame(width: 90, alignment: .leading)
-            Text("命令 / 启动方式").frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
-            Text("端口").frame(width: 40, alignment: .leading)
+            if detailColumnCount >= 1 {
+                Text("关联项目").frame(width: 90, alignment: .leading)
+            }
+            if detailColumnCount >= 2 {
+                Text("命令 / 启动方式").frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+            }
+            if detailColumnCount >= 3 {
+                Text("端口").frame(width: 40, alignment: .leading)
+            }
             Text("操作").frame(width: 94)
         }
         .font(.caption.weight(.medium)).foregroundStyle(.secondary)
@@ -1822,7 +1827,7 @@ struct ContentView: View {
         .accessibilityHidden(true)
     }
 
-    private func runConfigurationRow(_ configuration: ProjectRunConfiguration) -> some View {
+    private func runConfigurationRow(_ configuration: ProjectRunConfiguration, detailColumnCount: Int) -> some View {
         let project = projectsModel.records.first { $0.id == configuration.projectID }
         let state = runCoordinator.session(for: configuration.id)?.state ?? .inactive
         let isSelected = selectedRunConfiguration?.id == configuration.id
@@ -1833,22 +1838,28 @@ struct ContentView: View {
                         runConfigurationLogo(configuration, size: 28)
                         Text(configuration.name).fontWeight(.medium).lineLimit(1)
                     }
-                    .frame(minWidth: 128, maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: detailColumnCount > 0 ? 128 : 0, maxWidth: .infinity, alignment: .leading)
                     projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
                         .frame(width: 76, alignment: .leading)
-                    HStack(spacing: 6) {
-                        Image(systemName: project == nil ? "link.badge.plus" : "folder.fill")
-                            .foregroundStyle(project == nil ? Color.secondary : AppTheme.accent)
-                        Text(project?.title ?? (configuration.projectID == nil ? "未关联" : configuration.missingProjectTitle))
-                            .foregroundStyle(.secondary).lineLimit(1)
+                    if detailColumnCount >= 1 {
+                        HStack(spacing: 6) {
+                            Image(systemName: project == nil ? "link.badge.plus" : "folder.fill")
+                                .foregroundStyle(project == nil ? Color.secondary : AppTheme.accent)
+                            Text(project?.title ?? (configuration.projectID == nil ? "未关联" : configuration.missingProjectTitle))
+                                .foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        .frame(width: 90, alignment: .leading)
                     }
-                    .frame(width: 90, alignment: .leading)
-                    Text(configuration.command).font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(.secondary).lineLimit(1)
-                        .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
-                    Text(runPortsText(configuration)).monospacedDigit()
-                        .foregroundStyle(.secondary).lineLimit(1)
-                        .frame(width: 40, alignment: .leading)
+                    if detailColumnCount >= 2 {
+                        Text(configuration.command).font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary).lineLimit(1)
+                            .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+                    }
+                    if detailColumnCount >= 3 {
+                        Text(runPortsText(configuration)).monospacedDigit()
+                            .foregroundStyle(.secondary).lineLimit(1)
+                            .frame(width: 40, alignment: .leading)
+                    }
                 }
                 .frame(maxWidth: .infinity, minHeight: 58)
                 .contentShape(Rectangle())
@@ -2641,19 +2652,19 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 GeometryReader { geometry in
-                    ScrollView(.horizontal) {
-                        VStack(spacing: 0) {
-                            projectTableHeader
-                            ScrollView(.vertical) {
-                                LazyVStack(spacing: 0) {
-                                    ForEach(visibleProjects) { project in
-                                        projectListRow(project)
-                                            .onAppear { projectsModel.markDisplayed(project.id) }
-                                    }
+                    // Reserve the selection checkbox before adding count, Git and discovery date.
+                    let availableWidth = geometry.size.width - (isSelectingProjects ? 28 : 0)
+                    let detailColumnCount = [392.0, 494, 622].filter { availableWidth >= $0 }.count
+                    VStack(spacing: 0) {
+                        projectTableHeader(detailColumnCount: detailColumnCount)
+                        ScrollView(.vertical) {
+                            LazyVStack(spacing: 0) {
+                                ForEach(visibleProjects) { project in
+                                    projectListRow(project, detailColumnCount: detailColumnCount)
+                                        .onAppear { projectsModel.markDisplayed(project.id) }
                                 }
                             }
                         }
-                        .frame(width: max(geometry.size.width, 660), height: geometry.size.height)
                     }
                 }
                 .padding(.horizontal, 14)
@@ -2766,14 +2777,20 @@ struct ContentView: View {
         .disabled(projectsModel.mutationsArePaused || projectsModel.isScanning)
     }
 
-    private var projectTableHeader: some View {
+    private func projectTableHeader(detailColumnCount: Int) -> some View {
         HStack(spacing: 10) {
             if isSelectingProjects { Color.clear.frame(width: 18) }
-            Text("名称").frame(minWidth: 148, maxWidth: .infinity, alignment: .leading)
+            Text("名称").frame(minWidth: detailColumnCount > 0 ? 148 : 0, maxWidth: .infinity, alignment: .leading)
             Text("状态").frame(width: 88, alignment: .leading)
-            Text("运行配置数").frame(width: 68)
-            Text("Git").frame(width: 92, alignment: .leading)
-            Text("最近发现").frame(width: 118, alignment: .leading)
+            if detailColumnCount >= 1 {
+                Text("运行配置数").frame(width: 68)
+            }
+            if detailColumnCount >= 2 {
+                Text("Git").frame(width: 92, alignment: .leading)
+            }
+            if detailColumnCount >= 3 {
+                Text("最近发现").frame(width: 118, alignment: .leading)
+            }
             Text("操作").frame(width: 32)
         }
         .font(.caption.weight(.medium)).foregroundStyle(.secondary)
@@ -2782,11 +2799,10 @@ struct ContentView: View {
         .accessibilityHidden(true)
     }
 
-    private func projectListRow(_ project: ProjectRecord) -> some View {
+    private func projectListRow(_ project: ProjectRecord, detailColumnCount: Int) -> some View {
         let isSelected = selectedProjectID == project.id
         let configurations = runCoordinator.runConfigurations(projectID: project.id)
         let hasActiveSession = configurations.contains { runCoordinator.session(for: $0.id)?.state.isLive == true }
-        let repository = ProjectRepositoryState.read(projectRoot: project.path)
         return HStack(spacing: 10) {
             if isSelectingProjects {
                 Toggle("", isOn: projectSelectionBinding(project.id))
@@ -2805,23 +2821,30 @@ struct ContentView: View {
                             Image(systemName: "clock.badge.exclamationmark").foregroundStyle(.orange).help("结果已过期")
                         }
                     }
-                    .frame(minWidth: 148, maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: detailColumnCount > 0 ? 148 : 0, maxWidth: .infinity, alignment: .leading)
                     projectSummaryBadge(project).frame(width: 88, alignment: .leading)
-                    HStack(spacing: 5) {
-                        Text("\(configurations.count)")
-                        if hasActiveSession { Circle().fill(.green).frame(width: 5, height: 5) }
+                    if detailColumnCount >= 1 {
+                        HStack(spacing: 5) {
+                            Text("\(configurations.count)")
+                            if hasActiveSession { Circle().fill(.green).frame(width: 5, height: 5) }
+                        }
+                        .frame(width: 68)
+                        .accessibilityLabel("\(configurations.count) 个运行配置\(hasActiveSession ? "，含活动运行" : "")")
                     }
-                    .frame(width: 68)
-                    .accessibilityLabel("\(configurations.count) 个运行配置\(hasActiveSession ? "，含活动运行" : "")")
-                    HStack(spacing: 6) {
-                        if repository != .nonGit { gitLogo(size: 22) }
-                        Text(repository == .nonGit ? "—" : repositoryStateText(repository)).lineLimit(1)
+                    if detailColumnCount >= 2 {
+                        let repository = ProjectRepositoryState.read(projectRoot: project.path)
+                        HStack(spacing: 6) {
+                            if repository != .nonGit { gitLogo(size: 22) }
+                            Text(repository == .nonGit ? "—" : repositoryStateText(repository)).lineLimit(1)
+                        }
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(width: 92, alignment: .leading).help(repositoryStateText(repository))
                     }
-                    .font(.caption).foregroundStyle(.secondary)
-                    .frame(width: 92, alignment: .leading).help(repositoryStateText(repository))
-                    Text(project.lastDiscoveredAt.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits).hour().minute()))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        .frame(width: 118, alignment: .leading)
+                    if detailColumnCount >= 3 {
+                        Text(project.lastDiscoveredAt.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits).hour().minute()))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            .frame(width: 118, alignment: .leading)
+                    }
                 }
                 .frame(maxWidth: .infinity, minHeight: 52).contentShape(Rectangle())
             }
