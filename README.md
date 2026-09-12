@@ -8,19 +8,19 @@ DevEnv 是一个原生 macOS App，用来保存本地项目的运行方式，在
 
 DevEnv 不负责替代终端、包管理器或版本管理器。它调用项目本来就在使用的 Shell 和工具，并用 Machine Environment 扫描结果解释当前 Mac 是否具备项目声明的运行条件。
 
-> 当前项目仍处于早期开发阶段；最新可下载版本是面向受邀测试者的 [`v0.1.4` Private Preview（Build 5）](https://github.com/zh826256645/DevEnv/releases/tag/v0.1.4)，不属于稳定正式版。
+> 当前项目仍处于早期开发阶段；最新可下载版本是面向受邀测试者的 [`v0.2.0` Private Preview（Build 6）](https://github.com/zh826256645/DevEnv/releases/tag/v0.2.0)，不属于稳定正式版。
 
 ## 下载与安装
 
 发布版支持 **macOS 15.0 及以上、Apple Silicon（arm64）**，不包含 Intel 构建。
 
-1. 从 [v0.1.4 Release](https://github.com/zh826256645/DevEnv/releases/tag/v0.1.4) 下载 `DevEnv-0.1.4-arm64.dmg` 和同名 `.sha256` 文件。
-2. 将两个文件放在同一目录，在该目录执行 `shasum -a 256 -c DevEnv-0.1.4-arm64.dmg.sha256`，确认输出 `OK` 后再安装。
+1. 从 [v0.2.0 Release](https://github.com/zh826256645/DevEnv/releases/tag/v0.2.0) 下载 `DevEnv-0.2.0-arm64.dmg` 和同名 `.sha256` 文件。
+2. 将两个文件放在同一目录，在该目录执行 `shasum -a 256 -c DevEnv-0.2.0-arm64.dmg.sha256`，确认输出 `OK` 后再安装。
 3. 完全退出旧版 DevEnv，打开 DMG，将 `DevEnv.app` 拖入 `Applications`，然后启动新版。
 
 发布版使用 ad-hoc 签名，未使用 Developer ID 签名，也未经 Apple 公证。首次打开若被 Gatekeeper 阻止，请先尝试打开，再到“系统设置 → 隐私与安全性”确认打开；不要全局关闭 Gatekeeper 或递归移除隔离属性。
 
-本版本不提供自动更新。v0.1.4 新增持续交互终端、就绪会话单项及批量关闭、跨工作区移动，并优化总览和紧凑单行工具栏。从 v0.1.3 升级继续使用 schema 7，无新增数据迁移；运行会话不会跨 App 进程迁移，升级前建议备份 App 数据并完全退出旧版。完整变更与限制见 [Release Notes](docs/releases/v0.1.4.md)。
+本版本不提供自动更新。v0.2.0 新增菜单栏工作区切换、运行配置快捷操作和按工作区批量管理，并优化运行页筛选与工具栏布局。从 v0.1.4 升级继续使用 schema 7，无新增数据迁移；运行会话不会跨 App 进程迁移，升级前建议备份 App 数据并完全退出旧版。完整变更与限制见 [Release Notes](docs/releases/v0.2.0.md)。
 
 ## 核心工作流
 
@@ -149,7 +149,7 @@ open DevEnv.xcodeproj
 
 在 Xcode 中等待 Swift Package Manager 解析固定版本的 SwiftTerm，选择 `DevEnv` scheme 和 `My Mac`，然后运行项目。
 
-源码构建使用本地开发签名；已发布的 `v0.1.4` Private Preview 使用完整 ad-hoc Bundle 签名，但不提供 Developer ID 签名、公证、自动更新或已发布版本的兼容性保证。
+源码构建使用本地开发签名；已发布的 `v0.2.0` Private Preview 使用完整 ad-hoc Bundle 签名，但不提供 Developer ID 签名、公证、自动更新或已发布版本的兼容性保证。
 
 ## 技术摘要
 
