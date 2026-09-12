@@ -900,10 +900,129 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         XCTAssertEqual(
             appDelegate.statusMenu.items.map(\.title),
-            ["打开面板", "", "全部工作区启动", "全部工作区停止", "", "0 执行中 · 0 就绪 · 0 已结束 · 0 异常", "没有活动会话", "", "退出"]
+            ["打开 DevEnv", "", "0 个运行中", "", "默认工作区", "暂无运行配置", "", "启动未运行配置", "停止此工作区…", "", "全局操作", "", "退出 DevEnv…"]
         )
-        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
-        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区停止")?.isEnabled ?? true)
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区停止")?.isEnabled ?? true)
+    }
+
+    func testNativeStatusMenuBoundsLongCommandsAndScopesWorkspaceControls() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = ProjectsViewModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")))
+        let first = try XCTUnwrap(model.createRunConfiguration(name: "退出 DevEnv…", command: "sleep 30", workingDirectory: directory.path))
+        let workspace = try XCTUnwrap(model.createWorkspace(name: "其他工作区"))
+        XCTAssertTrue(model.selectWorkspace(workspace.id))
+        let command = String(repeating: "LONG_ENVIRONMENT_VALUE=1234567890 ", count: 20) + "npm run dev"
+        for index in 0..<12 {
+            _ = try XCTUnwrap(model.createRunConfiguration(name: index == 0 ? "全局操作" : "Web \(index)", command: command, workingDirectory: directory.path))
+        }
+        let coordinator = ProjectRunCoordinator(projectsModel: model, makeEngine: { FakeProjectRunEngine() },
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"), scheduler: FakeProjectRunScheduler())
+        let delegate = DevEnvAppDelegate(projectsModel: model, runCoordinator: coordinator, statusBarRunPageHandoff: {})
+        delegate.rebuildStatusMenu()
+        let rows = delegate.statusMenu.items.filter { $0.submenu?.item(withTitle: "查看配置") != nil }
+        XCTAssertEqual(rows.count, 12)
+        XCTAssertFalse(rows.contains { $0.representedObject as? String == first.id })
+        XCTAssertEqual(rows.first?.subtitle, String(command.prefix(35)) + "…")
+        XCTAssertNil(rows.first?.toolTip)
+        XCTAssertEqual(delegate.statusMenu.minimumWidth, 320)
+        XCTAssertTrue(delegate.statusMenu.items.allSatisfy { $0.view == nil })
+        let global = try XCTUnwrap(delegate.statusMenu.items.first { $0.submenu?.item(withTitle: "全部工作区启动") != nil })
+        XCTAssertEqual(global.submenu?.items.map(\.title), ["全部工作区启动", "全部工作区停止"])
+        XCTAssertEqual(delegate.statusMenu.items.last?.keyEquivalent, "q")
+
+        let choices = try XCTUnwrap(delegate.statusMenu.item(withTitle: workspace.name)?.submenu)
+        let displayedMenu = delegate.statusMenu
+        XCTAssertEqual(choices.items.first { $0.representedObject as? String == workspace.id }?.state, .on)
+        let choice = try XCTUnwrap(choices.items.first { $0.representedObject as? String == first.workspaceID })
+        let button = try XCTUnwrap(choice.view?.subviews.first as? NSButton)
+        button.performClick(nil)
+        XCTAssertEqual(model.document.selectedWorkspaceID, first.workspaceID)
+        XCTAssertTrue(delegate.statusMenu === displayedMenu)
+        XCTAssertTrue(delegate.statusMenu.item(withTitle: "默认工作区")?.submenu === choices)
+        XCTAssertEqual(button.state, .on)
+        XCTAssertEqual(choices.items.first { $0.representedObject as? String == workspace.id }?.state, .off)
+        let selectedRows = delegate.statusMenu.items.filter { $0.submenu?.item(withTitle: "查看配置") != nil }
+        XCTAssertEqual(selectedRows.compactMap { $0.representedObject as? String }, [first.id])
+        let start = try XCTUnwrap(delegate.statusMenu.item(withTitle: "启动未运行配置"))
+        XCTAssertEqual(start.representedObject as? String, first.workspaceID)
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(start.action), to: start.target, from: start))
+        XCTAssertEqual(coordinator.session(for: first.id)?.state, .running)
+        XCTAssertEqual(coordinator.sessions.count, 1)
+    }
+
+    func testStatusBarConfigurationStartOnlyLaunchesSelectedIdleConfiguration() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = ProjectsViewModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")))
+        let first = try XCTUnwrap(model.createRunConfiguration(name: "API", command: "first", workingDirectory: directory.path))
+        let second = try XCTUnwrap(model.createRunConfiguration(name: "Web", command: "second", workingDirectory: directory.path))
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(projectsModel: model, makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"), scheduler: FakeProjectRunScheduler())
+        let delegate = DevEnvAppDelegate(projectsModel: model, runCoordinator: coordinator)
+        func startItem() throws -> NSMenuItem {
+            delegate.rebuildStatusMenu()
+            return try XCTUnwrap(delegate.statusMenu.items.first {
+                $0.representedObject as? String == first.id
+            }?.submenu?.item(withTitle: "启动"))
+        }
+        let start = try startItem()
+        XCTAssertTrue(start.isEnabled)
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(start.action), to: start.target, from: start))
+        XCTAssertEqual(coordinator.session(for: first.id)?.state, .running)
+        XCTAssertNil(coordinator.session(for: second.id))
+        XCTAssertFalse(try startItem().isEnabled)
+        // A stale menu action must not dispatch the command twice.
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(start.action), to: start.target, from: start))
+        XCTAssertEqual(factory.engines.flatMap(\.commands).map(\.command), ["first"])
+        factory.engines[0].prompt(exitCode: 0)
+        XCTAssertTrue(try startItem().isEnabled)
+        XCTAssertTrue(model.setRunConfigurationEnabled(first, isEnabled: false))
+        XCTAssertFalse(try startItem().isEnabled)
+    }
+
+    func testStatusBarWorkspaceStartDoesNotStartOtherWorkspaces() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = ProjectsViewModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")))
+        let first = try XCTUnwrap(model.createRunConfiguration(name: "API", command: "first", workingDirectory: directory.path))
+        let workspace = try XCTUnwrap(model.createWorkspace(name: "其他工作区"))
+        XCTAssertTrue(model.selectWorkspace(workspace.id))
+        let second = try XCTUnwrap(model.createRunConfiguration(name: "Web", command: "second", workingDirectory: directory.path))
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(projectsModel: model, makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"), scheduler: FakeProjectRunScheduler())
+        let delegate = DevEnvAppDelegate(projectsModel: model, runCoordinator: coordinator, statusBarRunPageHandoff: {})
+        delegate.rebuildStatusMenu()
+        let start = try XCTUnwrap(delegate.statusMenu.items.first {
+            $0.title == "启动未运行配置" && $0.representedObject as? String == workspace.id
+        })
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(start.action), to: start.target, from: start))
+        XCTAssertNil(coordinator.session(for: first.id))
+        XCTAssertEqual(coordinator.session(for: second.id)?.state, .running)
+        delegate.rebuildStatusMenu()
+        let stop = try XCTUnwrap(delegate.statusMenu.items.first {
+            $0.title == "停止此工作区…" && $0.representedObject as? String == workspace.id
+        })
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(stop.action), to: stop.target, from: stop))
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs, [try XCTUnwrap(coordinator.session(for: second.id)?.activeExecution?.id)])
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, false)
+        coordinator.cancelBatchStop()
+
+        // Other workspaces must not affect this workspace's close-ready action.
+        _ = coordinator.run(first)
+        factory.engines[0].prompt(exitCode: 0)
+        delegate.rebuildStatusMenu()
+        XCTAssertNil(delegate.statusMenu.item(withTitle: "停止此工作区…"))
+        let close = try XCTUnwrap(delegate.statusMenu.item(withTitle: "关闭所有终端"))
+        XCTAssertTrue(close.isEnabled)
+        XCTAssertEqual(close.representedObject as? String, workspace.id)
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(close.action), to: close.target, from: close))
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, true)
+        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs.count, 1)
+        XCTAssertEqual(coordinator.session(for: first.id)?.state, .running)
     }
 
     func testStatusBarGlobalStartSubmitsAllProjectsToSharedFrozenIntent() async throws {
@@ -957,7 +1076,7 @@ final class ProjectRunSessionsTests: XCTestCase {
             }
         )
         appDelegate.rebuildStatusMenu()
-        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区启动"))
+        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区启动"))
 
         XCTAssertTrue(startItem.isEnabled)
         XCTAssertTrue(NSApplication.shared.sendAction(
@@ -1000,7 +1119,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         let appDelegate = DevEnvAppDelegate(projectsModel: projectsModel, runCoordinator: coordinator)
 
         appDelegate.rebuildStatusMenu()
-        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区启动"))
+        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区启动"))
         XCTAssertTrue(startItem.isEnabled)
         XCTAssertTrue(NSApplication.shared.sendAction(
             try XCTUnwrap(startItem.action),
@@ -1010,19 +1129,23 @@ final class ProjectRunSessionsTests: XCTestCase {
         appDelegate.rebuildStatusMenu()
 
         XCTAssertEqual(factory.engines.flatMap(\.commands).map(\.command), ["first", "second"])
-        XCTAssertTrue(appDelegate.statusMenu.items.contains { $0.title == "后台服务 · API" })
-        XCTAssertTrue(appDelegate.statusMenu.items.contains { $0.title == "默认工作区 · API" })
+        XCTAssertNotNil(appDelegate.statusMenu.item(withTitle: "后台服务"))
+        XCTAssertNotNil(appDelegate.statusMenu.item(withTitle: "后台服务")?.submenu?.item(withTitle: "默认工作区"))
+        let rows = appDelegate.statusMenu.items.filter { $0.title == "API" }
+        XCTAssertEqual(rows.compactMap(\.subtitle), ["second"])
+        XCTAssertEqual(rows.first?.submenu?.items.map(\.title), ["API", "", "打开终端", "启动", "重启", "停止", "", "查看配置"])
+        XCTAssertNotNil(rows.first?.image)
 
         factory.engines[0].prompt(exitCode: 0)
         appDelegate.rebuildStatusMenu()
-        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部工作区停止")?.isEnabled ?? false)
-        XCTAssertNil(appDelegate.statusMenu.item(withTitle: "全部工作区关闭"))
+        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区停止")?.isEnabled ?? false)
+        XCTAssertNil(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区关闭"))
 
         factory.engines[1].prompt(exitCode: 0)
         appDelegate.rebuildStatusMenu()
-        let closeItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区关闭"))
+        let closeItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区关闭"))
         XCTAssertTrue(closeItem.isEnabled)
-        XCTAssertNil(appDelegate.statusMenu.item(withTitle: "全部工作区停止"))
+        XCTAssertNil(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区停止"))
         XCTAssertTrue(NSApplication.shared.sendAction(
             try XCTUnwrap(closeItem.action), to: closeItem.target, from: closeItem
         ))
@@ -1033,8 +1156,8 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertNil(coordinator.session(for: first.id))
         XCTAssertNil(coordinator.session(for: second.id))
         appDelegate.rebuildStatusMenu()
-        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区停止")?.isEnabled ?? true)
-        XCTAssertNil(appDelegate.statusMenu.item(withTitle: "全部工作区关闭"))
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区停止")?.isEnabled ?? true)
+        XCTAssertNil(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区关闭"))
     }
 
     func testStatusBarTrustedGlobalStartIsImmediateAndRetainsSharedSessions() async throws {
@@ -1072,7 +1195,7 @@ final class ProjectRunSessionsTests: XCTestCase {
             statusBarRunPageHandoff: { handoffCount += 1 }
         )
         appDelegate.rebuildStatusMenu()
-        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区启动"))
+        let startItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区启动"))
 
         XCTAssertTrue(NSApplication.shared.sendAction(
             try XCTUnwrap(startItem.action),
@@ -1140,9 +1263,9 @@ final class ProjectRunSessionsTests: XCTestCase {
             }
         )
         appDelegate.rebuildStatusMenu()
-        let stopItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全部工作区停止"))
+        let stopItem = try XCTUnwrap(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区停止"))
 
-        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
         XCTAssertTrue(stopItem.isEnabled)
         XCTAssertTrue(NSApplication.shared.sendAction(
             try XCTUnwrap(stopItem.action),
@@ -1160,7 +1283,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: first.id)?.activeExecution?.id, replacementExecutionID)
         XCTAssertEqual(coordinator.session(for: first.id)?.state, .running)
         appDelegate.rebuildStatusMenu()
-        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部工作区停止")?.isEnabled ?? false)
+        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区停止")?.isEnabled ?? false)
     }
 
     func testStatusBarMenuRebuildsWhenProjectConfigurationsChange() async throws {
@@ -1181,7 +1304,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
         let appDelegate = DevEnvAppDelegate(projectsModel: projectsModel, runCoordinator: coordinator)
         appDelegate.rebuildStatusMenu()
-        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
+        XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
 
         XCTAssertNotNil(coordinator.createRunConfiguration(
             projectID: projectRoot.path,
@@ -1191,7 +1314,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         ))
         for _ in 0 ..< 3 { await Task.yield() }
 
-        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全部工作区启动")?.isEnabled ?? false)
+        XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区启动")?.isEnabled ?? false)
     }
 
     func testReopenedMainWindowUsesFullSizeHiddenTitleBar() {

@@ -113,7 +113,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.setActivationPolicy(hasMainWindow ? .regular : .accessory)
     }
 
-    func openMainWindow(configurationID: String? = nil) {
+    func openMainWindow(configurationID: String? = nil, detailTab: String? = nil) {
         NSApplication.shared.setActivationPolicy(.regular)
         if let window = mainWindow {
             window.makeKeyAndOrderFront(nil)
@@ -138,6 +138,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         var userInfo: [AnyHashable: Any] = [:]
         if let configurationID { userInfo["configurationID"] = configurationID }
+        if let detailTab { userInfo["detailTab"] = detailTab }
         let notificationInfo = userInfo.isEmpty ? nil : userInfo
         postStatusBarAction(.open, userInfo: notificationInfo)
     }
@@ -158,82 +159,196 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func rebuildStatusMenu() {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-
-        let open = NSMenuItem(title: "打开面板", action: #selector(openDevEnv(_:)), keyEquivalent: "")
-        open.target = self
+        let menu = makeMenu(width: 320)
+        let open = menuAction("打开 DevEnv", action: #selector(openDevEnv(_:)))
+        open.image = NSImage(named: "AppIcon")?.copy() as? NSImage
+        open.image?.size = NSSize(width: 26, height: 26)
         menu.addItem(open)
         menu.addItem(.separator())
 
-        let start = NSMenuItem(title: "全部工作区启动", action: #selector(requestRunAll(_:)), keyEquivalent: "")
-        start.target = self
-        start.isEnabled = runCoordinator.canStartBatch(in: runCoordinator.runConfigurations())
-        menu.addItem(start)
-        let stopTitle = runCoordinator.canCloseBatch(in: runCoordinator.runConfigurations()) ? "全部工作区关闭" : "全部工作区停止"
-        let stop = NSMenuItem(title: stopTitle, action: #selector(requestStopAll(_:)), keyEquivalent: "")
-        stop.target = self
-        stop.isEnabled = runCoordinator.canStopBatch(in: runCoordinator.runConfigurations())
-        menu.addItem(stop)
+        let summary = NSMenuItem(title: "\(runCoordinator.sessionSummary.running) 个运行中", action: nil, keyEquivalent: "")
+        summary.image = NSImage(size: NSSize(width: 14, height: 24), flipped: false) { rect in
+            (self.runCoordinator.sessionSummary.running > 0 ? NSColor.systemGreen : .secondaryLabelColor).setFill()
+            NSBezierPath(ovalIn: NSRect(x: 1, y: rect.midY - 6, width: 12, height: 12)).fill()
+            return true
+        }
+        menu.addItem(summary)
         menu.addItem(.separator())
 
-        let summary = runCoordinator.sessionSummary
-        let summaryItem = NSMenuItem(
-            title: "\(summary.running) 执行中 · \(summary.ready) 就绪 · \(summary.stopped) 已结束 · \(summary.exceptional) 异常",
-            action: nil,
-            keyEquivalent: ""
-        )
-        summaryItem.attributedTitle = NSAttributedString(
-            string: summaryItem.title,
-            attributes: [.font: NSFont.menuFont(ofSize: 11)]
-        )
-        summaryItem.isEnabled = false
-        menu.addItem(summaryItem)
-
-        let activeConfigurations = runCoordinator.runConfigurations()
-            .filter { runCoordinator.session(for: $0.id)?.state.isLive == true }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        if activeConfigurations.isEmpty {
-            let item = NSMenuItem(title: "没有活动会话", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-        } else {
-            for configuration in activeConfigurations {
-                let state = runCoordinator.session(for: configuration.id)?.state ?? .inactive
-                let workspaceName = projectsModel.document.workspaces.first { $0.id == configuration.workspaceID }?.name ?? "未知工作区"
-                let item = NSMenuItem(
-                    title: "\(workspaceName) · \(configuration.name)",
-                    action: #selector(openSession(_:)),
-                    keyEquivalent: ""
-                )
-                item.image = statusIndicatorImage(for: state)
-                item.toolTip = state.statusTitle
-                item.target = self
+        if let workspace = projectsModel.document.workspaces.first(where: { $0.id == projectsModel.document.selectedWorkspaceID }) {
+            let configurations = runCoordinator.runConfigurations(workspaceID: workspace.id)
+            if projectsModel.document.workspaces.count > 1 {
+                let selector = NSMenuItem(title: workspace.name, action: nil, keyEquivalent: "")
+                selector.identifier = NSUserInterfaceItemIdentifier("workspaceSelector")
+                selector.toolTip = "切换工作区"
+                let choices = makeMenu(width: 210)
+                for choice in projectsModel.document.workspaces {
+                    let item = menuAction(choice.name, action: #selector(selectWorkspace(_:)), id: choice.id)
+                    item.state = choice.id == workspace.id ? .on : .off
+                    let button = NSButton(radioButtonWithTitle: choice.name, target: self, action: #selector(selectWorkspaceButton(_:)))
+                    button.font = .menuFont(ofSize: 13)
+                    button.state = item.state
+                    button.sizeToFit()
+                    let view = NSView(frame: NSRect(x: 0, y: 0, width: max(210, button.frame.width + 28), height: 28))
+                    button.setFrameOrigin(NSPoint(x: 14, y: (28 - button.frame.height) / 2))
+                    view.addSubview(button)
+                    item.view = view
+                    choices.addItem(item)
+                }
+                selector.submenu = choices
+                menu.addItem(selector)
+            } else {
+                menu.addItem(.sectionHeader(title: workspace.name))
+            }
+            if configurations.isEmpty {
+                let empty = NSMenuItem(title: "暂无运行配置", action: nil, keyEquivalent: "")
+                empty.isEnabled = false
+                menu.addItem(empty)
+            }
+            for configuration in configurations {
+                let item = NSMenuItem(title: configuration.name, action: nil, keyEquivalent: "")
+                let command = runCoordinator.session(for: configuration.id)?.currentExecution?.command ?? configuration.command
+                let summary = command.split(whereSeparator: { $0.isNewline }).joined(separator: " ")
+                item.subtitle = summary.count > 36 ? String(summary.prefix(35)) + "…" : summary
+                item.image = configurationImage(configuration, showsStatus: true)
                 item.representedObject = configuration.id
+                item.submenu = configurationMenu(configuration)
                 menu.addItem(item)
             }
+            menu.addItem(.separator())
+            let start = menuAction("启动未运行配置", symbol: "play", action: #selector(requestRunAll(_:)), id: workspace.id)
+            start.isEnabled = runCoordinator.canStartBatch(in: configurations)
+            menu.addItem(start)
+            let stop = menuAction(runCoordinator.canCloseBatch(in: configurations) ? "关闭所有终端" : "停止此工作区…",
+                                  symbol: "stop.fill", action: #selector(requestStopAll(_:)), id: workspace.id)
+            stop.isEnabled = runCoordinator.canStopBatch(in: configurations)
+            menu.addItem(stop)
+            menu.addItem(.separator())
         }
 
+        let global = NSMenuItem(title: "全局操作", action: nil, keyEquivalent: "")
+        global.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        let globalMenu = makeMenu(width: 230)
+        let configurations = runCoordinator.runConfigurations()
+        let start = menuAction("全部工作区启动", symbol: "play", action: #selector(requestRunAll(_:)))
+        start.isEnabled = runCoordinator.canStartBatch(in: configurations)
+        globalMenu.addItem(start)
+        let stop = menuAction(runCoordinator.canCloseBatch(in: configurations) ? "全部工作区关闭" : "全部工作区停止",
+                              symbol: "stop.fill", action: #selector(requestStopAll(_:)))
+        stop.isEnabled = runCoordinator.canStopBatch(in: configurations)
+        globalMenu.addItem(stop)
+        global.submenu = globalMenu
+        menu.addItem(global)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出", action: #selector(quitDevEnv(_:)), keyEquivalent: "q")
-        quit.target = self
+        let quit = menuAction("退出 DevEnv…", symbol: "rectangle.portrait.and.arrow.right", action: #selector(quitDevEnv(_:)))
+        quit.keyEquivalent = "q"
         menu.addItem(quit)
-        statusMenu = menu
-        statusItem?.menu = menu
+        // Keep the workspace submenu attached while its native controls update the list.
+        let oldSelector = statusMenu.items.first { $0.identifier?.rawValue == "workspaceSelector" }
+        let newSelector = menu.items.first { $0.identifier?.rawValue == "workspaceSelector" }
+        let retainedSelector: NSMenuItem?
+        if let oldSelector, let newSelector,
+           oldSelector.submenu?.items.compactMap({ $0.representedObject as? String })
+            == newSelector.submenu?.items.compactMap({ $0.representedObject as? String }) {
+            retainedSelector = oldSelector
+            oldSelector.title = newSelector.title
+            for (old, new) in zip(oldSelector.submenu!.items, newSelector.submenu!.items) {
+                old.title = new.title
+                old.state = new.state
+                if let button = old.view?.subviews.first as? NSButton {
+                    button.title = new.title
+                    button.state = new.state
+                }
+            }
+        } else {
+            retainedSelector = nil
+        }
+        for item in statusMenu.items where item !== retainedSelector { statusMenu.removeItem(item) }
+        for (index, item) in menu.items.enumerated() {
+            if item === newSelector, retainedSelector != nil { continue }
+            menu.removeItem(item)
+            statusMenu.insertItem(item, at: index)
+        }
+        statusMenu.minimumWidth = menu.minimumWidth
+        statusMenu.font = menu.font
+        statusMenu.autoenablesItems = false
     }
 
-    private func statusIndicatorImage(for state: ProjectRunSessionState) -> NSImage {
-        let image = NSImage(size: NSSize(width: 8, height: 8))
-        image.lockFocus()
-        statusColor(for: state).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: 6, height: 6)).fill()
-        image.unlockFocus()
-        return image
+    @objc private func selectWorkspaceButton(_ sender: NSButton) {
+        guard let item = sender.enclosingMenuItem else { return }
+        selectWorkspace(item)
+    }
+
+    @objc private func selectWorkspace(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              projectsModel.selectWorkspace(id) else { return }
+        rebuildStatusMenu()
+    }
+
+    private func makeMenu(width: CGFloat) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.minimumWidth = width
+        menu.font = .systemFont(ofSize: 13)
+        return menu
+    }
+
+    private func menuAction(_ title: String, symbol: String? = nil, action: Selector, id: String? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.representedObject = id
+        if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
+        return item
+    }
+
+    private func configurationMenu(_ configuration: ProjectRunConfiguration) -> NSMenu {
+        let menu = makeMenu(width: 210)
+        let header = NSMenuItem(title: configuration.name, action: nil, keyEquivalent: "")
+        header.image = configurationImage(configuration, showsStatus: false)
+        menu.addItem(header)
+        menu.addItem(.separator())
+        menu.addItem(menuAction("打开终端", symbol: "terminal.fill", action: #selector(openSession(_:)), id: configuration.id))
+        let session = runCoordinator.session(for: configuration.id)
+        let state = session?.state ?? .inactive
+        let project = configuration.associatedProject(in: projectsModel.records)
+        let start = menuAction("启动", symbol: "play", action: #selector(startSession(_:)), id: configuration.id)
+        start.isEnabled = runCoordinator.canStartBatch(in: [configuration]) && session?.isClosing != true
+        menu.addItem(start)
+        let restart = menuAction("重启", symbol: "arrow.clockwise", action: #selector(restartSession(_:)), id: configuration.id)
+        restart.isEnabled = configuration.isEnabled && state.canRestart && session?.isClosing != true
+            && !(configuration.projectID != nil && project == nil) && project?.availability.isUnavailable != true
+        menu.addItem(restart)
+        let stop = menuAction(state == .ready ? "关闭终端" : "停止", symbol: "stop.fill", action: #selector(stopSession(_:)), id: configuration.id)
+        stop.isEnabled = state.isLive && session?.isClosing != true
+        menu.addItem(stop)
+        menu.addItem(.separator())
+        menu.addItem(menuAction("查看配置", symbol: "doc.text", action: #selector(showConfiguration(_:)), id: configuration.id))
+        return menu
+    }
+
+    private func configurationImage(_ configuration: ProjectRunConfiguration, showsStatus: Bool) -> NSImage? {
+        let state = runCoordinator.session(for: configuration.id)?.state ?? .inactive
+        let content = HStack(spacing: 10) {
+            if showsStatus {
+                Circle().fill(Color(nsColor: statusColor(for: state))).frame(width: 8, height: 8)
+            }
+            if let brand = devEnvRunConfigurationBrand(configuration, projectsModel: projectsModel) {
+                devEnvRuntimeLogo(brand, size: 26, padding: 26 * 7 / 40, cornerRadius: 26 * 9 / 40)
+            } else {
+                Image(systemName: "terminal")
+                    .font(.system(size: 15)).foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+            }
+        }.padding(.vertical, 3)
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        return renderer.nsImage
     }
 
     private func statusColor(for state: ProjectRunSessionState) -> NSColor {
         switch state {
-        case .starting: .systemBlue
+        case .starting, .ready: .systemBlue
         case .running: .systemGreen
         case .stopping: .systemOrange
         case .restarting: .systemPurple
@@ -243,19 +358,46 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openSession(_ sender: NSMenuItem) {
-        openMainWindow(configurationID: sender.representedObject as? String)
+        guard let configuration = menuConfiguration(sender) else { return }
+        openMainWindow(configurationID: configuration.id, detailTab: "终端")
+        runCoordinator.openTerminal(configuration)
     }
 
-    @objc private func requestRunAll(_: NSMenuItem) {
-        let scope = runCoordinator.runConfigurations()
+    @objc private func showConfiguration(_ sender: NSMenuItem) {
+        openMainWindow(configurationID: sender.representedObject as? String, detailTab: "详情")
+    }
+
+    private func menuConfiguration(_ sender: NSMenuItem) -> ProjectRunConfiguration? {
+        runCoordinator.runConfigurations().first { $0.id == sender.representedObject as? String }
+    }
+
+    @objc private func startSession(_ sender: NSMenuItem) {
+        guard let configuration = menuConfiguration(sender),
+              runCoordinator.canStartBatch(in: [configuration]),
+              runCoordinator.session(for: configuration.id)?.isClosing != true else { return }
+        _ = runCoordinator.run(configuration, project: configuration.associatedProject(in: projectsModel.records))
+    }
+
+    @objc private func restartSession(_ sender: NSMenuItem) {
+        guard let configuration = menuConfiguration(sender) else { return }
+        runCoordinator.restart(configuration, project: configuration.associatedProject(in: projectsModel.records))
+    }
+
+    @objc private func stopSession(_ sender: NSMenuItem) {
+        guard let configuration = menuConfiguration(sender) else { return }
+        runCoordinator.stopOrCloseTerminal(configurationID: configuration.id)
+    }
+
+    @objc private func requestRunAll(_ sender: NSMenuItem) {
+        let scope = runCoordinator.runConfigurations(workspaceID: sender.representedObject as? String)
         guard runCoordinator.canStartBatch(in: scope) else { return }
         let intent = runCoordinator.makeBatchStartIntent(in: scope)
         handoffToRunsPage()
         runCoordinator.requestBatchStart(intent)
     }
 
-    @objc private func requestStopAll(_: NSMenuItem) {
-        let scope = runCoordinator.runConfigurations()
+    @objc private func requestStopAll(_ sender: NSMenuItem) {
+        let scope = runCoordinator.runConfigurations(workspaceID: sender.representedObject as? String)
         guard runCoordinator.canStopBatch(in: scope) else { return }
         runCoordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
         handoffToRunsPage()

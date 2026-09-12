@@ -836,6 +836,7 @@ struct ContentView: View {
                     runProjectFilterID = nil
                     runSearchText = ""
                     selectedRunConfigurationID = configurationID
+                    runDetailTab = notification.userInfo?["detailTab"] as? String ?? "终端"
                     selectPage(.runs)
                 }
             case .showRuns:
@@ -1364,7 +1365,7 @@ struct ContentView: View {
     }
 
     private var workspaceNavigation: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 12) {
             Text("工作区").font(.system(size: 29, weight: .bold)).fixedSize()
             HStack(spacing: 8) {
                 runConfigurationIcon(size: 22)
@@ -1384,6 +1385,7 @@ struct ContentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(maxWidth: 180)
+                .fixedSize(horizontal: true, vertical: false)
                 .accessibilityLabel("切换工作区")
                 if projectsModel.currentWorkspace.id == Workspace.defaultWorkspace.id {
                     Text("默认").font(.caption.weight(.medium))
@@ -1396,7 +1398,6 @@ struct ContentView: View {
             .background(AppTheme.cardRaised, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppTheme.accent.opacity(0.16)))
             .disabled(projectsModel.mutationsArePaused)
-            .fixedSize(horizontal: true, vertical: false)
             Menu {
                 Button("新建工作区") {
                     renamingWorkspaceID = nil
@@ -1422,12 +1423,15 @@ struct ContentView: View {
             .fixedSize()
             .disabled(projectsModel.mutationsArePaused)
             Spacer(minLength: 0)
-            Button(action: beginCreatingRunConfiguration) {
-                Label("新建运行配置", systemImage: "plus")
+            HStack(spacing: 8) {
+                if selectedPage == .runs { runBatchActions }
+                Button(action: beginCreatingRunConfiguration) {
+                    Label("新建运行配置", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(projectsModel.document.workspaces.isEmpty || projectsModel.mutationsArePaused)
             }
-            .buttonStyle(.borderedProminent)
             .fixedSize()
-            .disabled(projectsModel.document.workspaces.isEmpty || projectsModel.mutationsArePaused)
         }
         .controlSize(.large)
         .padding(.horizontal, 24)
@@ -1772,13 +1776,18 @@ struct ContentView: View {
     }
 
     private var runListFilters: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 8) {
             runSearchAndStatusFilters
-            runListActions
+            Picker("筛选项目", selection: $runProjectFilterID) {
+                Text("全部项目").tag(Optional<String>.none)
+                ForEach(projectsModel.workspaceRecords) { Text($0.title).tag(Optional($0.id)) }
+            }
+            .labelsHidden().frame(width: 96)
+            .accessibilityLabel("按项目筛选运行配置")
             Spacer(minLength: 0)
         }
-        .font(.system(size: 11))
-        .controlSize(.mini)
+        .font(.system(size: 12))
+        .controlSize(.regular)
         .lineLimit(1)
         .background {
             Button("搜索运行配置") { runSearchIsFocused = true }
@@ -1787,8 +1796,8 @@ struct ContentView: View {
     }
 
     private var runSearchAndStatusFilters: some View {
-        HStack(spacing: 4) {
-            HStack(spacing: 4) {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("搜索…", text: $runSearchText)
                     .textFieldStyle(.plain)
@@ -1800,27 +1809,21 @@ struct ContentView: View {
                         .accessibilityLabel("清除搜索")
                 }
             }
-            .padding(.horizontal, 6).frame(minWidth: 44, maxWidth: 160).frame(height: 22)
+            .padding(.horizontal, 8).frame(minWidth: 60, maxWidth: 240).frame(height: 30)
             .background(AppTheme.innerCard.opacity(0.45), in: RoundedRectangle(cornerRadius: 7))
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.08)))
             .help("搜索配置名称、命令、项目")
             Picker("状态", selection: $runStatusFilter) {
                 ForEach(RunListStatusFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
-            .labelsHidden().frame(width: 72)
+            .labelsHidden().frame(width: 96)
             .accessibilityLabel("按状态筛选运行配置")
         }
     }
 
-    private var runListActions: some View {
+    private var runBatchActions: some View {
         let closesTerminals = runCoordinator.canCloseBatch(in: visibleRunConfigurations)
-        return HStack(spacing: 4) {
-            Picker("筛选项目", selection: $runProjectFilterID) {
-                Text("全部项目").tag(Optional<String>.none)
-                ForEach(projectsModel.workspaceRecords) { Text($0.title).tag(Optional($0.id)) }
-            }
-            .labelsHidden().frame(width: 72)
-            .accessibilityLabel("按项目筛选运行配置")
+        return HStack(spacing: 8) {
             Button(action: requestRunAll) {
                 Label("全部启动", systemImage: "play.fill")
             }
@@ -1834,7 +1837,6 @@ struct ContentView: View {
             .disabled(!runCoordinator.canStopBatch(in: visibleRunConfigurations))
             .help(closesTerminals ? "关闭当前筛选结果中的全部就绪终端" : "向当前筛选结果中的活动会话发送 Ctrl+C，保留终端会话")
         }
-        .labelStyle(.titleOnly)
         .buttonStyle(.bordered).fixedSize()
     }
 
@@ -4227,13 +4229,7 @@ struct ContentView: View {
     }
 
     private func runConfigurationBrand(_ configuration: ProjectRunConfiguration) -> (assetName: String, color: Color)? {
-        guard let project = configuration.associatedProject(in: projectsModel.records),
-              let analysis = projectsModel.analyses[project.id] else { return nil }
-        let componentCapabilities = analysis.components
-            .first { $0.relativePath == configuration.workingDirectory }?
-            .requirements.map(\.capability) ?? []
-        return (componentCapabilities + analysis.requirements.map(\.capability))
-            .lazy.compactMap(runtimeBrand).first
+        devEnvRunConfigurationBrand(configuration, projectsModel: projectsModel)
     }
 
     private func overviewAttentionRow(_ item: OverviewAttentionItem) -> some View {
@@ -6003,16 +5999,7 @@ struct ContentView: View {
     }
 
     private func runtimeBrand(_ id: String) -> (assetName: String, color: Color)? {
-        switch id {
-        case "node": ("RuntimeNodeLogo", Color(red: 0.37, green: 0.63, blue: 0.31))
-        case "python": ("RuntimePythonLogo", Color(red: 0.22, green: 0.46, blue: 0.67))
-        case "go": ("RuntimeGoLogo", Color(red: 0, green: 0.68, blue: 0.85))
-        case "java": ("RuntimeJavaLogo", Color(red: 0.26, green: 0.45, blue: 0.57))
-        case "rust": ("RuntimeRustLogo", .primary)
-        case "ruby": ("RuntimeRubyLogo", Color(red: 0.80, green: 0.20, blue: 0.18))
-        case "lua": ("RuntimeLuaLogo", Color(red: 0.17, green: 0.18, blue: 0.45))
-        default: nil
-        }
+        devEnvRuntimeBrand(id)
     }
 
     private func gitLogo(size: CGFloat) -> some View {
@@ -6020,26 +6007,10 @@ struct ContentView: View {
     }
 
     private func runtimeLogo(
-        _ brand: (assetName: String, color: Color),
-        size: CGFloat = 48,
-        padding: CGFloat = 8,
-        cornerRadius: CGFloat = 11
+        _ brand: (assetName: String, color: Color), size: CGFloat = 48,
+        padding: CGFloat = 8, cornerRadius: CGFloat = 11
     ) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(brand.color.opacity(0.10))
-            Image(brand.assetName)
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(brand.color)
-                .padding(padding)
-        }
-        .frame(width: size, height: size)
-        .overlay {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(brand.color.opacity(0.12))
-        }
-        .accessibilityHidden(true)
+        devEnvRuntimeLogo(brand, size: size, padding: padding, cornerRadius: cornerRadius)
     }
 
     private func runtimeInstallationRow(
@@ -7532,3 +7503,50 @@ private struct ListenerExposureIcon: View {
             .accessibilityHint("仅依据监听地址范围判断，未验证实际可达性")
     }
 }
+
+@MainActor
+func devEnvRunConfigurationBrand(_ configuration: ProjectRunConfiguration, projectsModel: ProjectsViewModel) -> (assetName: String, color: Color)? {
+        guard let project = configuration.associatedProject(in: projectsModel.records),
+              let analysis = projectsModel.analyses[project.id] else { return nil }
+        let componentCapabilities = analysis.components
+            .first { $0.relativePath == configuration.workingDirectory }?
+            .requirements.map(\.capability) ?? []
+        return (componentCapabilities + analysis.requirements.map(\.capability))
+            .lazy.compactMap(devEnvRuntimeBrand).first
+    }
+
+func devEnvRuntimeBrand(_ id: String) -> (assetName: String, color: Color)? {
+        switch id {
+        case "node": ("RuntimeNodeLogo", Color(red: 0.37, green: 0.63, blue: 0.31))
+        case "python": ("RuntimePythonLogo", Color(red: 0.22, green: 0.46, blue: 0.67))
+        case "go": ("RuntimeGoLogo", Color(red: 0, green: 0.68, blue: 0.85))
+        case "java": ("RuntimeJavaLogo", Color(red: 0.26, green: 0.45, blue: 0.57))
+        case "rust": ("RuntimeRustLogo", .primary)
+        case "ruby": ("RuntimeRubyLogo", Color(red: 0.80, green: 0.20, blue: 0.18))
+        case "lua": ("RuntimeLuaLogo", Color(red: 0.17, green: 0.18, blue: 0.45))
+        default: nil
+        }
+    }
+
+func devEnvRuntimeLogo(
+        _ brand: (assetName: String, color: Color),
+        size: CGFloat = 48,
+        padding: CGFloat = 8,
+        cornerRadius: CGFloat = 11
+    ) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(brand.color.opacity(0.10))
+            Image(brand.assetName)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(brand.color)
+                .padding(padding)
+        }
+        .frame(width: size, height: size)
+        .overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(brand.color.opacity(0.12))
+        }
+        .accessibilityHidden(true)
+    }
