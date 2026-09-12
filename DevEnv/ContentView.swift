@@ -836,6 +836,7 @@ struct ContentView: View {
                     runProjectFilterID = nil
                     runSearchText = ""
                     selectedRunConfigurationID = configurationID
+                    runDetailTab = notification.userInfo?["detailTab"] as? String ?? "终端"
                     selectPage(.runs)
                 }
             case .showRuns:
@@ -4228,13 +4229,7 @@ struct ContentView: View {
     }
 
     private func runConfigurationBrand(_ configuration: ProjectRunConfiguration) -> (assetName: String, color: Color)? {
-        guard let project = configuration.associatedProject(in: projectsModel.records),
-              let analysis = projectsModel.analyses[project.id] else { return nil }
-        let componentCapabilities = analysis.components
-            .first { $0.relativePath == configuration.workingDirectory }?
-            .requirements.map(\.capability) ?? []
-        return (componentCapabilities + analysis.requirements.map(\.capability))
-            .lazy.compactMap(runtimeBrand).first
+        devEnvRunConfigurationBrand(configuration, projectsModel: projectsModel)
     }
 
     private func overviewAttentionRow(_ item: OverviewAttentionItem) -> some View {
@@ -6004,16 +5999,7 @@ struct ContentView: View {
     }
 
     private func runtimeBrand(_ id: String) -> (assetName: String, color: Color)? {
-        switch id {
-        case "node": ("RuntimeNodeLogo", Color(red: 0.37, green: 0.63, blue: 0.31))
-        case "python": ("RuntimePythonLogo", Color(red: 0.22, green: 0.46, blue: 0.67))
-        case "go": ("RuntimeGoLogo", Color(red: 0, green: 0.68, blue: 0.85))
-        case "java": ("RuntimeJavaLogo", Color(red: 0.26, green: 0.45, blue: 0.57))
-        case "rust": ("RuntimeRustLogo", .primary)
-        case "ruby": ("RuntimeRubyLogo", Color(red: 0.80, green: 0.20, blue: 0.18))
-        case "lua": ("RuntimeLuaLogo", Color(red: 0.17, green: 0.18, blue: 0.45))
-        default: nil
-        }
+        devEnvRuntimeBrand(id)
     }
 
     private func gitLogo(size: CGFloat) -> some View {
@@ -6021,26 +6007,10 @@ struct ContentView: View {
     }
 
     private func runtimeLogo(
-        _ brand: (assetName: String, color: Color),
-        size: CGFloat = 48,
-        padding: CGFloat = 8,
-        cornerRadius: CGFloat = 11
+        _ brand: (assetName: String, color: Color), size: CGFloat = 48,
+        padding: CGFloat = 8, cornerRadius: CGFloat = 11
     ) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(brand.color.opacity(0.10))
-            Image(brand.assetName)
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(brand.color)
-                .padding(padding)
-        }
-        .frame(width: size, height: size)
-        .overlay {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(brand.color.opacity(0.12))
-        }
-        .accessibilityHidden(true)
+        devEnvRuntimeLogo(brand, size: size, padding: padding, cornerRadius: cornerRadius)
     }
 
     private func runtimeInstallationRow(
@@ -7533,3 +7503,50 @@ private struct ListenerExposureIcon: View {
             .accessibilityHint("仅依据监听地址范围判断，未验证实际可达性")
     }
 }
+
+@MainActor
+func devEnvRunConfigurationBrand(_ configuration: ProjectRunConfiguration, projectsModel: ProjectsViewModel) -> (assetName: String, color: Color)? {
+        guard let project = configuration.associatedProject(in: projectsModel.records),
+              let analysis = projectsModel.analyses[project.id] else { return nil }
+        let componentCapabilities = analysis.components
+            .first { $0.relativePath == configuration.workingDirectory }?
+            .requirements.map(\.capability) ?? []
+        return (componentCapabilities + analysis.requirements.map(\.capability))
+            .lazy.compactMap(devEnvRuntimeBrand).first
+    }
+
+func devEnvRuntimeBrand(_ id: String) -> (assetName: String, color: Color)? {
+        switch id {
+        case "node": ("RuntimeNodeLogo", Color(red: 0.37, green: 0.63, blue: 0.31))
+        case "python": ("RuntimePythonLogo", Color(red: 0.22, green: 0.46, blue: 0.67))
+        case "go": ("RuntimeGoLogo", Color(red: 0, green: 0.68, blue: 0.85))
+        case "java": ("RuntimeJavaLogo", Color(red: 0.26, green: 0.45, blue: 0.57))
+        case "rust": ("RuntimeRustLogo", .primary)
+        case "ruby": ("RuntimeRubyLogo", Color(red: 0.80, green: 0.20, blue: 0.18))
+        case "lua": ("RuntimeLuaLogo", Color(red: 0.17, green: 0.18, blue: 0.45))
+        default: nil
+        }
+    }
+
+func devEnvRuntimeLogo(
+        _ brand: (assetName: String, color: Color),
+        size: CGFloat = 48,
+        padding: CGFloat = 8,
+        cornerRadius: CGFloat = 11
+    ) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(brand.color.opacity(0.10))
+            Image(brand.assetName)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(brand.color)
+                .padding(padding)
+        }
+        .frame(width: size, height: size)
+        .overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(brand.color.opacity(0.12))
+        }
+        .accessibilityHidden(true)
+    }
