@@ -46,8 +46,8 @@ jobs:
       target_sha: ${{ steps.release-metadata.outputs.target_sha }}
       version: ${{ steps.release-metadata.outputs.version }}
     env:
-      EXPECTED_RELEASE_VERSION: 0.1.4
-      EXPECTED_RELEASE_BUILD: "5"
+      EXPECTED_RELEASE_VERSION: 0.2.0
+      EXPECTED_RELEASE_BUILD: "6"
       PROJECT_PATH: DevEnv.xcodeproj
       SCHEME: DevEnv
       RESOLVED_FILE: DevEnv.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
