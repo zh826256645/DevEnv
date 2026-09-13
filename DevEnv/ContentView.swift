@@ -597,6 +597,11 @@ final class EnvironmentViewModel: ObservableObject {
 }
 
 struct ContentView: View {
+    private struct RunConfigurationEditorPresentation: Identifiable {
+        let id = UUID()
+        let configuration: ProjectRunConfiguration?
+    }
+
     private struct PendingHomebrewServiceAction: Identifiable {
         var id: String { "\(service.formula)-\(action.rawValue)" }
         let service: HomebrewService
@@ -734,7 +739,7 @@ struct ContentView: View {
     @State private var overviewWorkspaceFilterID: String?
     @State private var runProjectFilterID: String?
     @State private var isRunSuggestionsExpanded = false
-    @State private var isShowingRunConfigurationEditor = false
+    @State private var runConfigurationEditorPresentation: RunConfigurationEditorPresentation?
     @State private var editingRunConfiguration: ProjectRunConfiguration?
     @State private var renamingProject: ProjectRecord?
     @State private var projectNameDraft = ""
@@ -748,6 +753,7 @@ struct ContentView: View {
     @State private var runConfigurationProjectID: String? = ""
     @State private var runConfigurationName = ""
     @State private var runConfigurationCommand = ""
+    @State private var runConfigurationCommandNeedsInitialValue = false
     @State private var runConfigurationWorkingDirectory = "."
     @State private var runConfigurationWebURL = ""
     @State private var runConfigurationAutoOpenWeb = false
@@ -874,8 +880,14 @@ struct ContentView: View {
         }) {
             settingsExitConfirmation
         }
-        .sheet(isPresented: $isShowingRunConfigurationEditor) {
-            runConfigurationEditor
+        .sheet(item: $runConfigurationEditorPresentation) { presentation in
+            runConfigurationEditor(presentation: presentation)
+                .onAppear {
+                    if let configuration = presentation.configuration {
+                        editingRunConfiguration = configuration
+                        runConfigurationCommand = configuration.command
+                    }
+                }
         }
         .sheet(item: $renamingProject) { project in
             VStack(alignment: .leading, spacing: 16) {
@@ -961,7 +973,7 @@ struct ContentView: View {
             if let configuration = expandedTerminalConfiguration, !ids.contains(configuration.id) { expandedTerminalConfiguration = nil }
             if let configuration = editingRunConfiguration, !ids.contains(configuration.id) {
                 editingRunConfiguration = nil
-                isShowingRunConfigurationEditor = false
+                runConfigurationEditorPresentation = nil
             }
         }
         .alert(
@@ -2238,10 +2250,14 @@ struct ContentView: View {
     private func beginDuplicatingRunConfiguration(_ configuration: ProjectRunConfiguration) {
         beginEditingRunConfiguration(configuration)
         editingRunConfiguration = nil
+        runConfigurationCommandNeedsInitialValue = false
         if runConfigurationProjectID == nil { runConfigurationProjectID = "" }
         runConfigurationName = "\(configuration.name) 副本"
         runConfigurationSourceIdentity = nil
         runConfigurationSourceProjectID = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            runConfigurationEditorPresentation = RunConfigurationEditorPresentation(configuration: nil)
+        }
     }
 
     private func runTerminalPanel(_ configuration: ProjectRunConfiguration) -> some View {
@@ -2451,23 +2467,24 @@ struct ContentView: View {
         }
     }
 
-    private var runConfigurationEditor: some View {
-        VStack(spacing: 0) {
+    private func runConfigurationEditor(presentation: RunConfigurationEditorPresentation) -> some View {
+        let isEditing = presentation.configuration != nil
+        return VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Image(systemName: editingRunConfiguration == nil ? "plus" : "slider.horizontal.3")
+                Image(systemName: isEditing ? "slider.horizontal.3" : "plus")
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(width: 34, height: 34)
                     .background(AppTheme.accent.gradient, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(editingRunConfiguration == nil ? "新建运行配置" : "编辑运行配置")
+                    Text(isEditing ? "编辑运行配置" : "新建运行配置")
                         .font(.headline.weight(.semibold))
                     Text("设置工作区运行命令，项目关联可选")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button { isShowingRunConfigurationEditor = false } label: {
+                Button { runConfigurationEditorPresentation = nil } label: {
                     Image(systemName: "xmark")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.secondary)
@@ -2520,7 +2537,22 @@ struct ContentView: View {
                     }
 
                     runConfigurationEditorField("命令", systemImage: "terminal") {
-                        TextEditor(text: $runConfigurationCommand)
+                        TextEditor(text: Binding(
+                            get: {
+                                runConfigurationCommandNeedsInitialValue
+                                    ? (presentation.configuration?.command ?? runConfigurationCommand)
+                                    : runConfigurationCommand
+                            },
+                            set: {
+                                if runConfigurationCommandNeedsInitialValue,
+                                   $0.isEmpty,
+                                   presentation.configuration?.command.isEmpty == false {
+                                    return
+                                }
+                                runConfigurationCommandNeedsInitialValue = false
+                                runConfigurationCommand = $0
+                            }
+                        ))
                             .font(.body.monospaced())
                             .scrollContentBackground(.hidden)
                             .scrollIndicators(.hidden)
@@ -2533,6 +2565,14 @@ struct ContentView: View {
                                     .stroke(Color.primary.opacity(0.11))
                             }
                             .accessibilityLabel("运行命令")
+                            .onAppear {
+                                if let command = presentation.configuration?.command {
+                                    DispatchQueue.main.async {
+                                        runConfigurationCommand = command
+                                        runConfigurationCommandNeedsInitialValue = false
+                                    }
+                                }
+                            }
                     }
 
                     runConfigurationEditorField("工作目录", systemImage: "location") {
@@ -2580,7 +2620,7 @@ struct ContentView: View {
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(AppTheme.accent)
                         Text("支持绝对路径或项目相对路径（允许 ../）。留空使用项目目录或当前用户目录；解除关联时保留原工作目录。")
-                        if editingRunConfiguration != nil {
+                        if isEditing {
                             Text("命令修改将在成功启动后保存；启动失败时保留上次可用命令。")
                         }
                     }
@@ -2607,11 +2647,11 @@ struct ContentView: View {
 
             Divider()
             HStack {
-                Button("取消") { isShowingRunConfigurationEditor = false }
+                Button("取消") { runConfigurationEditorPresentation = nil }
                     .buttonStyle(.bordered)
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Button(editingRunConfiguration == nil ? "创建配置" : "保存修改", action: saveRunConfiguration)
+                Button(isEditing ? "保存修改" : "创建配置", action: saveRunConfiguration)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(projectsModel.mutationsArePaused)
@@ -2646,6 +2686,7 @@ struct ContentView: View {
         runConfigurationProjectID = projectID
         runConfigurationName = ""
         runConfigurationCommand = ""
+        runConfigurationCommandNeedsInitialValue = false
         runConfigurationWorkingDirectory = ""
         runConfigurationWebURL = ""
         runConfigurationAutoOpenWeb = false
@@ -2653,7 +2694,9 @@ struct ContentView: View {
         runConfigurationSaveAttempted = false
         runConfigurationSourceIdentity = nil
         runConfigurationSourceProjectID = nil
-        DispatchQueue.main.async { isShowingRunConfigurationEditor = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            runConfigurationEditorPresentation = RunConfigurationEditorPresentation(configuration: nil)
+        }
     }
 
     private func runSuggestionRow(_ suggestion: ProjectRunSuggestion) -> some View {
@@ -2680,6 +2723,7 @@ struct ContentView: View {
         runConfigurationProjectID = suggestion.projectID
         runConfigurationName = suggestion.name
         runConfigurationCommand = suggestion.command
+        runConfigurationCommandNeedsInitialValue = false
         runConfigurationWorkingDirectory = suggestion.workingDirectory
         runConfigurationWebURL = ""
         runConfigurationAutoOpenWeb = false
@@ -2687,7 +2731,9 @@ struct ContentView: View {
         runConfigurationSaveAttempted = false
         runConfigurationSourceIdentity = suggestion.sourceIdentity
         runConfigurationSourceProjectID = suggestion.projectID
-        DispatchQueue.main.async { isShowingRunConfigurationEditor = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            runConfigurationEditorPresentation = RunConfigurationEditorPresentation(configuration: nil)
+        }
     }
 
     private func beginEditingRunConfiguration(_ configuration: ProjectRunConfiguration) {
@@ -2696,6 +2742,7 @@ struct ContentView: View {
             ? nil : configuration.projectID ?? ""
         runConfigurationName = configuration.name
         runConfigurationCommand = configuration.command
+        runConfigurationCommandNeedsInitialValue = true
         runConfigurationWorkingDirectory = configuration.workingDirectory
         runConfigurationWebURL = configuration.webURL ?? ""
         runConfigurationAutoOpenWeb = configuration.autoOpenWeb
@@ -2703,7 +2750,9 @@ struct ContentView: View {
         runConfigurationSaveAttempted = false
         runConfigurationSourceIdentity = configuration.sourceIdentity
         runConfigurationSourceProjectID = configuration.sourceProjectID
-        DispatchQueue.main.async { isShowingRunConfigurationEditor = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            runConfigurationEditorPresentation = RunConfigurationEditorPresentation(configuration: configuration)
+        }
     }
 
     private func saveRunConfiguration() {
@@ -2736,7 +2785,7 @@ struct ContentView: View {
                 sourceProjectID: runConfigurationSourceProjectID
             ) != nil
         }
-        if succeeded { isShowingRunConfigurationEditor = false }
+        if succeeded { runConfigurationEditorPresentation = nil }
     }
 
     private var runConfigurationWebAddressWarning: String? {
