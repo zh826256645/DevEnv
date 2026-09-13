@@ -1,6 +1,6 @@
 # DevEnv 发版流程
 
-状态：发版自动化已实现；最新已发布版本为 `v0.2.0` Private Preview（Build `6`）。
+状态：发版自动化已实现；最新已发布版本为 `v0.2.1` Private Preview（Build `7`）。
 
 ## 本地发布通道（自 v0.1.1 起）
 

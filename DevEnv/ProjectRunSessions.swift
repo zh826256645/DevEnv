@@ -457,6 +457,14 @@ struct MainProjectRunScheduler: ProjectRunScheduling {
     }
 }
 
+func projectRunBrowserURL(_ address: String) -> URL? {
+    let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let hasScheme = trimmed.range(of: "^[A-Za-z][A-Za-z0-9+.-]*://", options: .regularExpression) != nil
+    let candidate = hasScheme ? trimmed : "https://\(trimmed)"
+    return URL(string: candidate) ?? URL(string: candidate.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? candidate)
+}
+
 private func projectRunOwnershipMonitorHandler(
     userID: uid_t,
     deliver: @escaping @MainActor @Sendable ([ProjectRunProcessSnapshot]?) -> Void
@@ -925,6 +933,7 @@ final class ProjectRunSession: ObservableObject, Identifiable {
     fileprivate var pendingStopExitCode: Int32?
     fileprivate var pendingRestart: ProjectRunFrozenStartRequest?
     fileprivate var stopRequestedByUser = false
+    fileprivate var autoOpenGeneration = UUID()
 
     fileprivate init(configurationID: String, engine: any ProjectRunProcessEngine) {
         id = configurationID
@@ -1057,6 +1066,9 @@ final class ProjectRunCoordinator: ObservableObject {
         name: String,
         command: String,
         workingDirectory: String,
+        webURL: String? = nil,
+        autoOpenWeb: Bool = false,
+        autoOpenWebDelaySeconds: Int = 2,
         sourceIdentity: String? = nil,
         sourceProjectID: String? = nil
     ) -> ProjectRunConfiguration? {
@@ -1065,6 +1077,9 @@ final class ProjectRunCoordinator: ObservableObject {
             name: name,
             command: command,
             workingDirectory: workingDirectory,
+            webURL: webURL,
+            autoOpenWeb: autoOpenWeb,
+            autoOpenWebDelaySeconds: autoOpenWebDelaySeconds,
             sourceIdentity: sourceIdentity,
             sourceProjectID: sourceProjectID
         )
@@ -1076,6 +1091,9 @@ final class ProjectRunCoordinator: ObservableObject {
         name: String,
         command: String,
         workingDirectory: String,
+        webURL: String? = nil,
+        autoOpenWeb: Bool = false,
+        autoOpenWebDelaySeconds: Int = 2,
         reassociateProject: Bool = false
     ) -> Bool {
         guard activeDeletion?.configurationIDs.contains(configuration.id) != true,
@@ -1085,6 +1103,9 @@ final class ProjectRunCoordinator: ObservableObject {
                   name: name,
                   command: command,
                   workingDirectory: workingDirectory,
+                  webURL: webURL,
+                  autoOpenWeb: autoOpenWeb,
+                  autoOpenWebDelaySeconds: autoOpenWebDelaySeconds,
                   rememberCommand: false,
                   reassociateProject: reassociateProject
               ) else { return false }
@@ -1429,6 +1450,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     private func beginInterrupt(_ session: ProjectRunSession, restarting: Bool, sendInput: Bool = true) {
+        session.autoOpenGeneration = UUID()
         let interruptID = UUID()
         session.interruptID = interruptID
         session.stopRequestedByUser = true
@@ -1488,6 +1510,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     private func beginClosing(_ session: ProjectRunSession) {
+        session.autoOpenGeneration = UUID()
         session.isClosing = true
         session.interruptID = nil
         session.pendingLaunch = nil
@@ -1774,6 +1797,7 @@ final class ProjectRunCoordinator: ObservableObject {
     }
 
     private func execute(_ request: ProjectRunFrozenStartRequest, in session: ProjectRunSession, execution: ProjectRunExecution? = nil) {
+        session.autoOpenGeneration = UUID()
         do {
             guard activeDeletion?.configurationIDs.contains(session.id) != true else { return }
             try validateStart(request)
@@ -1791,16 +1815,33 @@ final class ProjectRunCoordinator: ObservableObject {
             session.lastSuccessfulCommand = request.command
             session.startedAt = Date()
             session.state = .running
+            if request.configuration.autoOpenWeb,
+               let address = request.configuration.webURL,
+               let executionID = session.currentExecution?.id {
+                let generation = session.autoOpenGeneration
+                scheduler.schedule(after: .seconds(request.configuration.autoOpenWebDelaySeconds)) { [weak session] in
+                    guard let session,
+                          session.autoOpenGeneration == generation,
+                          session.currentExecution?.id == executionID,
+                          session.state == .running,
+                          session.executionIsRunning else { return }
+                    if let url = projectRunBrowserURL(address) { NSWorkspace.shared.open(url) }
+                }
+            }
             if request.commandWasDraft,
                let current = projectsModel.runConfigurations().first(where: { $0.id == request.configuration.id }) {
                 let draft = commandDrafts[current.id]
                 if projectsModel.updateRunConfiguration(current, name: current.name, command: request.command,
-                                                        workingDirectory: current.workingDirectory),
+                                                        workingDirectory: current.workingDirectory,
+                                                        webURL: current.webURL,
+                                                        autoOpenWeb: current.autoOpenWeb,
+                                                        autoOpenWebDelaySeconds: current.autoOpenWebDelaySeconds),
                    draft == request.command, commandDrafts[current.id] == request.command {
                     commandDrafts.removeValue(forKey: current.id)
                 }
             }
         } catch {
+            session.autoOpenGeneration = UUID()
             session.executionIsRunning = false
             session.state = session.engine.isShellReady ? .ready : .running
             session.failureExecution = session.currentExecution
@@ -1812,6 +1853,18 @@ final class ProjectRunCoordinator: ObservableObject {
 
     private func isRunConfigurationEnabled(_ configuration: ProjectRunConfiguration) -> Bool {
         projectsModel.runConfigurations().first { $0.id == configuration.id }?.isEnabled ?? false
+    }
+
+    @discardableResult
+    func openWebPage(for configuration: ProjectRunConfiguration) -> Bool {
+        guard sessions[configuration.id]?.state == .running,
+              let address = configuration.webURL,
+              let url = projectRunBrowserURL(address) else { return false }
+        return NSWorkspace.shared.open(url)
+    }
+
+    func canOpenWebPage(for configuration: ProjectRunConfiguration) -> Bool {
+        configuration.webURL?.isEmpty == false && sessions[configuration.id]?.state == .running
     }
 
     private func makeSession(for configurationID: String) -> ProjectRunSession {
@@ -1866,6 +1919,7 @@ final class ProjectRunCoordinator: ObservableObject {
                 return
             }
             session.interruptID = nil
+            session.autoOpenGeneration = UUID()
             session.pendingLaunch = nil
             session.pendingRestart = nil
             if session.executionIsRunning {

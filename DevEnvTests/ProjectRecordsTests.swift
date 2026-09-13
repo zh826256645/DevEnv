@@ -945,6 +945,28 @@ final class ProjectRecordsTests: XCTestCase {
     }
 
     @MainActor
+    func testRunConfigurationWebSettingsPersistAndLegacyDefaultsRemainSafe() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json"))
+        let model = ProjectsViewModel(store: store)
+
+        let created = try XCTUnwrap(model.createRunConfiguration(
+            name: "网页服务", command: "npm run dev", workingDirectory: "",
+            webURL: " https://localhost:3000 ", autoOpenWeb: true, autoOpenWebDelaySeconds: 90
+        ))
+        XCTAssertEqual(created.webURL, "https://localhost:3000")
+        XCTAssertTrue(created.autoOpenWeb)
+        XCTAssertEqual(created.autoOpenWebDelaySeconds, 60)
+
+        let reloaded = try XCTUnwrap(store.load().runConfigurations.first)
+        XCTAssertEqual(reloaded, created)
+        XCTAssertNil(ProjectRunConfiguration(id: "legacy", name: "旧", command: "pwd", workingDirectory: "").webURL)
+        XCTAssertFalse(ProjectRunConfiguration(id: "legacy", name: "旧", command: "pwd", workingDirectory: "").autoOpenWeb)
+    }
+
+    @MainActor
     func testRunConfigurationPreservesDirectoryIntentUntilExecution() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
