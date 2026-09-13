@@ -749,6 +749,9 @@ struct ContentView: View {
     @State private var runConfigurationName = ""
     @State private var runConfigurationCommand = ""
     @State private var runConfigurationWorkingDirectory = "."
+    @State private var runConfigurationWebURL = ""
+    @State private var runConfigurationAutoOpenWeb = false
+    @State private var runConfigurationAutoOpenWebDelaySeconds = 2
     @State private var runConfigurationSaveAttempted = false
     @State private var runConfigurationSourceIdentity: String?
     @State private var runConfigurationSourceProjectID: String?
@@ -1959,7 +1962,7 @@ struct ContentView: View {
     @ViewBuilder
     private var runConfigurationDetail: some View {
         if let configuration = selectedRunConfiguration {
-            runConfigurationDetail(configuration)
+            runConfigurationDetailCard(configuration)
         } else {
             ContentUnavailableView("选择一个运行配置", systemImage: "play.rectangle", description: Text("在左侧查看配置，选择后显示详情。"))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1968,7 +1971,7 @@ struct ContentView: View {
         }
     }
 
-    private func runConfigurationDetail(_ configuration: ProjectRunConfiguration) -> some View {
+    private func runConfigurationDetailCard(_ configuration: ProjectRunConfiguration) -> some View {
         let project = configuration.associatedProject(in: projectsModel.records)
         let session = runCoordinator.session(for: configuration.id)
         let state = session?.state ?? .inactive
@@ -2039,6 +2042,28 @@ struct ContentView: View {
                             runDetailRow("工作目录") {
                                 runDetailField(configuration.workingDirectory.isEmpty ? (project?.path ?? (configuration.projectID == nil ? "默认：当前用户目录" : "默认：关联项目目录（已失效）")) : configuration.workingDirectory)
                             }
+                            runDetailRow("关联网页") {
+                                if let address = configuration.webURL, !address.isEmpty {
+                                    Button {
+                                        _ = runCoordinator.openWebPage(for: configuration)
+                                    } label: {
+                                        Label(address, systemImage: "safari")
+                                            .lineLimit(1)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(AppTheme.accent)
+                                    .help("在默认浏览器打开")
+                                    .disabled(!runCoordinator.canOpenWebPage(for: configuration))
+                                } else {
+                                    Text("未配置").foregroundStyle(.secondary)
+                                }
+                            }
+                            if configuration.autoOpenWeb, configuration.webURL?.isEmpty == false {
+                                runDetailRow("自动打开") {
+                                    Text("运行 \(configuration.autoOpenWebDelaySeconds) 秒后打开")
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                             runDetailRow("端口") { Text(runPortsText(configuration)).foregroundStyle(.secondary) }
                             runDetailRow("来源") { Text(configuration.sourceIdentity ?? "手动创建").foregroundStyle(.secondary).textSelection(.enabled) }
                             if let execution = session?.currentExecution {
@@ -2077,6 +2102,18 @@ struct ContentView: View {
                     .buttonStyle(.plain).foregroundStyle(.secondary)
                     .help("编辑配置").accessibilityLabel("编辑 \(configuration.name)")
                     .disabled(cannotEdit)
+                if configuration.webURL?.isEmpty == false {
+                    Button {
+                        _ = runCoordinator.openWebPage(for: configuration)
+                    } label: {
+                        Image(systemName: "globe")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(AppTheme.accent)
+                    .help("在默认浏览器打开网页")
+                    .accessibilityLabel("在默认浏览器打开网页")
+                    .disabled(!runCoordinator.canOpenWebPage(for: configuration))
+                }
                 Spacer(minLength: 0)
                 projectRunStatusBadge(state, isEnabled: configuration.isEnabled)
             }
@@ -2175,6 +2212,14 @@ struct ContentView: View {
             selectedRunConfigurationID = configuration.id
             runDetailTab = "终端"
             runCoordinator.openTerminal(configuration)
+        }
+        if configuration.webURL?.isEmpty == false {
+            Button {
+                _ = runCoordinator.openWebPage(for: configuration)
+            } label: {
+                Label("打开网页", systemImage: "globe")
+            }
+            .disabled(!runCoordinator.canOpenWebPage(for: configuration))
         }
         Button("编辑配置") { beginEditingRunConfiguration(configuration) }
             .disabled(projectsModel.mutationsArePaused || runCoordinator.activeDeletion?.configurationIDs.contains(configuration.id) == true)
@@ -2437,7 +2482,8 @@ struct ContentView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 14) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
                     runConfigurationEditorField("项目", systemImage: "folder") {
                         Picker("项目", selection: $runConfigurationProjectID) {
                             Text("不关联项目").tag(Optional(""))
@@ -2503,6 +2549,32 @@ struct ContentView: View {
                             .accessibilityLabel("绝对、项目相对或默认工作目录")
                     }
 
+                    runConfigurationEditorField("关联网页", systemImage: "safari") {
+                        TextField("例如：https://localhost:3000", text: $runConfigurationWebURL)
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 9)
+                            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay { RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.11)) }
+                            .accessibilityLabel("运行配置关联网页地址")
+                        if let addressWarning = runConfigurationWebAddressWarning {
+                            Text(addressWarning)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+
+                    Toggle("运行后自动打开网页", isOn: $runConfigurationAutoOpenWeb)
+                        .toggleStyle(.switch)
+                        .disabled(runConfigurationWebURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if runConfigurationAutoOpenWeb {
+                        Stepper(value: $runConfigurationAutoOpenWebDelaySeconds, in: 0...60, step: 1) {
+                            Text("延时 \(runConfigurationAutoOpenWebDelaySeconds) 秒（最多 60 秒）")
+                        }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     VStack(alignment: .leading, spacing: 7) {
                         Label("启动参数说明", systemImage: "info.circle")
                             .font(.subheadline.weight(.semibold))
@@ -2530,6 +2602,8 @@ struct ContentView: View {
                     }
                 }
                 .padding(22)
+            }
+            .frame(maxHeight: .infinity)
 
             Divider()
             HStack {
@@ -2545,7 +2619,7 @@ struct ContentView: View {
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
         }
-        .frame(width: 540, height: 580)
+        .frame(width: 540, height: 680)
         .onAppear {
             DispatchQueue.main.async { runConfigurationNameIsFocused = true }
         }
@@ -2573,10 +2647,13 @@ struct ContentView: View {
         runConfigurationName = ""
         runConfigurationCommand = ""
         runConfigurationWorkingDirectory = ""
+        runConfigurationWebURL = ""
+        runConfigurationAutoOpenWeb = false
+        runConfigurationAutoOpenWebDelaySeconds = 2
         runConfigurationSaveAttempted = false
         runConfigurationSourceIdentity = nil
         runConfigurationSourceProjectID = nil
-        isShowingRunConfigurationEditor = true
+        DispatchQueue.main.async { isShowingRunConfigurationEditor = true }
     }
 
     private func runSuggestionRow(_ suggestion: ProjectRunSuggestion) -> some View {
@@ -2604,10 +2681,13 @@ struct ContentView: View {
         runConfigurationName = suggestion.name
         runConfigurationCommand = suggestion.command
         runConfigurationWorkingDirectory = suggestion.workingDirectory
+        runConfigurationWebURL = ""
+        runConfigurationAutoOpenWeb = false
+        runConfigurationAutoOpenWebDelaySeconds = 2
         runConfigurationSaveAttempted = false
         runConfigurationSourceIdentity = suggestion.sourceIdentity
         runConfigurationSourceProjectID = suggestion.projectID
-        isShowingRunConfigurationEditor = true
+        DispatchQueue.main.async { isShowingRunConfigurationEditor = true }
     }
 
     private func beginEditingRunConfiguration(_ configuration: ProjectRunConfiguration) {
@@ -2617,10 +2697,13 @@ struct ContentView: View {
         runConfigurationName = configuration.name
         runConfigurationCommand = configuration.command
         runConfigurationWorkingDirectory = configuration.workingDirectory
+        runConfigurationWebURL = configuration.webURL ?? ""
+        runConfigurationAutoOpenWeb = configuration.autoOpenWeb
+        runConfigurationAutoOpenWebDelaySeconds = configuration.autoOpenWebDelaySeconds
         runConfigurationSaveAttempted = false
         runConfigurationSourceIdentity = configuration.sourceIdentity
         runConfigurationSourceProjectID = configuration.sourceProjectID
-        isShowingRunConfigurationEditor = true
+        DispatchQueue.main.async { isShowingRunConfigurationEditor = true }
     }
 
     private func saveRunConfiguration() {
@@ -2635,6 +2718,9 @@ struct ContentView: View {
                 name: runConfigurationName,
                 command: runConfigurationCommand,
                 workingDirectory: runConfigurationWorkingDirectory,
+                webURL: runConfigurationWebURL,
+                autoOpenWeb: runConfigurationAutoOpenWeb,
+                autoOpenWebDelaySeconds: runConfigurationAutoOpenWebDelaySeconds,
                 reassociateProject: runConfigurationProjectID?.isEmpty == false
             )
         } else {
@@ -2643,11 +2729,23 @@ struct ContentView: View {
                 name: runConfigurationName,
                 command: runConfigurationCommand,
                 workingDirectory: runConfigurationWorkingDirectory,
+                webURL: runConfigurationWebURL,
+                autoOpenWeb: runConfigurationAutoOpenWeb,
+                autoOpenWebDelaySeconds: runConfigurationAutoOpenWebDelaySeconds,
                 sourceIdentity: runConfigurationSourceIdentity,
                 sourceProjectID: runConfigurationSourceProjectID
             ) != nil
         }
         if succeeded { isShowingRunConfigurationEditor = false }
+    }
+
+    private var runConfigurationWebAddressWarning: String? {
+        let address = runConfigurationWebURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty else { return nil }
+        guard let url = projectRunBrowserURL(address), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
+            return "地址格式可能无法打开，仍可保存并尝试使用默认浏览器打开。"
+        }
+        return nil
     }
 
     private var visibleProjects: [ProjectRecord] {

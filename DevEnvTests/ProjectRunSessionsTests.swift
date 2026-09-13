@@ -8,6 +8,12 @@ import XCTest
 @MainActor
 final class ProjectRunSessionsTests: XCTestCase {
 
+    func testAssociatedWebAddressCanUseBareHostAndExplicitScheme() {
+        XCTAssertEqual(projectRunBrowserURL("localhost:3000")?.absoluteString, "https://localhost:3000")
+        XCTAssertEqual(projectRunBrowserURL("http://localhost:3000")?.scheme, "http")
+        XCTAssertNil(projectRunBrowserURL("   "))
+    }
+
     func testTerminalUsesInstalledNerdFontForPromptIcons() throws {
         let promptIcons = ""
         guard NSFontManager.shared.availableFontFamilies.contains(where: { family in
@@ -1133,7 +1139,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertNotNil(appDelegate.statusMenu.item(withTitle: "后台服务")?.submenu?.item(withTitle: "默认工作区"))
         let rows = appDelegate.statusMenu.items.filter { $0.title == "API" }
         XCTAssertEqual(rows.compactMap(\.subtitle), ["second"])
-        XCTAssertEqual(rows.first?.submenu?.items.map(\.title), ["API", "", "打开终端", "启动", "重启", "停止", "", "查看配置"])
+        XCTAssertEqual(rows.first?.submenu?.items.map(\.title), ["API", "", "启动", "重启", "停止", "", "打开终端", "", "查看配置"])
         XCTAssertNotNil(rows.first?.image)
 
         factory.engines[0].prompt(exitCode: 0)

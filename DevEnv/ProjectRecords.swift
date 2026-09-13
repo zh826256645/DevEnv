@@ -182,6 +182,9 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var command: String
     var workingDirectory: String
+    var webURL: String?
+    var autoOpenWeb: Bool
+    var autoOpenWebDelaySeconds: Int
     let sourceIdentity: String?
     let sourceProjectID: String?
     var isEnabled: Bool
@@ -207,7 +210,8 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, projectID, name, command, workingDirectory, sourceIdentity, sourceProjectID, isEnabled, workspaceID
+        case id, projectID, name, command, workingDirectory, webURL, autoOpenWeb, autoOpenWebDelaySeconds
+        case sourceIdentity, sourceProjectID, isEnabled, workspaceID
         case deletedProjectTitle, deletedProjectPath
     }
 
@@ -217,6 +221,9 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
         name: String,
         command: String,
         workingDirectory: String,
+        webURL: String? = nil,
+        autoOpenWeb: Bool = false,
+        autoOpenWebDelaySeconds: Int = 2,
         sourceIdentity: String? = nil,
         sourceProjectID: String? = nil,
         isEnabled: Bool = true,
@@ -228,6 +235,9 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
         self.name = name
         self.command = command
         self.workingDirectory = workingDirectory
+        self.webURL = webURL
+        self.autoOpenWeb = autoOpenWeb
+        self.autoOpenWebDelaySeconds = min(max(autoOpenWebDelaySeconds, 0), 60)
         self.sourceIdentity = sourceIdentity
         self.sourceProjectID = sourceProjectID
         self.isEnabled = isEnabled
@@ -243,6 +253,9 @@ struct ProjectRunConfiguration: Codable, Identifiable, Equatable, Sendable {
         name = try values.decode(String.self, forKey: .name)
         command = try values.decode(String.self, forKey: .command)
         workingDirectory = try values.decode(String.self, forKey: .workingDirectory)
+        webURL = try values.decodeIfPresent(String.self, forKey: .webURL)
+        autoOpenWeb = try values.decodeIfPresent(Bool.self, forKey: .autoOpenWeb) ?? false
+        autoOpenWebDelaySeconds = min(max(try values.decodeIfPresent(Int.self, forKey: .autoOpenWebDelaySeconds) ?? 2, 0), 60)
         sourceIdentity = try values.decodeIfPresent(String.self, forKey: .sourceIdentity)
         sourceProjectID = try values.decodeIfPresent(String.self, forKey: .sourceProjectID)
         isEnabled = try values.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
@@ -1319,6 +1332,9 @@ final class ProjectsViewModel: ObservableObject {
         name: String,
         command: String,
         workingDirectory: String,
+        webURL: String? = nil,
+        autoOpenWeb: Bool = false,
+        autoOpenWebDelaySeconds: Int = 2,
         sourceIdentity: String? = nil,
         sourceProjectID: String? = nil
     ) -> ProjectRunConfiguration? {
@@ -1330,7 +1346,10 @@ final class ProjectsViewModel: ObservableObject {
                 projectID: projectID,
                 name: name,
                 command: command,
-                workingDirectory: workingDirectory
+                workingDirectory: workingDirectory,
+                webURL: webURL,
+                autoOpenWeb: autoOpenWeb,
+                autoOpenWebDelaySeconds: autoOpenWebDelaySeconds
             )
             let sourceIdentity = sourceIdentity?.trimmingCharacters(in: .whitespacesAndNewlines)
             let configuration = ProjectRunConfiguration(
@@ -1338,6 +1357,9 @@ final class ProjectsViewModel: ObservableObject {
                 name: input.name,
                 command: input.command,
                 workingDirectory: input.workingDirectory,
+                webURL: input.webURL,
+                autoOpenWeb: input.autoOpenWeb,
+                autoOpenWebDelaySeconds: input.autoOpenWebDelaySeconds,
                 sourceIdentity: sourceIdentity?.isEmpty == false ? sourceIdentity : nil,
                 sourceProjectID: sourceIdentity?.isEmpty == false ? (sourceProjectID ?? projectID) : nil,
                 workspaceID: document.selectedWorkspaceID
@@ -1357,6 +1379,9 @@ final class ProjectsViewModel: ObservableObject {
         name: String,
         command: String,
         workingDirectory: String,
+        webURL: String? = nil,
+        autoOpenWeb: Bool = false,
+        autoOpenWebDelaySeconds: Int = 2,
         rememberCommand: Bool = true,
         reassociateProject: Bool = false
     ) -> Bool {
@@ -1380,6 +1405,9 @@ final class ProjectsViewModel: ObservableObject {
                 name: name,
                 command: command,
                 workingDirectory: directory,
+                webURL: webURL,
+                autoOpenWeb: autoOpenWeb,
+                autoOpenWebDelaySeconds: autoOpenWebDelaySeconds,
                 workspaceID: existing.workspaceID,
                 existingProjectID: !reassociateProject && existing.associatedProject(in: records) == nil ? existing.projectID : nil
             )
@@ -1388,6 +1416,9 @@ final class ProjectsViewModel: ObservableObject {
             updated.name = input.name
             updated.command = rememberCommand ? input.command : existing.command
             updated.workingDirectory = input.workingDirectory
+            updated.webURL = input.webURL
+            updated.autoOpenWeb = input.autoOpenWeb
+            updated.autoOpenWebDelaySeconds = input.autoOpenWebDelaySeconds
             if updated.projectID != existing.projectID || reassociateProject {
                 updated.deletedProjectTitle = nil
                 updated.deletedProjectPath = nil
@@ -1735,9 +1766,12 @@ final class ProjectsViewModel: ObservableObject {
         name: String,
         command: String,
         workingDirectory: String,
+        webURL: String? = nil,
+        autoOpenWeb: Bool = false,
+        autoOpenWebDelaySeconds: Int = 2,
         workspaceID: String? = nil,
         existingProjectID: String? = nil
-    ) throws -> (name: String, command: String, workingDirectory: String) {
+    ) throws -> (name: String, command: String, workingDirectory: String, webURL: String?, autoOpenWeb: Bool, autoOpenWebDelaySeconds: Int) {
         if let projectID, projectID != existingProjectID {
             guard document.records.contains(where: {
                 $0.id == projectID && $0.workspaceID == (workspaceID ?? document.selectedWorkspaceID)
@@ -1755,7 +1789,8 @@ final class ProjectsViewModel: ObservableObject {
         guard path.isEmpty || NSString(string: path).isAbsolutePath || projectID != nil else {
             throw ProjectRunConfigurationError.relativeDirectoryNeedsProject
         }
-        return (name, command, path)
+        let webURL = webURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (name, command, path, webURL?.isEmpty == false ? webURL : nil, autoOpenWeb, min(max(autoOpenWebDelaySeconds, 0), 60))
     }
 
     private func applyDocumentChange(

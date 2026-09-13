@@ -307,7 +307,6 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         header.image = configurationImage(configuration, showsStatus: false)
         menu.addItem(header)
         menu.addItem(.separator())
-        menu.addItem(menuAction("打开终端", symbol: "terminal.fill", action: #selector(openSession(_:)), id: configuration.id))
         let session = runCoordinator.session(for: configuration.id)
         let state = session?.state ?? .inactive
         let project = configuration.associatedProject(in: projectsModel.records)
@@ -321,6 +320,13 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         let stop = menuAction(state == .ready ? "关闭终端" : "停止", symbol: "stop.fill", action: #selector(stopSession(_:)), id: configuration.id)
         stop.isEnabled = state.isLive && session?.isClosing != true
         menu.addItem(stop)
+        menu.addItem(.separator())
+        menu.addItem(menuAction("打开终端", symbol: "terminal.fill", action: #selector(openSession(_:)), id: configuration.id))
+        if configuration.webURL?.isEmpty == false {
+            let web = menuAction("打开网页", symbol: "globe", action: #selector(openWebPage(_:)), id: configuration.id)
+            web.isEnabled = runCoordinator.canOpenWebPage(for: configuration)
+            menu.addItem(web)
+        }
         menu.addItem(.separator())
         menu.addItem(menuAction("查看配置", symbol: "doc.text", action: #selector(showConfiguration(_:)), id: configuration.id))
         return menu
@@ -365,6 +371,11 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showConfiguration(_ sender: NSMenuItem) {
         openMainWindow(configurationID: sender.representedObject as? String, detailTab: "详情")
+    }
+
+    @objc private func openWebPage(_ sender: NSMenuItem) {
+        guard let configuration = menuConfiguration(sender) else { return }
+        _ = runCoordinator.openWebPage(for: configuration)
     }
 
     private func menuConfiguration(_ sender: NSMenuItem) -> ProjectRunConfiguration? {

@@ -38,9 +38,17 @@ DevEnv 中属于一个 Workspace、指向一个 Project Root 的独立项目身�
 _Avoid_: Project Snapshot, Project Files, Directory Identity
 
 **Run Configuration**:
-DevEnv 保存、属于一个 Workspace 且可选关联该工作区内一个 Project Record 的独立运行意图，包含稳定身份、名称、命令、工作目录选择和可选来源身份；工作目录可以是绝对路径、项目相对路径或默认目录。它不以项目记录为存在前提，也不表示项目可运行。
+DevEnv 保存、属于一个 Workspace 且可选关联该工作区内一个 Project Record 的独立运行意图，包含稳定身份、名称、命令、工作目录选择、可选关联网页地址和可选来源身份；工作目录可以是绝对路径、项目相对路径或默认目录。它不以项目记录为存在前提，也不表示项目可运行。
 项目删除或项目与配置分开移动会使关联持续失效；后来进入同一 Workspace 也不自动恢复，需显式解除或重新关联。失效不终止当前执行，但阻止之后提交的新启动和重启；移动造成的失效也不取消移动前已提交的重启。
 _Avoid_: Project Requirement, Project Requirements Summary, Runnable Status
+
+**Associated Web Address**:
+Run Configuration 可选保存的、供用户查看或打开的网页地址；它不参与运行命令，也不要求保存时通过网页格式校验。
+_Avoid_: Run Endpoint, Service URL, Health URL
+
+**Automatic Web Opening**:
+Run Configuration 在一次 Run Execution 成功提交后，按用户设置的延时尝试使用默认浏览器打开 Associated Web Address 的行为；每次执行最多触发一次，停止、重启、关闭终端或执行提前结束会取消尚未触发的打开。
+_Avoid_: Auto Run, Browser Launch, Health Check
 
 **Run Batch Intent**:
 用户明确触发批量启动、停止或关闭时，从触发入口的当前作用域解析并冻结、仅用于本次提交的一组单项启动请求或会话活动；停止目标可为配置命令、手动命令或就绪会话，全部目标均就绪时入口切换为关闭终端。之后开始的新命令不被旧停止或关闭请求追溯处理。运行页作用域为当前 Workspace 内的项目、状态筛选与搜索结果，状态栏作用域为全部 Workspace；它不是持久化运行组或运行编排，各目标按单项语义独立处理。
