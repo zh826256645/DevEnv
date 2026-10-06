@@ -1,6 +1,6 @@
 # DevEnv 发版流程
 
-状态：发版自动化已实现；最新已发布版本为 `v0.2.1` Private Preview（Build `7`）。
+状态：发版自动化已实现；最新已发布版本为 `v0.2.2` Private Preview（Build `8`）。
 
 ## 本地发布通道（自 v0.1.1 起）
 
@@ -8,11 +8,11 @@
 
 本地通道允许使用所有者批准的当前用户，不需要注册 Runner。必须满足 Xcode `26.6 (17F113)`、`arm64`、至少 50 GiB 可用空间和无本次发布残留挂载。不得使用现成 Debug App 或未经验证的旧产物。
 
-### v0.2.2（Build 8）本地打包例外
+### v0.2.2（Build 8）本地构建与发布例外
 
-2026-10-06，仓库所有者明确选择本机 Xcode `27.0 (27A266a)`，授权本地完整验证替代 Hosted CI 后合并 `develop → master`。此工具链例外仅适用于本次本地打包；GitHub Actions 与专用 Runner 的 Xcode `26.6 (17F113)` 锁定值保持不变，不将失败或未运行的 CI 视为通过。
+2026-10-06，仓库所有者明确选择本机 Xcode `27.0 (27A266a)`，授权本地完整验证替代 Hosted CI 后合并 `develop → master`。此工具链例外仅适用于本次本地构建与发布；GitHub Actions 与专用 Runner 的 Xcode `26.6 (17F113)` 锁定值保持不变，不将失败或未运行的 CI 视为通过。
 
-本次交付在下列步骤 5 完成后结束，不执行步骤 6–8，不创建 Tag 或 GitHub Release。四组发布契约测试、完整 XCTest 和候选 Release 编译须在合并前通过；正式安装包须来自远端 `master` 的精确合并提交，并重新完成契约测试、XCTest、Release 构建及 DMG 校验。依赖锁文件保持不变，产物、dSYM、日志、工具链与源码 SHA 证据保存在下载目录中新建的版本文件夹至少 90 天，完成后恢复 `develop`。最新已发布版本仍为 v0.2.1。
+本次先按所有者要求完成本地安装包交付，随后同日由所有者追加要求发布到 GitHub Releases。安装包来源为已通过四组发布契约测试、284 项 XCTest、Release 构建及 DMG 校验的 `master` 合并提交 `a745242cfe48131603ab7c0f4681aba80cc287b0`，依赖锁文件未改变。发布复用该安装包，不重新构建；annotated Tag `v0.2.2` 指向上述提交且不可移动。上传到 Draft Prerelease 后下载附件并重新验证内容和 SHA-256，通过后按所有者授权发布为 Prerelease。产物、dSYM、日志、工具链与源码 SHA 证据保存在本地下载目录至少 90 天，完成后恢复 `develop`。
 
 1. 在 `develop` 更新版本、Build、工作流锁定值和 Release Notes，提交并推送。
 2. 运行四组 `scripts/tests/*-contract-tests.sh` 发布契约测试及完整 XCTest，记录候选 SHA。只有已明确授权使用本地验证替代 Hosted CI，且本地验证通过时，才允许合并 `develop → master` Release PR；在 PR 记录替代原因和证据，不修改失败 CI 的结果。
