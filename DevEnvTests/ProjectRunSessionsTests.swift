@@ -111,17 +111,17 @@ final class ProjectRunSessionsTests: XCTestCase {
         let session = try XCTUnwrap(fixture.coordinator.session(for: configuration.id))
         let engine = try XCTUnwrap(fixture.factory.engines.first)
         let executionID = try XCTUnwrap(session.activeExecution?.id)
-        fixture.coordinator.requestBatchStop(in: [configuration])
+        var intent = fixture.coordinator.makeBatchStopIntent(in: [configuration])
         engine.prompt(exitCode: 0)
         XCTAssertEqual(session.activeExecution?.id, executionID)
-        fixture.coordinator.confirmBatchStop()
+        fixture.coordinator.submitBatchStop(try XCTUnwrap(intent))
         XCTAssertEqual(engine.signals, [SIGINT])
 
         engine.prompt(exitCode: 130)
-        fixture.coordinator.requestBatchStop(in: [configuration])
+        intent = fixture.coordinator.makeBatchStopIntent(in: [configuration])
         engine.isShellReady = false
         engine.onShellState?(false, nil)
-        fixture.coordinator.confirmBatchStop()
+        fixture.coordinator.submitBatchStop(try XCTUnwrap(intent))
         XCTAssertEqual(engine.signals, [SIGINT], "冻结的就绪会话不能中断后来输入的新命令")
         XCTAssertEqual(session.state, .running)
     }
@@ -142,35 +142,31 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.run(configurations[1]), .started)
         XCTAssertEqual(coordinator.run(configurations[2]), .started)
         XCTAssertFalse(coordinator.canCloseBatch(in: scope))
-        coordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, false)
-        coordinator.cancelBatchStop()
+        var intent = coordinator.makeBatchStopIntent(in: scope, closeReadyTerminals: true)
+        XCTAssertEqual(intent?.closesTerminals, false)
 
         fixture.factory.engines[1].prompt(exitCode: 0)
         XCTAssertTrue(coordinator.canCloseBatch(in: scope), "未启动配置和筛选范围外的运行不影响全部关闭")
-        coordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, true)
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs.count, 2)
-        coordinator.cancelBatchStop()
+        intent = coordinator.makeBatchStopIntent(in: scope, closeReadyTerminals: true)
+        XCTAssertEqual(intent?.closesTerminals, true)
+        XCTAssertEqual(intent?.executionIDs.count, 2)
         XCTAssertTrue(fixture.factory.engines.allSatisfy { $0.signals.isEmpty })
 
-        coordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
+        intent = coordinator.makeBatchStopIntent(in: scope, closeReadyTerminals: true)
         let firstEngine = fixture.factory.engines[0]
         firstEngine.isShellReady = false
         firstEngine.onShellState?(false, nil)
         firstEngine.prompt(exitCode: 0)
-        coordinator.confirmBatchStop()
+        coordinator.submitBatchStop(try XCTUnwrap(intent))
         while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
-        XCTAssertNil(coordinator.pendingBatchStopIntent)
         XCTAssertNil(coordinator.session(for: configurations[1].id))
         XCTAssertTrue(fixture.factory.engines[1].signals.contains(SIGKILL))
         XCTAssertEqual(coordinator.session(for: configurations[0].id)?.state, .ready)
-        XCTAssertTrue(firstEngine.signals.isEmpty, "确认前出现过新命令的终端不能被旧关闭请求关闭")
+        XCTAssertTrue(firstEngine.signals.isEmpty, "提交前出现过新命令的终端不能被旧关闭请求关闭")
         XCTAssertEqual(coordinator.session(for: configurations[2].id)?.state, .running)
         XCTAssertTrue(fixture.factory.engines[2].signals.isEmpty)
 
-        coordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
-        coordinator.confirmBatchStop()
+        coordinator.stopBatch(in: scope, closeReadyTerminals: true)
         while !fixture.scheduler.actions.isEmpty { fixture.scheduler.runNext() }
         XCTAssertNil(coordinator.session(for: configurations[0].id))
         XCTAssertFalse(coordinator.canStopBatch(in: scope))
@@ -906,7 +902,7 @@ final class ProjectRunSessionsTests: XCTestCase {
 
         XCTAssertEqual(
             appDelegate.statusMenu.items.map(\.title),
-            ["打开 DevEnv", "", "0 个运行中", "", "默认工作区", "暂无运行配置", "", "启动未运行配置", "停止此工作区…", "", "全局操作", "", "退出 DevEnv…"]
+            ["打开 DevEnv", "", "0 个运行中", "", "默认工作区", "暂无运行配置", "", "启动未运行配置", "停止此工作区", "", "全局操作", "", "退出 DevEnv…"]
         )
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区启动")?.isEnabled ?? true)
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区停止")?.isEnabled ?? true)
@@ -998,9 +994,12 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(model.selectWorkspace(workspace.id))
         let second = try XCTUnwrap(model.createRunConfiguration(name: "Web", command: "second", workingDirectory: directory.path))
         let factory = FakeProjectRunEngineFactory()
+        let scheduler = FakeProjectRunScheduler()
         let coordinator = ProjectRunCoordinator(projectsModel: model, makeEngine: factory.makeEngine,
-            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"), scheduler: FakeProjectRunScheduler())
-        let delegate = DevEnvAppDelegate(projectsModel: model, runCoordinator: coordinator, statusBarRunPageHandoff: {})
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"), scheduler: scheduler)
+        var handoffCount = 0
+        let delegate = DevEnvAppDelegate(projectsModel: model, runCoordinator: coordinator,
+            statusBarRunPageHandoff: { handoffCount += 1 })
         delegate.rebuildStatusMenu()
         let start = try XCTUnwrap(delegate.statusMenu.items.first {
             $0.title == "启动未运行配置" && $0.representedObject as? String == workspace.id
@@ -1010,25 +1009,28 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: second.id)?.state, .running)
         delegate.rebuildStatusMenu()
         let stop = try XCTUnwrap(delegate.statusMenu.items.first {
-            $0.title == "停止此工作区…" && $0.representedObject as? String == workspace.id
+            $0.title == "停止此工作区" && $0.representedObject as? String == workspace.id
         })
         XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(stop.action), to: stop.target, from: stop))
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs, [try XCTUnwrap(coordinator.session(for: second.id)?.activeExecution?.id)])
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, false)
-        coordinator.cancelBatchStop()
+        XCTAssertEqual(factory.engines[0].signals, [SIGINT])
+        XCTAssertEqual(coordinator.session(for: second.id)?.state, .stopping)
+        XCTAssertNil(coordinator.session(for: first.id))
+        XCTAssertEqual(handoffCount, 1, "停止操作不应再次打开运行页")
 
         // Other workspaces must not affect this workspace's close-ready action.
         _ = coordinator.run(first)
         factory.engines[0].prompt(exitCode: 0)
         delegate.rebuildStatusMenu()
-        XCTAssertNil(delegate.statusMenu.item(withTitle: "停止此工作区…"))
+        XCTAssertNil(delegate.statusMenu.item(withTitle: "停止此工作区"))
         let close = try XCTUnwrap(delegate.statusMenu.item(withTitle: "关闭所有终端"))
         XCTAssertTrue(close.isEnabled)
         XCTAssertEqual(close.representedObject as? String, workspace.id)
         XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(close.action), to: close.target, from: close))
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, true)
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs.count, 1)
+        while !scheduler.actions.isEmpty { scheduler.runNext() }
+        XCTAssertNil(coordinator.session(for: second.id))
         XCTAssertEqual(coordinator.session(for: first.id)?.state, .running)
+        XCTAssertTrue(factory.engines[1].signals.isEmpty)
+        XCTAssertEqual(handoffCount, 1, "关闭操作不应再次打开运行页")
     }
 
     func testStatusBarGlobalStartSubmitsAllProjectsToSharedFrozenIntent() async throws {
@@ -1155,9 +1157,6 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(NSApplication.shared.sendAction(
             try XCTUnwrap(closeItem.action), to: closeItem.target, from: closeItem
         ))
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.closesTerminals, true)
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs.count, 2)
-        coordinator.confirmBatchStop()
         while !scheduler.actions.isEmpty { scheduler.runNext() }
         XCTAssertNil(coordinator.session(for: first.id))
         XCTAssertNil(coordinator.session(for: second.id))
@@ -1220,7 +1219,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.session(for: configuration.id)?.activeExecution?.id, executionID)
     }
 
-    func testStatusBarGlobalStopFreezesEveryCurrentExecution() throws {
+    func testStatusBarGlobalStopImmediatelyStopsEveryCurrentExecutionWithoutOpeningWindow() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let firstRoot = directory.appendingPathComponent("first")
@@ -1279,15 +1278,13 @@ final class ProjectRunSessionsTests: XCTestCase {
             from: stopItem
         ))
 
-        let replacementExecutionID = try XCTUnwrap(coordinator.session(for: first.id)?.activeExecution?.id)
-        XCTAssertEqual(handoffCount, 1)
-        XCTAssertNotEqual(replacementExecutionID, executionIDs[0])
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs, executionIDs)
-        XCTAssertEqual(factory.engines.map(\.signals), [[SIGKILL, 0], []])
-        coordinator.confirmBatchStop()
-        XCTAssertEqual(factory.engines.map(\.signals), [[SIGKILL, 0], [SIGINT]])
-        XCTAssertEqual(coordinator.session(for: first.id)?.activeExecution?.id, replacementExecutionID)
-        XCTAssertEqual(coordinator.session(for: first.id)?.state, .running)
+        XCTAssertEqual(handoffCount, 0)
+        XCTAssertEqual(factory.engines.map(\.signals), [[SIGINT], [SIGINT]])
+        XCTAssertEqual(try [first, second].map {
+            try XCTUnwrap(coordinator.session(for: $0.id)?.activeExecution?.id)
+        }, executionIDs)
+        XCTAssertEqual(coordinator.session(for: first.id)?.state, .stopping)
+        XCTAssertEqual(coordinator.session(for: second.id)?.state, .stopping)
         appDelegate.rebuildStatusMenu()
         XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区停止")?.isEnabled ?? false)
     }
@@ -1760,11 +1757,11 @@ final class ProjectRunSessionsTests: XCTestCase {
         let outsideExecutionID = try XCTUnwrap(coordinator.session(for: outside.id)?.activeExecution?.id)
 
         XCTAssertTrue(coordinator.canStopBatch(in: [inactive, included, included]))
-        coordinator.requestBatchStop(in: [inactive, included, included])
+        let intent = coordinator.makeBatchStopIntent(in: [inactive, included, included])
 
-        XCTAssertEqual(coordinator.pendingBatchStopIntent?.executionIDs, [includedExecutionID])
-        XCTAssertFalse(coordinator.pendingBatchStopIntent?.executionIDs.contains(outsideExecutionID) ?? true)
-        coordinator.confirmBatchStop()
+        XCTAssertEqual(intent?.executionIDs, [includedExecutionID])
+        XCTAssertFalse(intent?.executionIDs.contains(outsideExecutionID) ?? true)
+        coordinator.submitBatchStop(try XCTUnwrap(intent))
         XCTAssertEqual(factory.engines[0].signals, [SIGINT])
         XCTAssertTrue(factory.engines[1].signals.isEmpty)
         XCTAssertEqual(coordinator.session(for: outside.id)?.state, .running)
@@ -1793,16 +1790,16 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(fixture.factory.engines[0].signals, [SIGINT])
 
         XCTAssertTrue(fixture.coordinator.canStopBatch(in: [configuration]))
-        fixture.coordinator.requestBatchStop(in: [configuration])
-        XCTAssertEqual(fixture.coordinator.pendingBatchStopIntent?.executionIDs, [executionID])
+        let intent = fixture.coordinator.makeBatchStopIntent(in: [configuration])
+        XCTAssertEqual(intent?.executionIDs, [executionID])
 
-        fixture.coordinator.confirmBatchStop()
+        fixture.coordinator.submitBatchStop(try XCTUnwrap(intent))
 
         XCTAssertEqual(fixture.factory.engines[0].signals, [SIGINT, SIGINT])
         XCTAssertEqual(fixture.coordinator.session(for: configuration.id)?.state, .stopping)
     }
 
-    func testCancellingBatchStopDiscardsIntentWithoutSendingSignals() throws {
+    func testCapturingBatchStopIntentDoesNotSendSignals() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1822,17 +1819,14 @@ final class ProjectRunSessionsTests: XCTestCase {
         )
 
         XCTAssertEqual(coordinator.run(configuration, projectRoot: directory.path), .started)
-        coordinator.requestBatchStop(in: [configuration])
-        XCTAssertNotNil(coordinator.pendingBatchStopIntent)
+        let intent = coordinator.makeBatchStopIntent(in: [configuration])
+        XCTAssertNotNil(intent)
 
-        coordinator.cancelBatchStop()
-
-        XCTAssertNil(coordinator.pendingBatchStopIntent)
         XCTAssertTrue(factory.engines[0].signals.isEmpty)
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .running)
     }
 
-    func testConfirmingBatchStopSkipsEndedAndReplacementExecutions() throws {
+    func testSubmittingBatchStopSkipsEndedAndReplacementExecutions() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1862,9 +1856,9 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.run(replaced, projectRoot: directory.path), .started)
         let endedExecutionID = try XCTUnwrap(coordinator.session(for: ended.id)?.activeExecution?.id)
         let replacedExecutionID = try XCTUnwrap(coordinator.session(for: replaced.id)?.activeExecution?.id)
-        coordinator.requestBatchStop(in: [ended, replaced])
+        let intent = coordinator.makeBatchStopIntent(in: [ended, replaced])
         XCTAssertEqual(
-            coordinator.pendingBatchStopIntent?.executionIDs,
+            intent?.executionIDs,
             [endedExecutionID, replacedExecutionID]
         )
 
@@ -1873,19 +1867,18 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.run(replaced, projectRoot: directory.path), .started)
         let replacementExecutionID = try XCTUnwrap(coordinator.session(for: replaced.id)?.activeExecution?.id)
         XCTAssertNotEqual(replacementExecutionID, replacedExecutionID)
-        let signalCountsBeforeConfirmation = factory.engines.map { $0.signals.count }
+        let signalCountsBeforeSubmission = factory.engines.map { $0.signals.count }
 
-        coordinator.confirmBatchStop()
+        coordinator.submitBatchStop(try XCTUnwrap(intent))
 
-        XCTAssertNil(coordinator.pendingBatchStopIntent)
-        XCTAssertEqual(factory.engines.map { $0.signals.count }, signalCountsBeforeConfirmation)
+        XCTAssertEqual(factory.engines.map { $0.signals.count }, signalCountsBeforeSubmission)
         XCTAssertEqual(coordinator.session(for: ended.id)?.state, .exited(0))
         XCTAssertNil(coordinator.session(for: ended.id)?.failureMessage)
         XCTAssertEqual(coordinator.session(for: replaced.id)?.state, .running)
         XCTAssertEqual(coordinator.session(for: replaced.id)?.activeExecution?.id, replacementExecutionID)
     }
 
-    func testConfirmingBatchStopCancelsPendingRestartWithoutLaunchingReplacement() throws {
+    func testSubmittingBatchStopCancelsPendingRestartWithoutLaunchingReplacement() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1911,8 +1904,7 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(coordinator.canStopBatch(in: [configuration]))
         XCTAssertEqual(factory.engines[0].signals, [SIGINT])
 
-        coordinator.requestBatchStop(in: [configuration])
-        coordinator.confirmBatchStop()
+        coordinator.stopBatch(in: [configuration])
 
         XCTAssertEqual(coordinator.session(for: configuration.id)?.state, .stopping)
         XCTAssertEqual(factory.engines[0].signals, [SIGINT, SIGINT])
@@ -1955,9 +1947,9 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertEqual(coordinator.run(second, projectRoot: directory.path), .started)
         factory.engines[0].signalSucceeds = false
 
-        coordinator.requestBatchStop(in: [first, second])
+        let intent = coordinator.makeBatchStopIntent(in: [first, second])
         factory.engines[1].returnsToPromptOnInterrupt = true
-        coordinator.confirmBatchStop()
+        coordinator.submitBatchStop(try XCTUnwrap(intent))
 
         XCTAssertEqual(factory.engines[0].signals, [SIGINT])
         XCTAssertEqual(factory.engines[1].signals, [SIGINT])

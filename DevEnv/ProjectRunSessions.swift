@@ -997,7 +997,6 @@ struct ProjectRunDeletionIntent {
 @MainActor
 final class ProjectRunCoordinator: ObservableObject {
     @Published private(set) var sessions: [String: ProjectRunSession] = [:]
-    @Published private(set) var pendingBatchStopIntent: ProjectRunBatchStopIntent?
     @Published private(set) var pendingDeletion: ProjectRunDeletionIntent?
     @Published private(set) var activeDeletion: ProjectRunDeletionIntent?
     @Published var deletionError: String?
@@ -1279,9 +1278,16 @@ final class ProjectRunCoordinator: ObservableObject {
         return !targets.isEmpty && targets.allSatisfy { $0.state == .ready }
     }
 
-    func requestBatchStop(in scope: [ProjectRunConfiguration], closeReadyTerminals: Bool = false) {
+    func stopBatch(in scope: [ProjectRunConfiguration], closeReadyTerminals: Bool = false) {
+        guard let intent = makeBatchStopIntent(in: scope, closeReadyTerminals: closeReadyTerminals) else { return }
+        submitBatchStop(intent)
+    }
+
+    func makeBatchStopIntent(
+        in scope: [ProjectRunConfiguration], closeReadyTerminals: Bool = false
+    ) -> ProjectRunBatchStopIntent? {
         let targets = batchStopSessions(in: scope)
-        pendingBatchStopIntent = targets.isEmpty
+        return targets.isEmpty
             ? nil
             : ProjectRunBatchStopIntent(
                 executionIDs: targets.map(\.activityID),
@@ -1289,13 +1295,7 @@ final class ProjectRunCoordinator: ObservableObject {
             )
     }
 
-    func cancelBatchStop() {
-        pendingBatchStopIntent = nil
-    }
-
-    func confirmBatchStop() {
-        guard let intent = pendingBatchStopIntent else { return }
-        pendingBatchStopIntent = nil
+    func submitBatchStop(_ intent: ProjectRunBatchStopIntent) {
         for executionID in intent.executionIDs {
             if intent.closesTerminals {
                 guard let session = sessions.values.first(where: {

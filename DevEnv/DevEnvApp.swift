@@ -219,7 +219,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
             let start = menuAction("启动未运行配置", symbol: "play", action: #selector(requestRunAll(_:)), id: workspace.id)
             start.isEnabled = runCoordinator.canStartBatch(in: configurations)
             menu.addItem(start)
-            let stop = menuAction(runCoordinator.canCloseBatch(in: configurations) ? "关闭所有终端" : "停止此工作区…",
+            let stop = menuAction(runCoordinator.canCloseBatch(in: configurations) ? "关闭所有终端" : "停止此工作区",
                                   symbol: "stop.fill", action: #selector(requestStopAll(_:)), id: workspace.id)
             stop.isEnabled = runCoordinator.canStopBatch(in: configurations)
             menu.addItem(stop)
@@ -410,8 +410,7 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func requestStopAll(_ sender: NSMenuItem) {
         let scope = runCoordinator.runConfigurations(workspaceID: sender.representedObject as? String)
         guard runCoordinator.canStopBatch(in: scope) else { return }
-        runCoordinator.requestBatchStop(in: scope, closeReadyTerminals: true)
-        handoffToRunsPage()
+        runCoordinator.stopBatch(in: scope, closeReadyTerminals: true)
     }
 
     private func handoffToRunsPage() {
