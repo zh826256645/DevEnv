@@ -272,6 +272,18 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         statusMenu.minimumWidth = menu.minimumWidth
         statusMenu.font = menu.font
         statusMenu.autoenablesItems = false
+        if #available(macOS 27.0, *) {
+            showMenuImages(in: statusMenu)
+        }
+    }
+
+    @available(macOS 27.0, *)
+    private func showMenuImages(in menu: NSMenu) {
+        for item in menu.items {
+            // Access the macOS 27 property at runtime so the pinned Xcode 26 SDK can still compile this app.
+            if item.image != nil { item.setValue(1, forKey: "preferredImageVisibility") }
+            if let submenu = item.submenu { showMenuImages(in: submenu) }
+        }
     }
 
     @objc private func selectWorkspaceButton(_ sender: NSButton) {

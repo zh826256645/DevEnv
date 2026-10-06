@@ -908,6 +908,47 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertFalse(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区停止")?.isEnabled ?? true)
     }
 
+    func testStatusMenuImagesStayVisibleOnMacOS27AcrossSessionStates() throws {
+        guard #available(macOS 27.0, *) else { throw XCTSkip("Requires macOS 27 menu image visibility") }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let model = ProjectsViewModel(store: ProjectRecordStore(fileURL: directory.appendingPathComponent("records.json")))
+        let configuration = try XCTUnwrap(model.createRunConfiguration(
+            name: "Web", command: "pnpm dev", workingDirectory: directory.path
+        ))
+        let factory = FakeProjectRunEngineFactory()
+        let coordinator = ProjectRunCoordinator(projectsModel: model, makeEngine: factory.makeEngine,
+            shellProvider: FakeProjectRunShellProvider(path: "/bin/zsh"), scheduler: FakeProjectRunScheduler())
+        let delegate = DevEnvAppDelegate(projectsModel: model, runCoordinator: coordinator)
+
+        func checkMenuImages() throws {
+            delegate.rebuildStatusMenu()
+            let summary = try XCTUnwrap(delegate.statusMenu.items.first { $0.title.hasSuffix("个运行中") })
+            XCTAssertNotNil(summary.image)
+            let configurationItem = try XCTUnwrap(delegate.statusMenu.items.first {
+                $0.representedObject as? String == configuration.id && $0.submenu != nil
+            })
+            XCTAssertNotNil(configurationItem.image)
+            var menus = [delegate.statusMenu]
+            while let menu = menus.popLast() {
+                for item in menu.items {
+                    if item.image != nil {
+                        XCTAssertEqual(item.value(forKey: "preferredImageVisibility") as? Int, 1,
+                                       "Hidden menu image: \(item.title)")
+                    }
+                    if let submenu = item.submenu { menus.append(submenu) }
+                }
+            }
+        }
+
+        try checkMenuImages()
+        XCTAssertEqual(coordinator.run(configuration), .started)
+        try checkMenuImages()
+        factory.engines[0].prompt(exitCode: 0)
+        try checkMenuImages()
+    }
+
     func testNativeStatusMenuBoundsLongCommandsAndScopesWorkspaceControls() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
