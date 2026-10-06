@@ -1034,13 +1034,6 @@ struct ContentView: View {
         )
     }
 
-    private var isConfirmingStopAll: Binding<Bool> {
-        Binding(
-            get: { runCoordinator.pendingBatchStopIntent != nil },
-            set: { if !$0 { runCoordinator.cancelBatchStop() } }
-        )
-    }
-
     private func updateRefreshActivity() {
         let wasUsingForegroundInterval = usesForegroundRefreshInterval
         usesForegroundRefreshInterval = scenePhase == .active
@@ -1628,20 +1621,6 @@ struct ContentView: View {
                 selectedRunConfigurationID = visibleRunConfigurations.first?.id
             }
         }
-        .alert(
-            runCoordinator.pendingBatchStopIntent?.closesTerminals == true ? "关闭全部就绪终端？" : "停止全部活动会话？",
-            isPresented: isConfirmingStopAll,
-            presenting: runCoordinator.pendingBatchStopIntent
-        ) { intent in
-            Button("取消", role: .cancel) { runCoordinator.cancelBatchStop() }
-            Button(intent.closesTerminals ? "全部关闭" : "全部停止", role: .destructive) { runCoordinator.confirmBatchStop() }
-        } message: { intent in
-            if intent.closesTerminals {
-                Text("将关闭 \(intent.executionIDs.count) 个就绪终端；运行配置将保留。")
-            } else {
-                Text("将向 \(intent.executionIDs.count) 个活动会话发送 Ctrl+C，并取消等待中的重启；终端会话将保留。")
-            }
-        }
     }
 
     private func runStorageErrorView(_ error: String) -> some View {
@@ -1709,7 +1688,7 @@ struct ContentView: View {
     }
 
     private func requestStopAll() {
-        runCoordinator.requestBatchStop(in: visibleRunConfigurations, closeReadyTerminals: true)
+        runCoordinator.stopBatch(in: visibleRunConfigurations, closeReadyTerminals: true)
     }
 
     private func selectFirstRunConfigurationIfNeeded() {
