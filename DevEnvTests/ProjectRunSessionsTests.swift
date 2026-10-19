@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Darwin
 import SwiftTerm
 import SwiftUI
@@ -1361,19 +1362,108 @@ final class ProjectRunSessionsTests: XCTestCase {
         XCTAssertTrue(appDelegate.statusMenu.item(withTitle: "全局操作")?.submenu?.item(withTitle: "全部工作区启动")?.isEnabled ?? false)
     }
 
-    func testReopenedMainWindowUsesFullSizeHiddenTitleBar() {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
-            backing: .buffered,
-            defer: false
-        )
+    func testLaunchWaitsForSwiftUIInsteadOfCreatingAFallbackWindow() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [])
+        let delegate = DevEnvAppDelegate(projectsModel: fixture.projectsModel, runCoordinator: fixture.coordinator)
+        let existingWindows = Set(NSApplication.shared.windows.filter { $0.styleMask.contains(.titled) }.map(ObjectIdentifier.init))
+        let activationPolicy = NSApplication.shared.activationPolicy()
+        defer {
+            if let item = delegate.statusItem { NSStatusBar.system.removeStatusItem(item) }
+            for window in NSApplication.shared.windows where window.styleMask.contains(.titled) && !existingWindows.contains(ObjectIdentifier(window)) {
+                window.close()
+            }
+            NSApplication.shared.setActivationPolicy(activationPolicy)
+        }
 
-        DevEnvAppDelegate.configureMainWindow(window)
+        delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
 
-        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
-        XCTAssertTrue(window.titlebarAppearsTransparent)
-        XCTAssertEqual(window.titleVisibility, .hidden)
+        XCTAssertTrue(NSApplication.shared.windows.filter { $0.styleMask.contains(.titled) }.allSatisfy { existingWindows.contains(ObjectIdentifier($0)) },
+                      "启动必须等待 SwiftUI 主窗口，不能抢先创建备用窗口")
+    }
+
+    func testLaunchDockAndStatusMenuUseTheSameMainWindowOpener() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [])
+        let delegate = DevEnvAppDelegate(projectsModel: fixture.projectsModel, runCoordinator: fixture.coordinator)
+        let activationPolicy = NSApplication.shared.activationPolicy()
+        defer {
+            if let item = delegate.statusItem { NSStatusBar.system.removeStatusItem(item) }
+            NSApplication.shared.setActivationPolicy(activationPolicy)
+        }
+        var openCount = 0
+        delegate.connectMainWindow { openCount += 1 }
+
+        delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertEqual(openCount, 1)
+
+        XCTAssertFalse(delegate.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: true))
+        XCTAssertEqual(openCount, 2, "Dock 必须唤起同一个场景，并阻止默认重开处理")
+        XCTAssertFalse(delegate.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: false))
+        XCTAssertEqual(openCount, 3)
+
+        let openItem = try XCTUnwrap(delegate.statusMenu.item(withTitle: "打开 DevEnv"))
+        delegate.statusMenu.performActionForItem(at: delegate.statusMenu.index(of: openItem))
+        XCTAssertEqual(openCount, 4, "菜单栏必须复用相同的主窗口入口")
+    }
+
+    func testMainWindowNavigationWaitsForInitialPresentationAndReopen() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try ProjectRunTestFixture(directory: directory, configurations: [], projectRoots: [])
+        let delegate = DevEnvAppDelegate(projectsModel: fixture.projectsModel, runCoordinator: fixture.coordinator)
+        let activationPolicy = NSApplication.shared.activationPolicy()
+        defer { NSApplication.shared.setActivationPolicy(activationPolicy) }
+        var notifications: [Notification] = []
+        let observer = NotificationCenter.default.publisher(for: .devEnvStatusBarAction)
+            .filter { $0.userInfo?["configurationID"] as? String == "window-regression" }
+            .sink { notifications.append($0) }
+        defer { observer.cancel() }
+        var openCount = 0
+
+        delegate.openMainWindow(configurationID: "window-regression", detailTab: "详情")
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertTrue(notifications.isEmpty, "首次显示前不能发送会丢失的导航通知")
+
+        delegate.connectMainWindow { openCount += 1 }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertEqual(notifications.count, 1)
+        XCTAssertEqual(notifications.first?.userInfo?["detailTab"] as? String, "详情")
+        XCTAssertEqual(openCount, 0, "首次注册时窗口已经存在，无需再次开窗")
+
+        notifications.removeAll()
+        delegate.disconnectMainWindow()
+        delegate.openMainWindow(configurationID: "window-regression", detailTab: "终端")
+        XCTAssertEqual(openCount, 1, "关闭后通过保留的 SwiftUI 入口重开主窗口")
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertTrue(notifications.isEmpty)
+
+        delegate.connectMainWindow { openCount += 1 }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertEqual(notifications.count, 1)
+        XCTAssertEqual(notifications.first?.userInfo?["detailTab"] as? String, "终端")
+
+        delegate.connectMainWindow { openCount += 1 }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertEqual(notifications.count, 1, "重复出现时不能再次发送已经交付的请求")
     }
 
     func testPhysicalMemoryReadsCurrentProcess() throws {

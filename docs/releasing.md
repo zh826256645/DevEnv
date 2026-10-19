@@ -22,6 +22,12 @@ macOS 27 新增的菜单图标显示属性通过运行时访问，使旧 SDK 可
 
 v0.2.3 已于 2026-10-06 发布为 Prerelease。annotated Tag 指向 master 合并提交 `f60419669599dd26369511cc1270b13592ec2212`（[PR #103](https://github.com/zh826256645/DevEnv/pull/103)），候选和合并提交分别通过四组发布契约、285 项 XCTest 和 Release 构建；正式 DMG 与 Draft 附件回下载复验全部通过。DMG SHA-256 为 `36b6bd9bdd93bfe7329dadbbd210bfd8deda96ce1ed0c6ca35aa60b45a6df001`。[Release](https://github.com/zh826256645/DevEnv/releases/tag/v0.2.3) 提供安装包及校验文件；本地证据保留至少 90 天，已恢复 develop 与原有未跟踪文件。
 
+### v0.2.4（Build 10）本地构建与发布例外
+
+2026-10-19，仓库所有者明确要求提交主窗口修复、推送、创建并合并 PR，再使用本地构建流程发版。本次使用当前本机 Xcode `27.1 (27A9275)`，以四组发布契约、完整 XCTest、arm64 Release 构建与最终 DMG 验收替代 Hosted CI；该工具链例外仅适用于本次本地发布。GitHub Actions 与专用 Runner 的 Xcode `26.6 (17F113)` 锁定值保持不变，未执行或失败的 CI 不记为通过。
+
+正式产物必须从 `develop → master` 的精确合并提交重新验证和构建。依赖锁与 schema 8 不变，保留源码 SHA、工具链、日志、dSYM、安装包与校验文件至少 90 天。验证后创建不可移动 annotated Tag，上传 Draft Prerelease，下载附件复验后按本次发版授权发布。
+
 1. 在 `develop` 更新版本、Build、工作流锁定值和 Release Notes，提交并推送。
 2. 运行四组 `scripts/tests/*-contract-tests.sh` 发布契约测试及完整 XCTest，记录候选 SHA。只有已明确授权使用本地验证替代 Hosted CI，且本地验证通过时，才允许合并 `develop → master` Release PR；在 PR 记录替代原因和证据，不修改失败 CI 的结果。
 3. 取得远端 `master` 完整 SHA，在当前检出目录切换到该精确提交（可 detached HEAD），确认工作区干净。重新执行全部契约测试、XCTest 和下列 Release 构建；依赖锁文件不得改变。所有正式产物必须来自这个 SHA。

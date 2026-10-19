@@ -19,8 +19,15 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
     private(set) var statusMenu = NSMenu()
     private var cancellables: Set<AnyCancellable> = []
     private var windowObservers: [NSObjectProtocol] = []
-    private var fallbackWindow: NSWindow?
+    private var mainWindowOpener: (() -> Void)?
+    private var isMainWindowReady = false
+    private var pendingMainWindowRequest: MainWindowRequest?
     private let statusBarRunPageHandoff: (() -> Void)?
+
+    private struct MainWindowRequest {
+        var configurationID: String?
+        var detailTab: String?
+    }
 
     override convenience init() {
         let projectsModel = ProjectsViewModel()
@@ -60,8 +67,8 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
-        if !flag { openMainWindow() }
-        return true
+        openMainWindow()
+        return false
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -113,49 +120,33 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.setActivationPolicy(hasMainWindow ? .regular : .accessory)
     }
 
+    func connectMainWindow(open: @escaping () -> Void) {
+        mainWindowOpener = open
+        isMainWindowReady = true
+        deliverPendingMainWindowRequest()
+    }
+
+    func disconnectMainWindow() {
+        isMainWindowReady = false
+    }
+
     func openMainWindow(configurationID: String? = nil, detailTab: String? = nil) {
+        pendingMainWindowRequest = MainWindowRequest(configurationID: configurationID, detailTab: detailTab)
         NSApplication.shared.setActivationPolicy(.regular)
-        if let window = mainWindow {
-            window.makeKeyAndOrderFront(nil)
-        } else if let fallbackWindow {
-            fallbackWindow.makeKeyAndOrderFront(nil)
-        } else {
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
-                styleMask: [.titled, .closable, .resizable, .miniaturizable],
-                backing: .buffered,
-                defer: false
-            )
-            Self.configureMainWindow(window)
-            window.contentViewController = NSHostingController(rootView: ContentView(
-                projectsModel: projectsModel,
-                runCoordinator: runCoordinator
-            ))
-            fallbackWindow = window
-            window.center()
-            window.makeKeyAndOrderFront(nil)
-        }
+        // Only the SwiftUI Window scene creates windows, including during launch and reopen.
+        mainWindowOpener?()
         NSApplication.shared.activate(ignoringOtherApps: true)
+        deliverPendingMainWindowRequest()
+    }
+
+    private func deliverPendingMainWindowRequest() {
+        guard isMainWindowReady, let request = pendingMainWindowRequest else { return }
+        pendingMainWindowRequest = nil
         var userInfo: [AnyHashable: Any] = [:]
-        if let configurationID { userInfo["configurationID"] = configurationID }
-        if let detailTab { userInfo["detailTab"] = detailTab }
+        if let configurationID = request.configurationID { userInfo["configurationID"] = configurationID }
+        if let detailTab = request.detailTab { userInfo["detailTab"] = detailTab }
         let notificationInfo = userInfo.isEmpty ? nil : userInfo
         postStatusBarAction(.open, userInfo: notificationInfo)
-    }
-
-    static func configureMainWindow(_ window: NSWindow) {
-        window.styleMask.insert(.fullSizeContentView)
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.titlebarSeparatorStyle = .none
-        window.title = "DevEnv"
-        window.isReleasedWhenClosed = false
-    }
-
-    private var mainWindow: NSWindow? {
-        NSApplication.shared.windows.first {
-            $0.styleMask.contains(.titled) && ($0.isVisible || $0.isMiniaturized)
-        }
     }
 
     func rebuildStatusMenu() {
@@ -456,16 +447,32 @@ final class DevEnvAppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct DevEnvApp: App {
+    static let mainWindowID = "main"
+
     @NSApplicationDelegateAdaptor(DevEnvAppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            ContentView(
-                projectsModel: appDelegate.projectsModel,
-                runCoordinator: appDelegate.runCoordinator
-            )
+        Window("DevEnv", id: Self.mainWindowID) {
+            DevEnvMainWindowContent(appDelegate: appDelegate)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1280, height: 800)
+    }
+}
+
+private struct DevEnvMainWindowContent: View {
+    @Environment(\.openWindow) private var openWindow
+    let appDelegate: DevEnvAppDelegate
+
+    var body: some View {
+        ContentView(projectsModel: appDelegate.projectsModel, runCoordinator: appDelegate.runCoordinator)
+            .onAppear {
+                appDelegate.connectMainWindow { [openWindow] in
+                    openWindow(id: DevEnvApp.mainWindowID)
+                }
+            }
+            .onDisappear {
+                appDelegate.disconnectMainWindow()
+            }
     }
 }
