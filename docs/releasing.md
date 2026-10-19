@@ -1,6 +1,6 @@
 # DevEnv 发版流程
 
-状态：发版自动化已实现；最新已发布版本为 `v0.2.3` Private Preview（Build `9`）。
+状态：发版自动化已实现；最新已发布版本为 `v0.2.4` Private Preview（Build `10`）。
 
 ## 本地发布通道（自 v0.1.1 起）
 
@@ -27,6 +27,8 @@ v0.2.3 已于 2026-10-06 发布为 Prerelease。annotated Tag 指向 master 合�
 2026-10-19，仓库所有者明确要求提交主窗口修复、推送、创建并合并 PR，再使用本地构建流程发版。本次使用当前本机 Xcode `27.1 (27A9275)`，以四组发布契约、完整 XCTest、arm64 Release 构建与最终 DMG 验收替代 Hosted CI；该工具链例外仅适用于本次本地发布。GitHub Actions 与专用 Runner 的 Xcode `26.6 (17F113)` 锁定值保持不变，未执行或失败的 CI 不记为通过。
 
 正式产物必须从 `develop → master` 的精确合并提交重新验证和构建。依赖锁与 schema 8 不变，保留源码 SHA、工具链、日志、dSYM、安装包与校验文件至少 90 天。验证后创建不可移动 annotated Tag，上传 Draft Prerelease，下载附件复验后按本次发版授权发布。
+
+v0.2.4 已于 2026-10-19 发布为 Prerelease。annotated Tag 指向 master 合并提交 `84320283942a922f84507c314dd916137820d638`（[PR #106](https://github.com/zh826256645/DevEnv/pull/106)）；候选和精确合并提交分别通过四组发布契约、287 项 XCTest 与 arm64 Release 构建。正式 DMG 与 Draft 附件回下载复验全部通过。DMG SHA-256 为 `599c2456aad9a60ec3997a80eb64a05b9e85fc44916ec780b81432d8c408e8dd`。[Release](https://github.com/zh826256645/DevEnv/releases/tag/v0.2.4) 提供安装包及校验文件；本地保留产物、dSYM 与完整验收证据至少 90 天。
 
 1. 在 `develop` 更新版本、Build、工作流锁定值和 Release Notes，提交并推送。
 2. 运行四组 `scripts/tests/*-contract-tests.sh` 发布契约测试及完整 XCTest，记录候选 SHA。只有已明确授权使用本地验证替代 Hosted CI，且本地验证通过时，才允许合并 `develop → master` Release PR；在 PR 记录替代原因和证据，不修改失败 CI 的结果。

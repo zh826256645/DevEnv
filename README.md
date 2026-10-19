@@ -26,23 +26,23 @@ DevEnv 使用你本来就在使用的 Shell 和开发工具。项目依赖仍需
 
 ## 下载与安装
 
-可下载的预览版本为 [`v0.2.3` Private Preview（Build 9）](https://github.com/zh826256645/DevEnv/releases/tag/v0.2.3)，面向受邀测试者，尚不属于稳定正式版。
+可下载的预览版本为 [`v0.2.4` Private Preview（Build 10）](https://github.com/zh826256645/DevEnv/releases/tag/v0.2.4)，面向受邀测试者，尚不属于稳定正式版。
 
 发布版要求 **macOS 15.0 及以上、Apple Silicon（arm64）**，不包含 Intel 构建。
 
-1. 从 [v0.2.3 Release](https://github.com/zh826256645/DevEnv/releases/tag/v0.2.3) 下载 `DevEnv-0.2.3-arm64.dmg` 和 `DevEnv-0.2.3-arm64.dmg.sha256`。
+1. 从 [v0.2.4 Release](https://github.com/zh826256645/DevEnv/releases/tag/v0.2.4) 下载 `DevEnv-0.2.4-arm64.dmg` 和 `DevEnv-0.2.4-arm64.dmg.sha256`。
 2. 将两个文件放在同一目录，在该目录打开终端并执行：
 
    ```bash
-   shasum -a 256 -c DevEnv-0.2.3-arm64.dmg.sha256
+   shasum -a 256 -c DevEnv-0.2.4-arm64.dmg.sha256
    ```
 
-   确认输出 `DevEnv-0.2.3-arm64.dmg: OK` 后再安装。
+   确认输出 `DevEnv-0.2.4-arm64.dmg: OK` 后再安装。
 3. 完全退出旧版 DevEnv，打开 DMG，将 `DevEnv.app` 拖入 `Applications`，然后启动。
 
 发布版使用 ad-hoc 签名，未使用 Developer ID 签名，也未经 Apple 公证。首次打开若被 Gatekeeper 阻止，请先尝试打开，再到“系统设置 → 隐私与安全性”确认打开；不要全局关闭 Gatekeeper 或递归移除隔离属性。
 
-目前通过 Release 手动下载更新，不提供自动更新。升级前建议备份 App 数据，并结束需要保留的工作后完全退出旧版；运行会话和终端输出不会跨 App 进程恢复。版本变更与已知限制见 [v0.2.3 Release Notes](docs/releases/v0.2.3.md)。
+目前通过 Release 手动下载更新，不提供自动更新。升级前建议备份 App 数据，并结束需要保留的工作后完全退出旧版；运行会话和终端输出不会跨 App 进程恢复。版本变更与已知限制见 [v0.2.4 Release Notes](docs/releases/v0.2.4.md)。
 
 ## 第一次运行
 
